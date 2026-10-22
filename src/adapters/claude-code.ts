@@ -35,5 +35,6 @@ export function createClaudeCodeSource(root: string = CLAUDE_CODE_ROOT): Source 
       'shell-snapshots/**',
     ],
     mapToVaultPath: (absPath) => join(CLAUDE_CODE_ID, relative(root, absPath)),
+    sessionGlob: 'projects/**/*.jsonl',
   };
 }

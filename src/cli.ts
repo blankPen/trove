@@ -72,7 +72,10 @@ function parseValue(raw: string): unknown {
 function formatStatus(r: StatusReport): string {
   const lines: string[] = [pc.bold(`设备 ${r.deviceName} (${r.deviceId})`), '', pc.bold('本地归档')];
   for (const d of r.devices) {
-    lines.push(`  ${d.name}  ${pc.green(`${d.sessionCount} 个会话`)} · ${humanSize(d.bytes)}`);
+    lines.push(`  ${d.name}`);
+    for (const h of d.harnesses) {
+      lines.push(`    ${h.displayName}  ${pc.green(`${h.sessionCount} 个会话`)} · ${humanSize(h.bytes)}`);
+    }
   }
   lines.push('');
   lines.push(
@@ -86,11 +89,14 @@ function formatStatus(r: StatusReport): string {
 async function cmdStatus(paths: ReturnType<typeof trovePaths>, out: (l: string) => void): Promise<void> {
   const config = await loadConfig(paths.config);
   const manifest = await loadManifest(paths.manifest);
+  // v1 仅 Claude Code;codex/doubao adapter 落地(设计阶段 5)后再追加。
+  const cc = createClaudeCodeSource();
   const report = await computeStatus({
     vaultRoot: paths.vault,
     deviceId: config.device.id,
     deviceName: config.device.name,
     manifest,
+    harnesses: [{ id: cc.id, displayName: cc.displayName, sessionGlob: cc.sessionGlob }],
   });
   out(formatStatus(report));
 }

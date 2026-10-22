@@ -15,6 +15,8 @@ export interface Source {
   exclusions: string[];
   /** 把源文件绝对路径映射为 vault 相对路径(以 agent id 为前缀,不含设备分区) */
   mapToVaultPath: (absPath: string) => string;
+  /** 判定"会话"文件的 vault 相对 glob(相对 agent id 前缀),供 status 计数 */
+  sessionGlob: string;
 }
 
 /** 扫描产出的一个待归档文件。 */

@@ -481,8 +481,10 @@ trove sync                    pull → push
 ```
 设备 pz-macbook (a3f2c81e)                 上次同步 2 分钟前 ✓成功
 
-本地归档  187 个会话 · 106 MB   [pz-macbook]
-          312 个会话 · 31 MB    [work-mac]
+本地归档  [pz-macbook]
+          claude-code  187 个会话 · 106 MB
+          [work-mac]
+          claude-code  312 个会话 · 31 MB
 远端      499 个会话 · 142 MB   [来自 2 台设备]
 
 待同步 3 个文件 · 1.2 MB

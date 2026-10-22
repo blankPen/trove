@@ -1,14 +1,28 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
+import { minimatch } from 'minimatch';
 import type { Manifest } from './core/types.js';
 import { computeFingerprint } from './core/fingerprint.js';
 import { plan } from './core/planner.js';
 
+/** 一个 harness 的会话计数规则(id + 会话 glob)。由 adapter 的 Source 派生。 */
+export interface HarnessSpec {
+  id: string;
+  displayName: string;
+  sessionGlob: string;
+}
+
+export interface HarnessStatus {
+  id: string;
+  displayName: string;
+  sessionCount: number;
+  bytes: number;
+}
+
 export interface DeviceStatus {
   id: string;
   name: string;
-  sessionCount: number;
-  bytes: number;
+  harnesses: HarnessStatus[];
 }
 
 export interface PendingItem {
@@ -31,6 +45,7 @@ export interface StatusOptions {
   deviceId: string;
   deviceName: string;
   manifest: Manifest;
+  harnesses: HarnessSpec[];
 }
 
 /** 递归列出某目录下所有文件的绝对路径;目录不存在返回空。 */
@@ -58,7 +73,7 @@ async function readMetaName(metaPath: string, fallback: string): Promise<string>
 
 /**
  * 计算 trove 状态(设计 §10.4)。
- * 会话数 = 各设备 claude-code/projects/**\/*.jsonl 的数量与字节数;
+ * 会话数按 harness 分组计数(每个 harness 用其 sessionGlob 判定会话文件);
  * 待同步 = 本设备全部文件经 planner 判定为 full 的条目。
  */
 export async function computeStatus(opts: StatusOptions): Promise<StatusReport> {
@@ -80,13 +95,24 @@ export async function computeStatus(opts: StatusOptions): Promise<StatusReport> 
     const name =
       id === deviceId ? deviceName : await readMetaName(join(deviceDir, 'meta.json'), id);
 
-    const sessionFiles = (await listFiles(join(deviceDir, 'claude-code', 'projects'))).filter(
-      (p) => p.endsWith('.jsonl'),
-    );
-    let bytes = 0;
-    for (const f of sessionFiles) bytes += (await stat(f)).size;
+    const harnesses: HarnessStatus[] = [];
+    for (const h of opts.harnesses) {
+      const dir = join(deviceDir, h.id);
+      const sessionFiles = (await listFiles(dir)).filter((p) =>
+        minimatch(relative(dir, p).split(sep).join('/'), h.sessionGlob),
+      );
+      if (sessionFiles.length === 0) continue; // 该 harness 无会话则不展示
+      let bytes = 0;
+      for (const f of sessionFiles) bytes += (await stat(f)).size;
+      harnesses.push({
+        id: h.id,
+        displayName: h.displayName,
+        sessionCount: sessionFiles.length,
+        bytes,
+      });
+    }
 
-    devices.push({ id, name, sessionCount: sessionFiles.length, bytes });
+    devices.push({ id, name, harnesses });
   }
 
   const myDir = join(devicesRoot, deviceId);

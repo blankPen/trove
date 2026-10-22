@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import { computeStatus } from '../src/status.js';
 import type { Manifest } from '../src/core/types.js';
 
+const HARNESSES = [
+  { id: 'claude-code', displayName: 'Claude Code', sessionGlob: 'projects/**/*.jsonl' },
+];
+
 describe('computeStatus(设计 §10.4)', () => {
   let vaultRoot: string;
   const deviceId = 'a3f2c81e';
@@ -35,23 +39,47 @@ describe('computeStatus(设计 §10.4)', () => {
       deviceId,
       deviceName: 'pz-macbook',
       manifest: {},
+      harnesses: HARNESSES,
     });
 
     const mine = s.devices.find((d) => d.id === deviceId)!;
     expect(mine.name).toBe('pz-macbook');
-    expect(mine.sessionCount).toBe(2);
-    expect(mine.bytes).toBe(300); // 100 + 200,不含 history.jsonl
+    expect(mine.harnesses).toEqual([
+      { id: 'claude-code', displayName: 'Claude Code', sessionCount: 2, bytes: 300 },
+    ]);
 
     const other = s.devices.find((d) => d.id === 'b91d4a07')!;
     expect(other.name).toBe('work-mac');
-    expect(other.sessionCount).toBe(1);
-    expect(other.bytes).toBe(300);
+    expect(other.harnesses).toEqual([
+      { id: 'claude-code', displayName: 'Claude Code', sessionCount: 1, bytes: 300 },
+    ]);
+  });
+
+  it('按 harness 区分会话(claude-code 与 codex 分开计数)', async () => {
+    await write(`devices/${deviceId}/claude-code/projects/-p/a.jsonl`, 'a'.repeat(100));
+    await write(`devices/${deviceId}/codex/sessions/2026/10/22/s.jsonl`, 'c'.repeat(50));
+
+    const s = await computeStatus({
+      vaultRoot,
+      deviceId,
+      deviceName: 'me',
+      manifest: {},
+      harnesses: [
+        { id: 'claude-code', displayName: 'Claude Code', sessionGlob: 'projects/**/*.jsonl' },
+        { id: 'codex', displayName: 'Codex', sessionGlob: 'sessions/**/*.jsonl' },
+      ],
+    });
+
+    expect(s.devices.find((d) => d.id === deviceId)!.harnesses).toEqual([
+      { id: 'claude-code', displayName: 'Claude Code', sessionCount: 1, bytes: 100 },
+      { id: 'codex', displayName: 'Codex', sessionCount: 1, bytes: 50 },
+    ]);
   });
 
   it('meta.json 缺失时回退用目录名作为设备名', async () => {
     await write('devices/b91d4a07/claude-code/projects/-q/c.jsonl', 'x');
 
-    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest: {} });
+    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest: {}, harnesses: HARNESSES });
     expect(s.devices.find((d) => d.id === 'b91d4a07')!.name).toBe('b91d4a07');
   });
 
@@ -59,7 +87,7 @@ describe('computeStatus(设计 §10.4)', () => {
     await write(`devices/${deviceId}/claude-code/projects/-p/a.jsonl`, 'aaa');
     await write(`devices/${deviceId}/claude-code/projects/-p/b.jsonl`, 'bbbb');
 
-    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest: {} });
+    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest: {}, harnesses: HARNESSES });
     expect(s.pendingCount).toBe(2);
     expect(s.pendingBytes).toBe(3 + 4);
   });
@@ -68,7 +96,6 @@ describe('computeStatus(设计 §10.4)', () => {
     await write(`devices/${deviceId}/claude-code/projects/-p/a.jsonl`, 'aaa');
     await write(`devices/${deviceId}/claude-code/projects/-p/b.jsonl`, 'bbbb');
 
-    // 构造 a.jsonl 的 manifest 指纹("aaa" 的 size=3,headHash 需与实际一致)
     const { computeFingerprint } = await import('../src/core/fingerprint.js');
     const fp = await computeFingerprint(
       join(vaultRoot, 'devices', deviceId, 'claude-code', 'projects', '-p', 'a.jsonl'),
@@ -82,8 +109,8 @@ describe('computeStatus(设计 §10.4)', () => {
       },
     };
 
-    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest });
-    expect(s.pendingCount).toBe(1); // 只有 b.jsonl
+    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest, harnesses: HARNESSES });
+    expect(s.pendingCount).toBe(1);
     expect(s.pending[0]!.path).toBe('claude-code/projects/-p/b.jsonl');
     expect(s.pending[0]!.reason).toBe('new');
   });

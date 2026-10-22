@@ -28,11 +28,13 @@ Trove 的目标:**把这些资产可靠地、增量地归档到一个受信任�
 
 | 不做 | 原因 |
 |---|---|
+| **Codex / 豆包 adapter(v1 不实现)** | 先把单个 adapter 端到端跑通,验证架构成立后再横向扩展。见 §16 的已知缺口 |
 | 对话归一化存储(SQLite / 统一 schema) | 归一化模型尚未想清楚。先做保真归档,以后随时能从归档重建 |
 | `trove sessions` 命令(会话列表/搜索) | 依赖归一化模型。等模型定了再做,避免造一层到时候要推翻的抽象 |
 | 全文索引 / 语义搜索 | 属于消费层,用户明确表示先不考虑 |
 | LLM 提炼流水线 | 同上 |
 | MCP server(让 agent 主动检索) | 同上 |
+| skills / config 的「应用到本机」能力 | 只归档不应用。换机后需手动复制到原生位置 —— 这是已知代价 |
 | 任何形式的删除 | 见原则 3 |
 | vault 结构重组(按项目/时间统一编排) | 会导致多设备文件重排,必然冲突 |
 
@@ -151,12 +153,12 @@ WebDAV 密码存 **macOS Keychain**,`config.json` 只存引用。凭证类文件
 ```
 各 agent 原始目录                  本地 vault                  远端 vault
 ──────────────────────────  ─────────────────────  ─────────────────────
-~/.claude/projects/*.jsonl  ┐              ┌── push(增量 + 指纹校验)
-~/.codex/sessions/**/*.jsonl├── collect ──→ │
-豆包/(禁用中)                ┘              └───→ 统一档案库
+~/.claude/projects/*.jsonl  ┐                     ┌── push(增量 + 指纹校验)
+~/.codex/…(v1 不启用)        ├── collect ──→ devices/{我}/  ──→│
+豆包/(v1 不启用)              ┘                     └───→ 统一档案库
                                 ↑
-                         pull ↓(先于 push)
-                 ~/.trove/inbox/{device_id}/
+                         pull ↓(先于 push,只拉别人)
+                      devices/{设备B}/  ←────┘
 ```
 
 **为什么拆成两级**:
@@ -171,20 +173,21 @@ WebDAV 密码存 **macOS Keychain**,`config.json` 只存引用。凭证类文件
 
 ### 6.1 本地 `~/.trove/`
 
+**单一镜像库,按设备分区。** 本地结构与远端完全同构 —— push/pull 是同一映射的正反两面。
+
 ```
 ~/.trove/
 ├── config.json               配置(设备身份、WebDAV 引用、agent 开关)
 │
-├── vault/                    ★ 本机 agent 的累积归档(只增)
-│   ├── claude-code/projects/{转义项目路径}/{uuid}.jsonl
-│   ├── codex/sessions/{2026}/{07}/{31}/rollout-*.jsonl
-│   ├── doubao/               (experimental,默认空)
+├── vault/                    ★ 单一镜像库(只增)
+│   ├── devices/
+│   │   ├── {我的device_id}/  ← collect 写入(本机 agent)
+│   │   │   ├── claude-code/projects/{转义项目路径}/{uuid}.jsonl
+│   │   │   └── codex/…                (后续 adapter)
+│   │   ├── {设备B}/           ← pull 写入
+│   │   └── {设备C}/           ← pull 写入
 │   └── .trove/
-│       ├── manifest.json     本设备的推送状态(仅本地,不进远端)
-│       └── devices.json      device_id ↔ name 映射
-│
-├── inbox/                    ★ 从远端拉来的其他设备内容(只增)
-│   └── {device_id}/... 与 vault 同构,按设备分区
+│       └── manifest.json     push 状态(仅本地,不进远端)
 │
 ├── logs/
 │   ├── daemon.log            进程日志(滚动)
@@ -193,11 +196,18 @@ WebDAV 密码存 **macOS Keychain**,`config.json` 只存引用。凭证类文件
 └── tmp/                      上传拼接临时文件(完成即删)
 ```
 
-**v1 不需要索引层**:`trove status` 显示会话数只需数 `.jsonl` 文件数量,项目分布只需反解目录名(纯字符串操作),均无需解析文件内容。
+**为什么合并原先的 vault / inbox 二元结构**:
+
+- 用户心智里只有一件事 ——「我的 AI 资产都在这儿」,不该被劈成两个目录
+- `status` 只报一个总数,不必分别汇总
+- 未来做检索层时不必合并两个数据源
+- **自冲突问题自然消失**:push 只推 `devices/{我}/`,pull 只拉 `devices/{别人}/`,不会把自己的内容重复存一份
+
+**v1 不需要索引层**:`trove status` 显示会话数只需数 `.jsonl` 数量,项目分布只需反解目录名(纯字符串操作),均无需解析文件内容。
 
 ### 6.2 vault 内部布局原则
 
-**保留各 agent 的原生结构,只加 agent 前缀。** 三个目的:
+**设备分区之下,保留各 agent 的原生结构,只加 agent 前缀。** 三个目的:
 
 - **保真** — collect 是复制,字节不变
 - **不冲突** — 项目路径转义天然含本机用户名,`-Users-pz-orca-trove` 与 `-Users-wang-orca-trove` 永不冲突
@@ -207,16 +217,20 @@ WebDAV 密码存 **macOS Keychain**,`config.json` 只存引用。凭证类文件
 
 ### 6.3 远端
 
+**与本地 §6.1 同构**(去掉了 manifest,它是纯本地的):
+
 ```
 /trove/
-├── devices.json              [{id, name, lastSeen}]
-├── a3f2c81e/                 ← 目录名用 device_id(不可变)
-│   ├── claude-code/projects/{转义项目路径}/{uuid}.jsonl
-│   └── codex/sessions/2026/07/31/rollout-*.jsonl
-└── b91d4a07/                 ← 另一台设备
+├── a3f2c81e/                      ← device_id(不可变)
+│   ├── meta.json                  ← {id, name, lastSeen}
+│   └── claude-code/projects/{转义项目路径}/{uuid}.jsonl
+└── b91d4a07/                      ← 另一台设备
+    └── ...
 ```
 
-**目录名用 `device_id` 而非 `device_name`**:后者用户会改,改名会产生新目录导致历史散落。id 一次生成永不变,显示时经 `devices.json` 转换为可读名。
+**目录名用 `device_id` 而非 `device_name`**:后者用户会改,改名会产生新目录导致历史散落。id 一次生成永不变,显示时读该设备自己的 `meta.json` 转成可读名。
+
+**每设备一个 `meta.json`,不使用全局 `devices.json`** —— 后者在多设备并发 push 时会因读-改-写竞态丢失条目,而它只用于存显示名,收益极低、风险明确。
 
 ---
 
@@ -227,13 +241,17 @@ WebDAV 密码存 **macOS Keychain**,`config.json` 只存引用。凭证类文件
 ```ts
 interface Fingerprint {
   size: number       // 字节数
-  mtime: number      // 修改时间(ms)
+  mtime: number      // 修改时间(ms)—— 仅用于本地缓存判定
   headHash: string   // 前 512 字节的 hash
-  tailHash: string   // 后 512 字节的 hash
 }
 ```
 
 `headHash` 是增量正确性的锚点 —— 它证明"远端已有内容确实是本地内容的前缀"。
+
+**字段取舍说明**:
+
+- **不含 `tailHash`** —— 原设计有,但没有任何判定规则用到它。size + headHash 已能判定全部情况(append 增量 / 指纹失效 / 远端截断)。YAGNI,删除。
+- **`mtime` 不可跨设备比较** —— 不同文件系统、不同机器的时钟。**`mtime` 只用于本地缓存加速,跨设备判定一律用 `size` + `headHash`。**
 
 ### 7.2 manifest
 
@@ -243,11 +261,10 @@ interface ManifestEntry {
   fingerprint: Fingerprint
   syncedSize: number     // 已确认同步到远端的字节数
   syncedAt: number
-  deviceId: string
 }
 ```
 
-**仅本地保存,per-device,不进远端。**
+**仅本地保存,per-device,不进远端。** 不含 `deviceId` 字段 —— manifest 本身就是单设备的,冗余。
 
 ### 7.3 为什么不需要同步 manifest
 
@@ -257,7 +274,7 @@ interface ManifestEntry {
 
 ```
 PROPFIND 深度遍历远端 → 全量文件列表
-   ↓ 对每个文件,查本地 inbox 是否存在且指纹一致
+   ↓ 对每个文件,查本地 vault/devices/{对方}/ 是否存在且指纹一致
    ├─ 一致   → 跳过
    └─ 缺失/不同 → 下载
 ```
@@ -269,6 +286,8 @@ PROPFIND 深度遍历远端 → 全量文件列表
 ## 8. adapter 设计
 
 ### 8.1 接口
+
+**v1 只实现 Claude Code 一个 adapter。** 接口本身仍按可插拔设计 —— 如果单 adapter 跑不通,做三个也只会得到三倍的烂摊子。先验证抽象成立,再横向扩展。
 
 adapter 是**纯声明式**的,不含任何同步逻辑:
 
@@ -283,9 +302,11 @@ interface Source {
 }
 ```
 
-接一个新 agent = 新增一个几十行的描述文件,**不改动任何同步逻辑**。
+接一个新 agent = 新增一个描述文件 + 一组 fixture 测试,**不改动任何同步逻辑**。
 
-### 8.2 内置白名单
+> **未来扩展的准入门槛**:新 adapter 必须先有 fixture 测试覆盖其白名单产出,才允许合并。否则一个错误的 glob 会静默漏备份,比不做更危险。
+
+### 8.2 内置白名单(v1:仅 Claude Code)
 
 **Claude Code** (`~/.claude`)
 
@@ -295,29 +316,22 @@ interface Source {
 | `history.jsonl` | ✅ 纳入(540K) |
 | `skills/**`, `CLAUDE.md`, `RTK.md` | ✅ 纳入 |
 | `plans/**`, `tasks/**`, `file-history/**` | ✅ 纳入 |
-| `settings.json` | ⚠️ 纳入但**逐字段脱敏**(可能含 API key) |
+| `settings.json` | ❌ **排除** |
 | `plugins/**` | ❌ 排除(1.2G,可由 marketplace 重新 install) |
 | `downloads/`, `telemetry/`, `paste-cache/`, `backups/`, `daemon.log`, `shell-snapshots/` | ❌ 排除 |
 
-**Codex** (`~/.codex`)
+**为什么 `settings.json` 直接排除而非脱敏**:
 
-| 路径 | 处理 |
-|---|---|
-| `sessions/**/*.jsonl` | ✅ 纳入(31M) |
-| `archived_sessions/**` | ✅ 纳入(2.4M) |
-| `skills/**`, `AGENTS.md` | ✅ 纳入 |
-| `auth.json` | ❌ **硬性排除 —— 凭证** |
-| `*.sqlite` / `*_wal` | ❌ 排除(195M+,运行中热文件,复制会撕裂) |
-| `plugins/**`, `computer-use/**` | ❌ 排除(398M) |
-| `logs/**`, `tmp/**`, `.tmp/**` | ❌ 排除 |
+脱敏就是改写,与原则 1(源文件零改写)直接冲突 —— 同一份数据上跑两套规则,迟早不一致。而这文件只有 7.3K,**排除的代价远小于一个可能泄密的例外**。换机后重新配一次即可。
 
-**豆包** (`~/Doubao`) — `experimental`,默认禁用,格式待验证。
+**Codex**(`~/.codex`)与**豆包**(`~/Doubao`):见 §16「已知资产缺口」,后续以 adapter 形式逐个加入。
 
 ### 8.3 凭证处理
 
-- `auth.json` 属于**代码级硬排除**,连本地 vault 都不落地
-- `settings.json` 若纳入,使用**声明式 JSON 脱敏规则**(如移除匹配 `/key|token|secret|password/i` 的字段),脱敏只作用于进入 vault 的副本,**源文件不动**
-- WebDAV 密码存 Keychain,通过系统 `security` 命令读写 —— **不引入 keytar**(原生模块会破坏 Bun 单文件编译)
+- WebDAV 密码存 **macOS Keychain**,通过系统 `security` 命令读写 —— **不引入 keytar**(原生模块会破坏 Bun 单文件编译)
+- `config.json` 只存 keychain 引用,不存明文
+- 凭证类文件属于**代码级硬排除**,连本地 vault 都不落地
+- v1 中 `settings.json` 直接排除,故当前无任何脱敏逻辑 —— **保持零例外**
 
 ---
 
@@ -430,8 +444,7 @@ WebDAV 的 Range PUT 支持不统一。`init` 的连通性探测会判定:
     "settleDelay": 30,        // 秒,文件静默多久才算写完
     "concurrency": 4,          // 并发上传数
     "minFileAge": 10,          // 秒
-    "pullTo": "~/.trove/inbox"
-  }
+      }
 }
 ```
 
@@ -451,28 +464,28 @@ trove sync                    pull → push
 
 ```
 ① SCAN    遍历本地白名单 → vault 文件列表 + 指纹
-② PULL    PROPFIND 深度遍历远端 → 与本地 inbox 比对 → 下载缺失/不同的
+② PULL    PROPFIND 深度遍历远端 → 跳过 devices/{我}/ → 与本地 vault/devices/{对方}/ 比对 → 下载缺失/不同的
 ③ PLAN    planner(纯函数):vault × manifest → push 操作计划
 ④ EXEC    并发上传;失败重试 3 次(指数退避);单文件失败不中断整轮
 ⑤ REPORT  合并 pull 与 push 结果:下载/上传/跳过/失败各多少
 ```
 
-> 注意 ② 与 ③ 是两套独立的判定:pull 用「远端列表 × 本地 inbox 现状」,push 用「vault × manifest」。二者都用指纹比对,但不共享计划。
+> ② 与 ③ 是两套独立判定:pull 用「远端列表 × 本地现状」,push 用「本地 vault × manifest」。二者都用指纹比对,但不共享计划。
+> **② 必须跳过自己的设备目录** —— 本机内容已在 vault 里,再拉一遍就是重复。
 
 ### 10.4 `trove status`
 
 ```
 设备 pz-macbook (a3f2c81e)                 上次同步 2 分钟前 ✓成功
 
-本地   claude-code 187 个 · codex 312 个
-远端   claude-code 187 个 · codex 312 个    [来自 3 台设备]
+本地归档  187 个会话 · 106 MB   [pz-macbook]
+          312 个会话 · 31 MB    [work-mac]
+远端      499 个会话 · 142 MB   [来自 2 台设备]
 
 待同步 3 个文件 · 1.2 MB
   xxx.jsonl    增量 +45 KB          ← 活跃会话,offset 续传
   yyy.jsonl    全量 2.1 MB          ← 指纹失效,重传
   zzz.jsonl    新文件 380 KB
-
-远端占用 142 MB / 137 个文件
 ```
 
 ### 10.5 `trove doctor`
@@ -483,7 +496,7 @@ trove sync                    pull → push
 | Range PUT 支持 | 探测并记录,决定上传策略 |
 | 凭证泄漏扫描 | 检查 vault 与远端是否出现 `auth.json`、含 key 的字段 |
 | manifest 完整性 | 校验指纹可重算、条目与实际文件一致 |
-| 磁盘空间 | vault / inbox / tmp 占用 |
+| 磁盘空间 | vault / tmp 占用 |
 | 源目录可访问性 | 各 adapter 的 root 是否存在、是否可读 |
 
 ---
@@ -573,21 +586,29 @@ agent 写入文件        → 标记 pending
 - 核心验收:大文件(25MB 级)反复追加同步后,本地与远端 hash 一致
 - 核心测试:`planner` 的决策表全部覆盖
 
-### 阶段 3:多 agent 与多设备
+### 阶段 3:多设备
 
-范围:Codex adapter、device 分区、`devices.json`、inbox、`pull` 无状态实现、`--push-only` / `--pull-only`
+范围:device 分区布局、`pull` 无状态实现、`--push-only` / `--pull-only`、`meta.json`
 
 - 验收:两台设备各自产生会话,互不覆盖,任一设备能拉到对方的
 
 ### 阶段 4:daemon
 
-范围:chokidar 监听、settle delay、两级去重、launchd 注册、进程日志
+范围:chokidar 监听(仅白名单路径)、settle delay、两级去重、launchd 注册、进程日志、健康心跳
 
 - 验收:产生新会话后分钟级出现在远端,空闲 CPU < 0.1%
+- **同时解决**:daemon 死亡与「上次同步成功」的区分(见 §16)
 
-### 阶段 5:运维完善
+### 阶段 5:Codex adapter
 
-范围:`doctor`、`logs`、`config` 交互完善、错误重试与断点、`settings.json` 脱敏
+范围:`~/.codex` 白名单、`sessions/` 与 `archived_sessions/` 映射、`auth.json` 硬排除
+
+- 准入门槛:fixture 测试覆盖白名单产出
+- **需先决策**:Codex 记忆系统(`memories_1.sqlite`)的同步方式,见 §16
+
+### 阶段 6:运维完善
+
+范围:`doctor`、`logs`、`config` 交互完善、错误重试与断点、WebDAV 限流处理
 
 ---
 
@@ -602,14 +623,63 @@ agent 写入文件        → 标记 pending
 | 黑名单式扫描 | 未知目录会被自动上传 |
 | Go / Rust | TS 的 WebDAV 生态更成熟;Rust 对本项目是过度工程 |
 | 依赖 WebDAV ETag 做增量 | 多数服务端不可靠 |
+| 全局 `devices.json` | 多设备并发 push 会丢失条目,改为每设备 `meta.json` |
+| `settings.json` 脱敏后入库 | 脱敏即改写,违反原则 1;直接排除 |
+| fingerprint 携带 `tailHash` | 无判定规则使用,YAGNI 删除 |
+| 直接复制 SQLite 主库 + WAL | 会得到逻辑不一致的撕裂快照 |
+| vault / inbox 双目录 | 增加认知负担且易自重复;合并为单一镜像库 |
 | v1 建索引层 | `status` 只需数文件与反解目录名,无需解析内容 |
 
 ---
 
-## 16. 未决问题与后续
+## 16. 已知资产缺口
+
+**本节具名记录当前设计明确不保护的资产。** 之所以单列一节,是因为**静默的资产丢失比明确报错更危险** —— 用户会合理地以为"它被备份了",实际没有。
+
+### 16.1 Codex 整体未纳入(v1 不实现 adapter)
+
+`~/.codex/sessions/`(31M)与 `archived_sessions/`(2.4M)**当前完全未保护**。设计决策:先验证单 adapter 架构成立。
+
+### 16.2 Codex 记忆与目标系统 ★
+
+实测发现 Codex 有两个**正在运行的记忆库**:
+
+| 库 | 表 | 内容字段 | 当前状态 |
+|---|---|---|---|
+| `memories_1.sqlite` | `stage1_outputs` | `raw_memory` · `rollout_summary` · `usage_count` · `selected_for_phase2` | **0 行** |
+| `goals_1.sqlite` | `thread_goals` | `objective` · `status` · `token_budget` · `tokens_used` | **0 行** |
+
+> WAL 分别为 14M / 9M,初看像有大量数据;**复制后连同 WAL 读取确认表内无有效行**。Codex 尚未积累记忆。
+
+**风险**:一旦 Codex 开始积累记忆,这就是高价值资产,而当前零保护。
+
+**技术障碍**:活跃 SQLite + WAL **不能直接复制** —— 主库与 WAL 抄到一半会得到逻辑不一致的快照,不报错但内容错乱。安全归档需 `VACUUM INTO` 生成一致性副本,**这是原则 1 的唯一例外**(字节不再相同,但逻辑一致 —— 远好于字节一致而内容撕裂)。
+
+**v1 决策:排除。** 阶段 5 实现 Codex adapter 时必须解决。
+
+> **建议补救**:`doctor` 增加一项检查 —— 这两个库一旦出现数据行就告警。**让缺口可见,而不是静默。**
+
+### 16.3 豆包
+
+`~/Library/Application Support/Doubao` 2.9G 全是 Chromium 内核开销(Safe Browsing、ShaderCache、PKIMetadata…),已正确排除。真正的资产目录 `~/Doubao/{chats,skills}` **当前为空且格式未验证**,等实际使用后再探索。
+
+### 16.4 skills 只归档不应用
+
+vault 里的 skills 躺在 `devices/{对方}/claude-code/skills/`,**本机 agent 永远不会去那里读**。换机后需手动复制到 `~/.claude/skills/` 才生效。
+
+这是用户明确选择的已知代价(「先只做同步」)。同样地,路径转义使远端会话**无法被本机 agent resume** —— 拉下来的目录名对不上本机任何真实路径。
+
+### 16.5 为保真付出的存储代价
+
+Claude Code 会话中 `attachment` 类型行约占 **24% 体积**。因原则 1 不做去重,**这些冗余持续消耗存储与带宽**。这是保真的代价,不是缺陷 —— 但用户应知情。
+
+---
+
+## 17. 未决问题与后续
 
 ### v1 之后
 
+- Codex adapter(阶段 5),含记忆系统的 `VACUUM INTO` 方案
 - 豆包实际使用后的格式探索与 adapter 实现
 - `trove sessions` —— 待归一化模型确定后实现
 - 全文索引 / 语义搜索层
@@ -624,6 +694,8 @@ agent 写入文件        → 标记 pending
 3. **活跃会话的写入模式** —— 是否存在非尾部写入(将破坏 offset 假设)
 4. **Claude Code 是否会改写已有 jsonl 行** —— 当前样本未见,但需长期观测
 
-### 已知未验证假设
+### 设计中待补的机制
 
-- **append-only 假设**:§9 的全部增量逻辑建立在此之上。当前样本一致(两个 agent 均只追加),但**缺乏长期验证**。缓解措施:§9.3 的 head 校验会在假设破裂时自动降级为全量重传,**不会损坏数据**。
+- **daemon 健康与同步成功需区分** —— 当前 `status` 显示「上次同步 ✓ 成功」,但 daemon 若已崩溃,显示仍是绿色。需要心跳时间戳。
+- **WebDAV 限流与配额** —— 429 / 507 状态码未处理,`--concurrency 4` 可能被服务端拒绝。
+- **本地 vault 生命周期未定义** —— 只增不删 + 长期积累会持续增长;是否支持从远端重建本地,留待后续。

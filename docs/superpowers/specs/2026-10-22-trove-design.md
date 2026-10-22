@@ -70,9 +70,9 @@ push **只推manifest 判定需要推的文件**。绝不执行"本地 vault 快
 
 **"本地缺失"永远不等于"远端该删"。**
 
-### 原则 5:凭证不落盘,不进 vault
+### 原则 5:凭证只存 config.json,不进 vault
 
-WebDAV 密码存 **macOS Keychain**,`config.json` 只存引用。凭证类文件(`auth.json` 等)在 adapter 层被硬性排除,连本地 vault 都不落地。
+WebDAV 密码明文存 `config.json`(文件权限 600),不依赖系统钥匙串以便跨平台。凭证类文件(`auth.json` 等)在 adapter 层被硬性排除,连本地 vault 都不落地。
 
 ### 原则 6:planner 是纯函数
 
@@ -174,6 +174,8 @@ WebDAV 密码存 **macOS Keychain**,`config.json` 只存引用。凭证类文件
 ### 6.1 本地 `~/.trove/`
 
 **单一镜像库,按设备分区。** 本地结构与远端完全同构 —— push/pull 是同一映射的正反两面。
+
+> **base 可迁移**:默认 `~/.trove`,可用环境变量 `TROVE_HOME` 覆盖整个 base(配置 + vault + manifest + 日志 + tmp 一并迁走)。用途是主盘满了把归档迁到数据盘 —— 例如 `TROVE_HOME=/Volumes/Data2/.trove`。注意不要把 base 塞进 WebDAV 数据根内部,否则 vault 会与远端镜像在服务根内混叠。
 
 ```
 ~/.trove/
@@ -328,8 +330,8 @@ interface Source {
 
 ### 8.3 凭证处理
 
-- WebDAV 密码存 **macOS Keychain**,通过系统 `security` 命令读写 —— **不引入 keytar**(原生模块会破坏 Bun 单文件编译)
-- `config.json` 只存 keychain 引用,不存明文
+- WebDAV 密码明文存 `config.json`,文件权限 **600**(仅属主可读写)—— 跨平台统一,不依赖 macOS Keychain / keytar
+- 密码来源优先级:`--password` flag → `TROVE_PASSWORD` 环境变量 → 交互式 `@clack` 隐藏输入
 - 凭证类文件属于**代码级硬排除**,连本地 vault 都不落地
 - v1 中 `settings.json` 直接排除,故当前无任何脱敏逻辑 —— **保持零例外**
 
@@ -411,7 +413,7 @@ WebDAV 的 Range PUT 支持不统一。`init` 的连通性探测会判定:
 
 ```
 1. 设备身份    device_id(uuid,首次生成后不变) + device_name(默认 hostname)
-2. WebDAV     url / username / password(密码进 Keychain)
+2. WebDAV     url / username / password(密码写入 config.json,权限 600)
 3. 数据范围    勾选 agent → 展示各 agent 白清单(可逐条增减)
 4. 远端布局    确认 {device_id}/{agent}/... 并创建目录
 5. 连通验证    PROPFIND 根目录 → 检查读写 → 写探针文件→ 读回 → 删
@@ -431,7 +433,8 @@ WebDAV 的 Range PUT 支持不统一。`init` 的连通性探测会判定:
   "device": { "id": "a3f2c81e", "name": "pz-macbook" },
   "remote": {
     "url": "https://dav.example.com/trove/",
-    "auth": { "keychain": { "service": "trove-webdav", "account": "webdav" } }
+    "username": "webdav",
+    "password": "***"
   },
   "sources": {
     "claude-code": { "enabled": true },

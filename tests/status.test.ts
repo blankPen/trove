@@ -1,7 +1,11 @@
+import { mkdir, mkdtemp, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { computeOtherDevices, computeStatus } from '../src/status.js';
+import { computeLibraryPending, computeStatus, probeRemote } from '../src/status.js';
 import { emptyState } from '../src/core/state.js';
 import { claudeCodeAdapter, codexAdapter, doubaoAdapter, opencodeAdapter } from '../src/adapters/index.js';
+import { MemoryRemote } from './helpers/memory-remote.js';
 
 const adapters = [
   claudeCodeAdapter('/tmp/x/.claude'),
@@ -11,7 +15,10 @@ const adapters = [
 ];
 
 function stateWith(
-  entries: Record<string, Array<{ rel: string; sessionKey: string; size: number; pushed?: number }>>,
+  entries: Record<
+    string,
+    Array<{ rel: string; sessionKey: string; size: number; pushed?: number; pushedGen?: string }>
+  >,
 ) {
   const state = emptyState();
   for (const [harness, list] of Object.entries(entries)) {
@@ -28,10 +35,10 @@ function stateWith(
       if (e.pushed !== undefined) {
         state.pushed[harness] ??= {};
         state.pushed[harness]![e.rel] = {
-          generation: 'g',
+          generation: e.pushedGen ?? 'g',
           size: e.pushed,
           chunks: [],
-          manifestHash: 'm',
+          chunksHash: 'm',
         };
       }
     }
@@ -59,7 +66,7 @@ describe('computeStatus', () => {
     expect(r.harnesses.find((h) => h.id === 'codex')!.sessionCount).toBe(0);
   });
 
-  it('待同步 = 未推送或大小不一致的条目', () => {
+  it('待同步 = 未推送 / 大小不一致 / 世代变化,按 harness 分会话与文件', () => {
     const state = stateWith({
       'claude-code': [
         { rel: 'projects/a.jsonl', sessionKey: 'a', size: 100, pushed: 100 },
@@ -70,33 +77,96 @@ describe('computeStatus', () => {
 
     const r = computeStatus({ state, deviceId: 'dev1', deviceName: '本机', adapters });
 
-    expect(r.pendingCount).toBe(2);
-    expect(r.pendingBytes).toBe(80);
-    expect(r.sessionTotal).toBe(3);
-    expect(r.bytesTotal).toBe(180);
+    expect(r.pending).toEqual({
+      sessions: 2,
+      files: 2,
+      bytes: 80,
+      byHarness: [
+        { id: 'claude-code', displayName: 'Claude Code', sessions: 1, files: 1, bytes: 50 },
+        { id: 'codex', displayName: 'Codex', sessions: 1, files: 1, bytes: 30 },
+      ],
+    });
   });
 
+  it('同尺寸但世代变化算待同步;同会话多文件只算 1 个会话', () => {
+    const state = stateWith({
+      'claude-code': [
+        { rel: 'projects/a.jsonl', sessionKey: 'a', size: 100, pushed: 100, pushedGen: 'old' },
+        { rel: 'transcripts/a.jsonl', sessionKey: 'a', size: 20 },
+      ],
+    });
+
+    const r = computeStatus({ state, deviceId: 'dev1', deviceName: '本机', adapters });
+
+    expect(r.pending.sessions).toBe(1);
+    expect(r.pending.files).toBe(2);
+    expect(r.pending.bytes).toBe(120);
+    expect(r.harnesses.find((h) => h.id === 'claude-code')!.sessionCount).toBe(1);
+  });
 });
 
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-describe('computeOtherDevices', () => {
-  it('统计其他设备会话数与字节,名字取 meta.json', async () => {
+describe('computeLibraryPending', () => {
+  it('按 sessions / skills / index 分类统计待推送文件', async () => {
     const vault = await mkdtemp(join(tmpdir(), 'trove-status-'));
-    const dir = join(vault, 'raw/dev2/claude-code/projects');
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'a.jsonl'), 'aaa');
-    await writeFile(join(dir, 'b.jsonl'), 'bb');
-    await mkdir(join(vault, 'raw/dev2'), { recursive: true });
-    await writeFile(
-      join(vault, 'raw/dev2/meta.json'),
-      JSON.stringify({ id: 'dev2', name: '另一台', lastSeen: 1 }),
-    );
+    const files = [
+      'sessions/claude-code/sess1/dev1.jsonl',
+      'skills/review/versions/hash/SKILL.md',
+      'index/dev1.json',
+    ];
+    for (const rel of files) {
+      await mkdir(join(vault, 'library', ...rel.split('/').slice(0, -1)), { recursive: true });
+      await writeFile(join(vault, 'library', ...rel.split('/')), 'x'.repeat(5));
+    }
+    const state = emptyState();
 
-    const got = await computeOtherDevices(vault, 'dev1', adapters);
-    expect(got).toEqual([{ id: 'dev2', name: '另一台', sessionCount: 2, bytes: 5 }]);
+    const r = await computeLibraryPending(vault, state);
+
+    expect(r).toEqual({
+      sessions: { count: 1, files: 1, bytes: 5 },
+      skills: { count: 1, files: 1, bytes: 5 },
+      index: { files: 1, bytes: 5 },
+    });
+
+    // 已推送且 size + mtime 一致 → 不再计入
+    for (const rel of files) {
+      const st = await stat(join(vault, 'library', ...rel.split('/')));
+      state.library.pushed[rel] = { size: st.size, mtimeMs: Math.round(st.mtimeMs) };
+    }
+    expect(await computeLibraryPending(vault, state)).toEqual({
+      sessions: { count: 0, files: 0, bytes: 0 },
+      skills: { count: 0, files: 0, bytes: 0 },
+      index: { files: 0, bytes: 0 },
+    });
+  });
+});
+
+describe('probeRemote', () => {
+  it('从 library/index 列设备,读 meta.json 补名字与在线时间', async () => {
+    const remote = new MemoryRemote();
+    await remote.writeJson('library/index/dev1.json', { v: 1 });
+    await remote.writeJson('library/index/dev2.json', { v: 1 });
+    await remote.writeJson('raw/dev2/meta.json', { id: 'dev2', name: '另一台', lastSeen: 500 });
+
+    const got = await probeRemote(remote, AbortSignal.timeout(5000));
+
+    expect(got.ok).toBe(true);
+    expect(got.devices).toEqual([
+      { id: 'dev1', name: 'dev1' },
+      { id: 'dev2', name: '另一台', lastSeen: 500 },
+    ]);
   });
 
+  it('远端异常时降级为不可达,不抛出', async () => {
+    const bad = {
+      list: async () => {
+        throw new Error('boom');
+      },
+    } as unknown as MemoryRemote;
+
+    const got = await probeRemote(bad, AbortSignal.timeout(5000));
+
+    expect(got.ok).toBe(false);
+    expect(got.error).toContain('boom');
+    expect(got.devices).toEqual([]);
+  });
 });

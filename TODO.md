@@ -39,7 +39,7 @@
 2. **豆包只归档会话正文**：`.sessions/<id>/scratch`、`sandbox` 与 `.skills` 是生成物/技能库，未归档（占该目录九成体积）；如需要可加白名单。
 3. **Claude `file-history` 未归档**：1797 个编辑器快照文件，不属于会话正文。
 4. **OpenCode 外部快照未归档**：`~/.local/share/opencode/snapshot`、`storage`（旧版 JSON 存储）与 DB 内容重复，未重复搬运。
-5. **daemon 未安装为系统服务**：需手动 `trove daemon start`；重启机器后需重新启动（launchd/systemd 安装未做）。
+5. **daemon 未安装为系统服务**：`trove init` 会自动拉起 daemon（`--no-daemon` 可跳过，`config.daemon.startOnInit=false` 可关），但重启机器后需重新 `trove daemon start`（launchd/systemd 安装未做）。
 6. **同一设备重装后拉取**：本机设备只要本地文件存在就视为权威并跳过；本地文件缺失时才从远端恢复。
 7. **远端块丢失但索引完好**：push 不会主动重传（它信任索引）；pull 会因 sha256 校验失败而报错，需人工清掉该设备索引后重推（可见而非静默）。
 8. **OpenCode 双序列化体积**：新表 `session_message` 与旧表 `message`/`part` 内容不同（新表缺 role/agent/model/tools 等元数据），为无损两者都存，OpenCode 归档约 990MB（旧行为约 380MB）。

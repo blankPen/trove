@@ -52,15 +52,21 @@ export interface PushLibraryResult {
  *   sessions/**、skills/**、index/<device>.json
  * 每台设备只写自己的分片;会话文件按大小+mtime 判断是否变化。
  */
-export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibraryResult> {
-  const { remote, vaultRoot, state } = opts;
-  const progress = opts.progress ?? silentProgress;
+/** library 里需要推送的文件(相对 library 根);status 的待同步计数复用同一口径。 */
+export async function listLibraryFiles(vaultRoot: string): Promise<string[]> {
   const root = libraryDir(vaultRoot);
-  const files = [
+  return [
     ...(await walk(root, 'sessions')),
     ...(await walk(root, 'skills')),
     ...(await walk(root, 'index')).filter((rel) => rel.endsWith('.json')),
   ].sort();
+}
+
+export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibraryResult> {
+  const { remote, vaultRoot, state } = opts;
+  const progress = opts.progress ?? silentProgress;
+  const root = libraryDir(vaultRoot);
+  const files = await listLibraryFiles(vaultRoot);
 
   let uploaded = 0;
   let bytes = 0;

@@ -32,18 +32,28 @@ function retryable(err: unknown): boolean {
   return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN'].includes(code ?? '');
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 
-/** 网络/5xx 重试 3 次;4xx 立即失败,避免把鉴权错误当成抖动。 */
-async function withRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
+/** 网络/5xx 重试 3 次;4xx 立即失败,避免把鉴权错误当成抖动。signal 中止后不再重试。 */
+async function withRetry<T>(fn: () => Promise<T>, attempts = 5, signal?: AbortSignal): Promise<T> {
   let last: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
       return await fn();
     } catch (err) {
       last = err;
-      if (!retryable(err) || i === attempts - 1) throw err;
-      await sleep(500 * 2 ** i);
+      if (signal?.aborted || !retryable(err) || i === attempts - 1) throw err;
+      await sleep(500 * 2 ** i, signal);
     }
   }
   throw last;
@@ -86,12 +96,15 @@ export class WebDavStore implements RemoteStore {
     });
   }
 
-  async list(path: string): Promise<Array<{ name: string; type: 'file' | 'directory'; size: number }>> {
+  async list(path: string, signal?: AbortSignal): Promise<Array<{ name: string; type: 'file' | 'directory'; size: number }>> {
     const dir = strip(path);
     return withRetry(async () => {
       let entries;
       try {
-        entries = await this.client.getDirectoryContents(dir ? `/${dir}` : '/', { deep: false });
+        entries = await this.client.getDirectoryContents(dir ? `/${dir}` : '/', {
+          deep: false,
+          ...(signal ? { signal } : {}),
+        });
       } catch (err) {
         if (statusOf(err) === 404) return [];
         throw err;
@@ -101,14 +114,15 @@ export class WebDavStore implements RemoteStore {
         type: e.type === 'directory' ? ('directory' as const) : ('file' as const),
         size: typeof e.size === 'number' ? e.size : 0,
       }));
-    });
+    }, 5, signal);
   }
 
-  async readJson(path: string): Promise<unknown | null> {
+  async readJson(path: string, signal?: AbortSignal): Promise<unknown | null> {
     return withRetry(async () => {
       try {
         const text = (await this.client.getFileContents(withSlash(path), {
           format: 'text',
+          ...(signal ? { signal } : {}),
         })) as string;
         if (!text.trim()) return null;
         try {
@@ -122,7 +136,7 @@ export class WebDavStore implements RemoteStore {
         if (statusOf(err) === 404) return null;
         throw err;
       }
-    });
+    }, 5, signal);
   }
 
   async writeJson(path: string, value: unknown): Promise<void> {

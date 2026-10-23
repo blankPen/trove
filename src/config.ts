@@ -26,11 +26,21 @@ export interface SyncConfig {
   raw: boolean;
 }
 
+export interface DaemonConfig {
+  /** 轮询间隔秒数,使用处下限 5 */
+  intervalSeconds: number;
+  /** 只收集最近变更的会话:7d / 24h / 2026-10-01 / all */
+  since: string;
+  /** init 后自动启动 daemon */
+  startOnInit: boolean;
+}
+
 export interface Config {
   device: DeviceConfig;
   remote: RemoteConfig;
   sources: SourcesConfig;
   sync: SyncConfig;
+  daemon: DaemonConfig;
 }
 
 /** 命令行显式开关优先;否则取配置;老配置文件缺省按开启。 */
@@ -60,6 +70,7 @@ export function defaultConfig(
       doubao: { enabled: true },
     },
     sync: { raw: true },
+    daemon: { intervalSeconds: 300, since: '7d', startOnInit: true },
   };
 }
 
@@ -78,8 +89,16 @@ export async function loadConfig(path: string): Promise<Config> {
   } catch {
     throw new Error(`配置文件损坏,无法解析 JSON: ${path}`);
   }
-  // 老配置没有 sync 字段:按默认(同步 raw)补齐
-  return { ...parsed, sync: { raw: parsed.sync?.raw !== false } };
+  // 老配置没有 sync / daemon 字段:按默认补齐
+  return {
+    ...parsed,
+    sync: { raw: parsed.sync?.raw !== false },
+    daemon: {
+      intervalSeconds: parsed.daemon?.intervalSeconds ?? 300,
+      since: parsed.daemon?.since ?? '7d',
+      startOnInit: parsed.daemon?.startOnInit !== false,
+    },
+  };
 }
 
 /** 原子写入配置:先写临时文件再 rename,避免写一半损坏(设计原则 5)。含明文密码,权限收紧为 600。 */

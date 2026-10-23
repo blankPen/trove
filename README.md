@@ -6,7 +6,9 @@ AI 会话资产归档工具:把本机 Claude Code / Codex / OpenCode / 豆包的
 
 ```bash
 # 首次配置(设备名、WebDAV 端点、凭证)
+# 默认会拉起 daemon 并立即跑首轮同步;只写配置用 --no-daemon
 trove init --url https://dav.example.com/ --username u --password p
+trove init --url https://dav.example.com/ --username u --password p --no-daemon
 
 # 同步:默认全量;日常建议限定时间窗
 trove sync --since 7d
@@ -19,7 +21,7 @@ trove config set sync.raw false # 默认只同步 library,可被 --raw 覆盖
 trove sync --quiet              # 不显示逐项进度
 
 # 概览与检索
-trove status
+trove status                    # 本地 / 远端 / daemon / 待同步
 trove sessions                  # 列出 library 会话(最近 50 个)
 trove sessions --grep PATH      # 在标题/摘要/目录/模型/正文里搜
 trove sessions --harness opencode --json
@@ -27,11 +29,24 @@ trove skills                    # 汇总后的技能(最新版本)
 trove skills show review        # 某技能的全部版本与来源
 trove library reindex           # 从设备分片重建统一索引
 
-# 常驻服务(每 5 分钟一轮,只收最近 7 天变更)
-trove daemon start --interval 300 --since 7d
+# 常驻服务:间隔/时间窗默认取 config.daemon,显式参数优先
+trove config set daemon.intervalSeconds 300
+trove config set daemon.since 7d
+trove config set daemon.startOnInit false   # init 不再自动启动
+trove daemon start                          # 等价于每 300s、时间窗 7d
+trove daemon start --interval 60 --since 24h
 trove daemon status
 trove daemon stop
 ```
+
+`trove status` 输出四段:
+
+- **本地**:各工具已归档的会话数与体积
+- **远端**:5 秒超时探测,显示可达性、设备数与各设备上次在线时间
+- **daemon**:运行状态、间隔、时间窗、上次/下次同步与最近一轮结果
+- **待同步**:raw 层按工具分会话/文件数;library 按「会话 / 技能 / 索引」分类计数(只给计数,不逐条列)。
+  会话数按 `sessionKey` 去重,同一会话的多个文件算 1 个;Claude 子代理文件没有会话归并规则,会被算作独立会话。
+  `config.sync.raw=false` 时只显示「raw 同步已关闭」与 library 待同步。
 
 ## 支持的数据源
 
@@ -52,7 +67,7 @@ trove daemon stop
 - **只增不删**:远端和本地 vault 都不删除;源文件被删后归档仍保留。
 - **时间窗**:`--since 7d|24h|2026-10-01|all` 按会话最近变更时间过滤,避免首次全量过大。
 - **进度**:collect / pull / push 三阶段,TTY 单行刷新,管道按秒节流。
-- **daemon**:单实例 pid 锁、跨进程 sync 锁、SIGTERM 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。
+- **daemon**:单实例 pid 锁、跨进程 sync 锁、SIGTERM 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。间隔/时间窗/init 是否自动启动由 `config.daemon.{intervalSeconds,since,startOnInit}` 决定(默认 `300 / 7d / true`),`daemon start --interval/--since` 显式参数优先于配置。
 
 ## library(个人资产层)
 

@@ -12,3 +12,12 @@ export function humanSize(bytes: number): string {
   const text = value >= 100 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '');
   return `${text} ${units[u]}`;
 }
+
+/** 时间跨度 → "42 秒 / 5 分钟 / 2 小时 / 3 天";调用方自行加「前 / 后」。 */
+export function humanSpan(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.round(s / 60)} 分钟`;
+  if (s < 86400) return `${Math.round(s / 3600)} 小时`;
+  return `${Math.round(s / 86400)} 天`;
+}

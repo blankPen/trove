@@ -6,15 +6,15 @@ import { Command, CommanderError } from 'commander';
 import { password as clackPassword, text } from '@clack/prompts';
 import pc from 'picocolors';
 import { trovePaths } from './paths.js';
-import { defaultConfig, loadConfig, resolveRawSync, saveConfig, type Config } from './config.js';
+import { loadConfig, resolveRawSync, saveConfig, type Config } from './config.js';
 import { loadState } from './core/state.js';
 import { sync } from './core/sync.js';
 import { listSessions } from './core/sessions.js';
 import { ensureLibraryLayout, cleanupLegacyEvents, migrateLegacyLayout, librarySkillsDir, safeSessionName } from './core/layout.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from './core/library/index-file.js';
 import { parseSince, formatSince } from './core/time-window.js';
-import { computeOtherDevices, computeStatus, type StatusReport } from './status.js';
-import { humanSize } from './format.js';
+import { computeLibraryPending, computeStatus, probeRemote, type StatusReport } from './status.js';
+import { humanSize, humanSpan } from './format.js';
 import { WebDavStore } from './remote/webdav-store.js';
 import type { RemoteStore } from './remote/store.js';
 import type { Adapter } from './adapters/index.js';
@@ -27,6 +27,7 @@ import {
   startDaemon,
   stopDaemon,
   type DaemonRuntime,
+  type StartDaemonOptions,
 } from './daemon.js';
 
 export const VERSION = '0.2.0';
@@ -41,6 +42,8 @@ export interface CliDeps {
   rawOut?: (text: string) => void;
   isTTY?: boolean;
   now?: () => number;
+  /** 启动 daemon;测试注入 stub,避免真的 spawn 子进程 */
+  startDaemon?: (opts: StartDaemonOptions) => Promise<number>;
 }
 
 function defaultCreateRemote(url: string, username: string, password: string): RemoteStore {
@@ -79,29 +82,110 @@ function parseValue(raw: string): unknown {
 
 function formatStatus(
   r: StatusReport,
-  others: Array<{ name: string; sessionCount: number; bytes: number }> = [],
-): string {
-  const lines: string[] = [pc.bold(`设备 ${r.deviceName} (${r.deviceId})`), '', pc.bold('已归档')];
+  opts: { library: { sessions: number; skills: number; hash: string } | null },
+): string[] {
+  const lines = [pc.bold(`设备 ${r.deviceName} (${r.deviceId})`), '', pc.bold('本地')];
+  if (r.harnesses.every((h) => h.sessionCount === 0)) lines.push('  (还没有归档数据)');
   for (const h of r.harnesses) {
     lines.push(
       `  ${h.displayName.padEnd(12)} ${pc.green(`${h.sessionCount} 个会话`)} · ${humanSize(h.bytes)}`,
     );
   }
-  if (others.length) {
-    lines.push('', pc.bold('其他设备'));
-    for (const d of others) {
-      lines.push(
-        `  ${d.name.padEnd(12)} ${pc.green(`${d.sessionCount} 个会话`)} · ${humanSize(d.bytes)}`,
-      );
-    }
-  }
-  lines.push('');
   lines.push(
-    r.pendingCount > 0
-      ? `待同步 ${pc.yellow(`${r.pendingCount} 项`)} · ${humanSize(r.pendingBytes)}`
-      : '待同步 无',
+    '',
+    opts.library
+      ? `库 ${pc.green(`${opts.library.sessions} 个会话`)} · ${opts.library.skills} 个技能 · ` +
+          `索引 ${opts.library.hash.slice(0, 12)}`
+      : '库 尚未构建(跑一次 trove sync)',
   );
-  return lines.join('\n');
+  return lines;
+}
+
+function formatRemote(
+  url: string,
+  probe: { ok: boolean; devices: Array<{ id: string; name: string; lastSeen?: number }>; error?: string } | null,
+  selfId: string,
+  now: number,
+): string[] {
+  const head = ['', pc.bold(`远端 ${url || '未配置'}`)];
+  if (!probe) return [...head, '  未配置(先 trove init)'];
+  if (!probe.ok) return [...head, `  ${pc.yellow('不可达')} · ${probe.error ?? ''}`.trimEnd()];
+
+  const self = probe.devices.find((d) => d.id === selfId);
+  const detail = [`可达`, `${probe.devices.length} 台设备`];
+  if (self?.lastSeen) detail.push(`本机 ${humanSpan(now - self.lastSeen)}前在线`);
+  const lines = [...head, `  ${pc.green(detail.join(' · '))}`];
+  for (const d of probe.devices) {
+    if (d.id === selfId) continue;
+    const seen = d.lastSeen ? `${humanSpan(now - d.lastSeen)}前在线` : '在线时间未知';
+    lines.push(`  ${d.name} (${d.id}) · ${seen}`);
+  }
+  return lines;
+}
+
+function formatDaemon(
+  s: Awaited<ReturnType<typeof daemonState>>,
+  now: number,
+): string[] {
+  const head = ['', pc.bold('daemon')];
+  if (!s.running) return [...head, '  未运行 · 用 trove daemon start 启动'];
+  const st = s.status;
+  const lines = [
+    ...head,
+    `  ${pc.green('运行中')} (pid ${s.pid}) · 每 ${st?.intervalSeconds ?? '?'}s · 时间窗 ${st?.since ?? '?'}`,
+  ];
+  if (st?.lastRunAt) {
+    lines.push(
+      `  上次同步 ${humanSpan(now - st.lastRunAt)}前 · 耗时 ${((st.lastDurationMs ?? 0) / 1000).toFixed(1)}s` +
+        (st.nextRunAt ? ` · 下次约 ${humanSpan(st.nextRunAt - now)}后` : ''),
+    );
+  }
+  if (st?.lastResult) {
+    const c = st.lastResult;
+    lines.push(
+      `  最近一轮 收集 ${c.collected.archived} · 拉取 ${c.pulled.downloadedItems} · ` +
+        `推送 ${c.pushed.uploadedItems}`,
+    );
+  }
+  if (st?.lastError) lines.push(pc.yellow(`  最近错误: ${st.lastError}`));
+  return lines;
+}
+
+function formatPending(
+  pending: StatusReport['pending'],
+  library: Awaited<ReturnType<typeof computeLibraryPending>>,
+  rawSync: boolean,
+): string[] {
+  const lines = ['', pc.bold('待同步')];
+  const libFiles = library.sessions.files + library.skills.files + library.index.files;
+  if (rawSync && pending.files === 0 && libFiles === 0) return [...lines, '  无'];
+
+  if (!rawSync) lines.push('  raw 同步已关闭(仅同步 library)');
+  else if (pending.files > 0) {
+    lines.push(
+      `  会话 ${pc.yellow(`${pending.sessions} 个`)} · ${pending.files} 个文件 · ${humanSize(pending.bytes)}`,
+    );
+    lines.push(
+      `    ${pending.byHarness.map((h) => `${h.displayName} ${h.sessions}`).join(' · ')}`,
+    );
+  }
+
+  if (library.sessions.files > 0) {
+    lines.push(
+      `  会话文件 ${library.sessions.count} 个会话 · ${library.sessions.files} 个文件 · ` +
+        `${humanSize(library.sessions.bytes)}`,
+    );
+  }
+  if (library.skills.files > 0) {
+    lines.push(
+      `  技能 ${pc.yellow(`${library.skills.count} 个`)} · ${library.skills.files} 个文件 · ` +
+        `${humanSize(library.skills.bytes)}`,
+    );
+  }
+  if (library.index.files > 0) {
+    lines.push(`  索引 ${library.index.files} 个文件 · ${humanSize(library.index.bytes)}`);
+  }
+  return lines;
 }
 
 function looksLikeDateWindow(since: string): string {
@@ -300,8 +384,10 @@ async function cmdLibraryReindex(
 
 async function cmdStatus(
   paths: ReturnType<typeof trovePaths>,
+  createRemote: (url: string, username: string, password: string) => RemoteStore,
   resolveAdapters: (config: Config) => Adapter[],
   out: (l: string) => void,
+  now: () => number,
 ): Promise<void> {
   const config = await loadConfig(paths.config);
   const state = await loadState(paths.state);
@@ -312,16 +398,40 @@ async function cmdStatus(
     deviceName: config.device.name,
     adapters,
   });
-  const others = await computeOtherDevices(paths.vault, config.device.id, adapters);
-  out(formatStatus(report, others));
-  const index = await loadLibraryIndex(paths.vault);
-  if (index) {
-    out('');
-    out(
-      `库 ${pc.green(`${Object.keys(index.sessions).length} 个会话`)} · ` +
-        `${Object.keys(index.skills).length} 个技能 · 索引 ${index.hash.slice(0, 12)}`,
-    );
-  }
+  const rawSync = resolveRawSync(config);
+
+  // 远端探测与本地统计并行;未配置就不发请求
+  const probe =
+    config.remote.url && config.remote.password
+      ? probeRemote(
+          createRemote(config.remote.url, config.remote.username, config.remote.password),
+          AbortSignal.timeout(5000),
+        )
+      : Promise.resolve(null);
+  const [index, libraryPending, daemon, remote] = await Promise.all([
+    loadLibraryIndex(paths.vault),
+    computeLibraryPending(paths.vault, state),
+    daemonState(paths),
+    probe,
+  ]);
+
+  const nowMs = now();
+  out(
+    [
+      ...formatStatus(report, {
+        library: index
+          ? {
+              sessions: Object.keys(index.sessions).length,
+              skills: Object.keys(index.skills).length,
+              hash: index.hash,
+            }
+          : null,
+      }),
+      ...formatRemote(config.remote.url, remote, config.device.id, nowMs),
+      ...formatDaemon(daemon, nowMs),
+      ...formatPending(report.pending, libraryPending, rawSync),
+    ].join('\n'),
+  );
 }
 
 interface InitOptions {
@@ -329,6 +439,8 @@ interface InitOptions {
   url?: string;
   username?: string;
   password?: string;
+  /** commander 的 --no-daemon 会传 false */
+  daemon?: boolean;
 }
 
 function isCancel(v: unknown): v is symbol {
@@ -357,6 +469,7 @@ async function cmdInit(
   opts: InitOptions,
   paths: ReturnType<typeof trovePaths>,
   createRemote: (url: string, username: string, password: string) => RemoteStore,
+  start: (opts: StartDaemonOptions) => Promise<number>,
   out: (l: string) => void,
   err: (l: string) => void,
   interactive: boolean,
@@ -369,9 +482,13 @@ async function cmdInit(
   if (!url) throw new Error('需要 WebDAV 地址(--url)。');
   if (!password) throw new Error('未提供密码(--password 或 TROVE_PASSWORD)。');
 
+  // 保留已有的 sources / sync / daemon 设置,只覆盖设备名与远端
   const existing = await loadConfig(paths.config);
-  const config = defaultConfig({ deviceId: existing.device.id, deviceName: name as string });
-  config.remote = { url: url as string, username: username as string, password: password as string };
+  const config: Config = {
+    ...existing,
+    device: { id: existing.device.id, name: name as string },
+    remote: { url: url as string, username: username as string, password: password as string },
+  };
 
   const remote = createRemote(url as string, username as string, password as string);
   await mkdir(paths.tmp, { recursive: true });
@@ -388,6 +505,23 @@ async function cmdInit(
   out(pc.green('初始化完成'));
   out(`  设备: ${name as string} (${config.device.id})`);
   out(`  远端: ${url as string}`);
+
+  if (opts.daemon === false || !config.daemon.startOnInit) return 0;
+  try {
+    const since = config.daemon.since;
+    parseSince(since, Date.now()); // 配置可能被手改成非法值,启动前拦住
+    const interval = Math.max(5, config.daemon.intervalSeconds);
+    const pid = await start({
+      paths,
+      intervalSeconds: interval,
+      since,
+      env: { TROVE_HOME: paths.base },
+    });
+    out(`  daemon: 已启动 (pid ${pid}) · 每 ${interval}s · 时间窗 ${since} · 首轮同步进行中`);
+  } catch (e) {
+    const msg = (e as Error).message;
+    out(msg.includes('已在运行') ? `  daemon: ${msg}` : pc.yellow(`  daemon: 启动失败 —— ${msg}`));
+  }
   return 0;
 }
 
@@ -432,6 +566,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   const createRemote = deps.createRemote ?? defaultCreateRemote;
   const resolveAdapters = deps.resolveAdapters ?? defaultResolveAdapters;
   const now = deps.now ?? Date.now;
+  const start = deps.startDaemon ?? startDaemon;
   const interactive = deps.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const tty = deps.isTTY ?? Boolean(process.stdout.isTTY);
 
@@ -448,8 +583,9 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--url <url>', 'WebDAV 地址')
     .option('--username <user>', 'WebDAV 用户名')
     .option('--password <pass>', 'WebDAV 密码(也可用 TROVE_PASSWORD 环境变量)')
+    .option('--no-daemon', '初始化后不自动启动 daemon')
     .action(async (opts: InitOptions) => {
-      const code = await cmdInit(opts, paths, createRemote, out, err, interactive);
+      const code = await cmdInit(opts, paths, createRemote, start, out, err, interactive);
       if (code !== 0) process.exitCode = code;
     });
 
@@ -562,9 +698,9 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
 
   program
     .command('status')
-    .description('概览(各工具会话数、待同步)')
+    .description('概览(本地归档、远端、daemon、待同步)')
     .action(async () => {
-      await cmdStatus(paths, resolveAdapters, out);
+      await cmdStatus(paths, createRemote, resolveAdapters, out, now);
     });
 
   const daemonCmd = program.command('daemon').description('常驻后台同步服务');
@@ -572,22 +708,24 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   daemonCmd
     .command('start')
     .description('后台启动 daemon')
-    .option('--interval <seconds>', '轮询间隔秒数', '300')
-    .option('--since <range>', '只收集最近变更的会话', '7d')
+    .option('--interval <seconds>', '轮询间隔秒数(默认取 config.daemon.intervalSeconds)')
+    .option('--since <range>', '只收集最近变更的会话(默认取 config.daemon.since)')
     .option('--raw', '同步 raw(覆盖配置)')
     .option('--no-raw', '只同步 library(raw 只归档到本地)')
-    .action(async function (this: Command, opts: { interval: string; since: string; raw?: boolean }) {
-      parseSince(opts.since, now()); // 启动前校验,避免子进程每轮都失败
-      const interval = Math.max(5, Number(opts.interval) || 300);
+    .action(async function (this: Command, opts: { interval?: string; since?: string; raw?: boolean }) {
+      const config = await loadConfig(paths.config);
+      const since = opts.since ?? config.daemon.since;
+      parseSince(since, now()); // 启动前校验,避免子进程每轮都失败
+      const interval = Math.max(5, Number(opts.interval ?? config.daemon.intervalSeconds) || 300);
       const rawExplicit =
         this.getOptionValueSource('raw') === 'cli' ? opts.raw === true : undefined;
-      const pid = await startDaemon({
+      const pid = await start({
         paths,
         intervalSeconds: interval,
-        since: opts.since,
+        since,
         raw: rawExplicit,
       });
-      out(pc.green(`daemon 已启动 (pid ${pid}) · 每 ${interval}s · 时间窗 ${looksLikeDateWindow(opts.since)}`));
+      out(pc.green(`daemon 已启动 (pid ${pid}) · 每 ${interval}s · 时间窗 ${looksLikeDateWindow(since)}`));
     });
 
   daemonCmd

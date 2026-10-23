@@ -6,14 +6,14 @@ export interface RemoteEntry {
 
 /** 远端只要求 7 个原语;WebDAV/内存实现同一接口,编排逻辑可单测。 */
 export interface RemoteStore {
-  /** 列出某个目录的直接子项(不递归);目录不存在返回空数组。 */
-  list(path: string): Promise<RemoteEntry[]>;
+  /** 列出某个目录的直接子项(不递归);目录不存在返回空数组。signal 用于短超时探测。 */
+  list(path: string, signal?: AbortSignal): Promise<RemoteEntry[]>;
 
   /** 远端根下的设备目录名(无嵌套)。 */
   listDevices(): Promise<string[]>;
 
   /** 读取 JSON;不存在返回 null。 */
-  readJson(path: string): Promise<unknown | null>;
+  readJson(path: string, signal?: AbortSignal): Promise<unknown | null>;
 
   /** 原子写入 JSON(实现负责覆盖)。 */
   writeJson(path: string, value: unknown): Promise<void>;

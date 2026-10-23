@@ -51,6 +51,27 @@ describe('config(设计 §10.2)', () => {
     expect(c.device).toEqual({ id: 'a3f2c81e', name: 'pz-macbook' });
   });
 
+  it('daemon 默认 300s / 7d / init 自动启动,老配置缺失时回填', async () => {
+    expect(defaultConfig().daemon).toEqual({ intervalSeconds: 300, since: '7d', startOnInit: true });
+
+    // 老配置文件没有 daemon 字段
+    const legacy = defaultConfig() as unknown as Record<string, unknown>;
+    delete legacy['daemon'];
+    await saveConfig(cfg, legacy as never);
+    const back = await loadConfig(cfg);
+    expect(back.daemon).toEqual({ intervalSeconds: 300, since: '7d', startOnInit: true });
+
+    // 显式 false 不会被回填覆盖
+    const off = defaultConfig();
+    off.daemon = { intervalSeconds: 60, since: '24h', startOnInit: false };
+    await saveConfig(cfg, off);
+    expect((await loadConfig(cfg)).daemon).toEqual({
+      intervalSeconds: 60,
+      since: '24h',
+      startOnInit: false,
+    });
+  });
+
   it('文件不存在时 loadConfig 返回默认配置', async () => {
     const c = await loadConfig(cfg);
     expect(c.device.id).toMatch(UUID_RE);

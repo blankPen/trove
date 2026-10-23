@@ -189,6 +189,8 @@ export interface StartDaemonOptions {
   raw?: boolean;
   /** 默认 process.argv[1](构建后的 dist/main.js) */
   entry?: string;
+  /** 追加/覆盖子进程环境变量(init 用它把 TROVE_HOME 传给子进程) */
+  env?: NodeJS.ProcessEnv;
 }
 
 /** 后台启动:spawn 一个独立进程,等待 pid 文件落盘后返回。 */
@@ -212,7 +214,7 @@ export async function startDaemon(opts: StartDaemonOptions): Promise<number> {
       opts.since,
       ...(opts.raw === true ? ['--raw'] : opts.raw === false ? ['--no-raw'] : []),
     ],
-    { detached: true, stdio: ['ignore', fd.fd, fd.fd], env: process.env },
+    { detached: true, stdio: ['ignore', fd.fd, fd.fd], env: { ...process.env, ...opts.env } },
   );
   child.unref();
   await fd.close();

@@ -98,4 +98,4 @@ trove sessions [--harness <id>] [--device <id>] [--grep <text>] [--limit <n>] [-
 2. 豆包缺模型、Token、成本、目录、标题；只有 assignment 有原始时间戳
 3. 图片只保留引用，不内联；URL 型附件需源头仍可访问
 4. `meta` 记录（mode/权限等运行态）在对话层被跳过，raw 可查
-5. 对话层不计入 `status` 的「已归档」体积，也不算待同步项
+5. 对话层不计入 `status` 的「已归档」体积，也不算 raw 待同步项；library 的待推送单独按「会话 / 技能 / 索引」计数

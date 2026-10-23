@@ -71,7 +71,7 @@ describe('trove CLI', () => {
     expect(lines.join('\n')).toContain('时间范围');
   });
 
-  it('status:显示设备与各工具会话数', async () => {
+  it('status:本地 / 远端 / daemon / 待同步 四段齐全', async () => {
     const { lines, deps } = await setup();
     await run(['sync'], deps);
     lines.length = 0;
@@ -83,7 +83,99 @@ describe('trove CLI', () => {
     expect(text).toContain('测试机');
     expect(text).toContain('Claude Code');
     expect(text).toContain('1 个会话');
-    expect(text).toContain('待同步 无');
+    expect(text).toContain('远端 http://example.invalid');
+    expect(text).toContain('可达');
+    expect(text).toContain('daemon');
+    expect(text).toContain('未运行');
+    expect(text).toContain('待同步');
+    expect(text).toContain('无');
+  });
+
+  it('status:远端未配置时降级提示,不影响退出码', async () => {
+    const { paths, lines, deps } = await setup();
+    const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });
+    await saveConfig(paths.config, config);
+    lines.length = 0;
+
+    expect(await run(['status'], deps)).toBe(0);
+    expect(lines.join('\n')).toContain('未配置(先 trove init)');
+  });
+
+  it('daemon start:未显式传参时回落 config.daemon', async () => {
+    const { paths, deps } = await setup();
+    const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });
+    config.daemon = { intervalSeconds: 60, since: '24h', startOnInit: true };
+    await saveConfig(paths.config, config);
+    const got: Array<{ intervalSeconds: number; since: string }> = [];
+
+    const code = await run(['daemon', 'start'], {
+      ...deps,
+      startDaemon: async (opts) => {
+        got.push({ intervalSeconds: opts.intervalSeconds, since: opts.since });
+        return 123;
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(got).toEqual([{ intervalSeconds: 60, since: '24h' }]);
+  });
+
+  it('daemon start:显式 --interval/--since 覆盖配置', async () => {
+    const { paths, deps } = await setup();
+    const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });
+    config.daemon = { intervalSeconds: 60, since: '24h', startOnInit: true };
+    await saveConfig(paths.config, config);
+    const got: Array<{ intervalSeconds: number; since: string }> = [];
+
+    await run(['daemon', 'start', '--interval', '30', '--since', '7d'], {
+      ...deps,
+      startDaemon: async (opts) => {
+        got.push({ intervalSeconds: opts.intervalSeconds, since: opts.since });
+        return 123;
+      },
+    });
+
+    expect(got).toEqual([{ intervalSeconds: 30, since: '7d' }]);
+  });
+
+  it('init:默认启动 daemon;--no-daemon 不启动', async () => {
+    const { lines, deps } = await setup();
+    const started: number[] = [];
+    const depsWithStart = {
+      ...deps,
+      startDaemon: async () => {
+        started.push(1);
+        return 456;
+      },
+    };
+
+    expect(
+      await run(
+        ['init', '--name', '新机器', '--url', 'http://example.invalid', '--password', 'p'],
+        depsWithStart,
+      ),
+    ).toBe(0);
+    expect(started).toHaveLength(1);
+    expect(lines.join('\n')).toContain('daemon: 已启动');
+
+    lines.length = 0;
+    expect(
+      await run(
+        [
+          'init',
+          '--name',
+          '新机器',
+          '--url',
+          'http://example.invalid',
+          '--password',
+          'p',
+          '--no-daemon',
+        ],
+        depsWithStart,
+      ),
+    ).toBe(0);
+    expect(started).toHaveLength(1);
+    expect(lines.join('\n')).not.toContain('daemon: 已启动');
   });
 
   it('config get/set 往返', async () => {

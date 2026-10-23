@@ -494,6 +494,8 @@ trove sync                    pull → push
   zzz.jsonl    新文件 380 KB
 ```
 
+> **v2(2026-10-23)**:输出改为「本地 / 远端 / daemon / 待同步」四段;远端为 5s 超时探测(可达性 + 各设备上次在线),daemon 读 `daemon.status.json`;待同步按 raw(分会话/文件)与 library(会话/技能/索引)分类计数,不再逐文件列出。以 README「用法」为准。
+
 ### 10.5 `trove doctor`
 
 | 检查项 | 说明 |

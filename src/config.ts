@@ -17,14 +17,26 @@ export interface RemoteConfig {
   password: string;
 }
 
-export type SourceId = 'claude-code' | 'codex' | 'doubao';
+export type SourceId = 'claude-code' | 'codex' | 'opencode' | 'doubao';
 
 export type SourcesConfig = Partial<Record<SourceId, { enabled: boolean }>>;
+
+export interface SyncConfig {
+  /** 是否同步 raw;关闭后只同步 library */
+  raw: boolean;
+}
 
 export interface Config {
   device: DeviceConfig;
   remote: RemoteConfig;
   sources: SourcesConfig;
+  sync: SyncConfig;
+}
+
+/** 命令行显式开关优先;否则取配置;老配置文件缺省按开启。 */
+export function resolveRawSync(config: Pick<Config, 'sync'>, explicit?: boolean): boolean {
+  if (explicit !== undefined) return explicit;
+  return config.sync?.raw !== false;
 }
 
 export function defaultConfig(
@@ -40,12 +52,14 @@ export function defaultConfig(
       username: 'webdav',
       password: '',
     },
-    // v1 只实现 Claude Code adapter(设计 §8.1),故其余默认关闭。
+    // 四个工具均已实现,默认全开;config.sources[id].enabled=false 可单独关闭。
     sources: {
       'claude-code': { enabled: true },
-      codex: { enabled: false },
-      doubao: { enabled: false },
+      codex: { enabled: true },
+      opencode: { enabled: true },
+      doubao: { enabled: true },
     },
+    sync: { raw: true },
   };
 }
 
@@ -58,11 +72,14 @@ export async function loadConfig(path: string): Promise<Config> {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultConfig();
     throw err;
   }
+  let parsed: Config;
   try {
-    return JSON.parse(raw) as Config;
+    parsed = JSON.parse(raw) as Config;
   } catch {
     throw new Error(`配置文件损坏,无法解析 JSON: ${path}`);
   }
+  // 老配置没有 sync 字段:按默认(同步 raw)补齐
+  return { ...parsed, sync: { raw: parsed.sync?.raw !== false } };
 }
 
 /** 原子写入配置:先写临时文件再 rename,避免写一半损坏(设计原则 5)。含明文密码,权限收紧为 600。 */

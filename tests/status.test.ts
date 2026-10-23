@@ -1,117 +1,102 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { computeStatus } from '../src/status.js';
-import type { Manifest } from '../src/core/types.js';
+import { describe, it, expect } from 'vitest';
+import { computeOtherDevices, computeStatus } from '../src/status.js';
+import { emptyState } from '../src/core/state.js';
+import { claudeCodeAdapter, codexAdapter, doubaoAdapter, opencodeAdapter } from '../src/adapters/index.js';
 
-const HARNESSES = [
-  { id: 'claude-code', displayName: 'Claude Code', sessionGlob: 'projects/**/*.jsonl' },
+const adapters = [
+  claudeCodeAdapter('/tmp/x/.claude'),
+  codexAdapter('/tmp/x/.codex'),
+  opencodeAdapter('/tmp/x/opencode.db'),
+  doubaoAdapter('/tmp/x/ws'),
 ];
 
-describe('computeStatus(设计 §10.4)', () => {
-  let vaultRoot: string;
-  const deviceId = 'a3f2c81e';
-
-  async function write(rel: string, content: string) {
-    const p = join(vaultRoot, rel);
-    await mkdir(join(p, '..'), { recursive: true });
-    await writeFile(p, content);
+function stateWith(
+  entries: Record<string, Array<{ rel: string; sessionKey: string; size: number; pushed?: number }>>,
+) {
+  const state = emptyState();
+  for (const [harness, list] of Object.entries(entries)) {
+    for (const e of list) {
+      state.sources[harness] ??= {};
+      state.sources[harness]![e.rel] = {
+        size: e.size,
+        mtimeMs: 1,
+        prefixHash: 'h',
+        generation: 'g',
+        sessionKey: e.sessionKey,
+        sessionMtimeMs: 1,
+      };
+      if (e.pushed !== undefined) {
+        state.pushed[harness] ??= {};
+        state.pushed[harness]![e.rel] = {
+          generation: 'g',
+          size: e.pushed,
+          chunks: [],
+          manifestHash: 'm',
+        };
+      }
+    }
   }
+  return state;
+}
 
-  beforeEach(async () => {
-    vaultRoot = await mkdtemp(join(tmpdir(), 'trove-status-'));
-  });
-  afterEach(async () => {
-    await rm(vaultRoot, { recursive: true, force: true });
-  });
-
-  it('统计各设备会话数与字节数(只数 projects 下的 .jsonl)', async () => {
-    await write(`devices/${deviceId}/claude-code/projects/-p/a.jsonl`, 'a'.repeat(100));
-    await write(`devices/${deviceId}/claude-code/projects/-p/b.jsonl`, 'b'.repeat(200));
-    await write(`devices/${deviceId}/claude-code/history.jsonl`, 'h'.repeat(50)); // 非会话
-    await write(`devices/${deviceId}/meta.json`, JSON.stringify({ id: deviceId, name: 'pz-macbook' }));
-    await write('devices/b91d4a07/claude-code/projects/-q/c.jsonl', 'c'.repeat(300));
-    await write('devices/b91d4a07/meta.json', JSON.stringify({ id: 'b91d4a07', name: 'work-mac' }));
-
-    const s = await computeStatus({
-      vaultRoot,
-      deviceId,
-      deviceName: 'pz-macbook',
-      manifest: {},
-      harnesses: HARNESSES,
-    });
-
-    const mine = s.devices.find((d) => d.id === deviceId)!;
-    expect(mine.name).toBe('pz-macbook');
-    expect(mine.harnesses).toEqual([
-      { id: 'claude-code', displayName: 'Claude Code', sessionCount: 2, bytes: 300 },
-    ]);
-
-    const other = s.devices.find((d) => d.id === 'b91d4a07')!;
-    expect(other.name).toBe('work-mac');
-    expect(other.harnesses).toEqual([
-      { id: 'claude-code', displayName: 'Claude Code', sessionCount: 1, bytes: 300 },
-    ]);
-  });
-
-  it('按 harness 区分会话(claude-code 与 codex 分开计数)', async () => {
-    await write(`devices/${deviceId}/claude-code/projects/-p/a.jsonl`, 'a'.repeat(100));
-    await write(`devices/${deviceId}/codex/sessions/2026/10/22/s.jsonl`, 'c'.repeat(50));
-
-    const s = await computeStatus({
-      vaultRoot,
-      deviceId,
-      deviceName: 'me',
-      manifest: {},
-      harnesses: [
-        { id: 'claude-code', displayName: 'Claude Code', sessionGlob: 'projects/**/*.jsonl' },
-        { id: 'codex', displayName: 'Codex', sessionGlob: 'sessions/**/*.jsonl' },
+describe('computeStatus', () => {
+  it('按 harness 统计会话数与字节,四个工具都列出(空则 0)', () => {
+    const state = stateWith({
+      'claude-code': [
+        { rel: 'projects/a.jsonl', sessionKey: 'a', size: 100, pushed: 100 },
+        { rel: 'projects/b.jsonl', sessionKey: 'b', size: 50, pushed: 50 },
+        { rel: 'transcripts/c.jsonl', sessionKey: 'c', size: 25 },
       ],
+      doubao: [{ rel: '.sessions/s1/board.md', sessionKey: 's1', size: 10 }],
     });
 
-    expect(s.devices.find((d) => d.id === deviceId)!.harnesses).toEqual([
-      { id: 'claude-code', displayName: 'Claude Code', sessionCount: 1, bytes: 100 },
-      { id: 'codex', displayName: 'Codex', sessionCount: 1, bytes: 50 },
-    ]);
+    const r = computeStatus({ state, deviceId: 'dev1', deviceName: '本机', adapters });
+
+    expect(r.harnesses.map((h) => h.id)).toEqual(['claude-code', 'codex', 'opencode', 'doubao']);
+    const cc = r.harnesses.find((h) => h.id === 'claude-code')!;
+    expect(cc.sessionCount).toBe(3);
+    expect(cc.bytes).toBe(175);
+    expect(r.harnesses.find((h) => h.id === 'codex')!.sessionCount).toBe(0);
   });
 
-  it('meta.json 缺失时回退用目录名作为设备名', async () => {
-    await write('devices/b91d4a07/claude-code/projects/-q/c.jsonl', 'x');
+  it('待同步 = 未推送或大小不一致的条目', () => {
+    const state = stateWith({
+      'claude-code': [
+        { rel: 'projects/a.jsonl', sessionKey: 'a', size: 100, pushed: 100 },
+        { rel: 'projects/b.jsonl', sessionKey: 'b', size: 50 },
+      ],
+      codex: [{ rel: 'sessions/c.jsonl', sessionKey: 'c', size: 30, pushed: 10 }],
+    });
 
-    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest: {}, harnesses: HARNESSES });
-    expect(s.devices.find((d) => d.id === 'b91d4a07')!.name).toBe('b91d4a07');
+    const r = computeStatus({ state, deviceId: 'dev1', deviceName: '本机', adapters });
+
+    expect(r.pendingCount).toBe(2);
+    expect(r.pendingBytes).toBe(80);
+    expect(r.sessionTotal).toBe(3);
+    expect(r.bytesTotal).toBe(180);
   });
 
-  it('根据 manifest 计算待同步文件(空 manifest → 全部为 new)', async () => {
-    await write(`devices/${deviceId}/claude-code/projects/-p/a.jsonl`, 'aaa');
-    await write(`devices/${deviceId}/claude-code/projects/-p/b.jsonl`, 'bbbb');
+});
 
-    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest: {}, harnesses: HARNESSES });
-    expect(s.pendingCount).toBe(2);
-    expect(s.pendingBytes).toBe(3 + 4);
-  });
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-  it('manifest 已同步的文件不再计入待同步', async () => {
-    await write(`devices/${deviceId}/claude-code/projects/-p/a.jsonl`, 'aaa');
-    await write(`devices/${deviceId}/claude-code/projects/-p/b.jsonl`, 'bbbb');
-
-    const { computeFingerprint } = await import('../src/core/fingerprint.js');
-    const fp = await computeFingerprint(
-      join(vaultRoot, 'devices', deviceId, 'claude-code', 'projects', '-p', 'a.jsonl'),
+describe('computeOtherDevices', () => {
+  it('统计其他设备会话数与字节,名字取 meta.json', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-status-'));
+    const dir = join(vault, 'raw/dev2/claude-code/projects');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'a.jsonl'), 'aaa');
+    await writeFile(join(dir, 'b.jsonl'), 'bb');
+    await mkdir(join(vault, 'raw/dev2'), { recursive: true });
+    await writeFile(
+      join(vault, 'raw/dev2/meta.json'),
+      JSON.stringify({ id: 'dev2', name: '另一台', lastSeen: 1 }),
     );
-    const manifest: Manifest = {
-      'claude-code/projects/-p/a.jsonl': {
-        path: 'claude-code/projects/-p/a.jsonl',
-        fingerprint: fp,
-        syncedSize: fp.size,
-        syncedAt: 1,
-      },
-    };
 
-    const s = await computeStatus({ vaultRoot, deviceId, deviceName: 'me', manifest, harnesses: HARNESSES });
-    expect(s.pendingCount).toBe(1);
-    expect(s.pending[0]!.path).toBe('claude-code/projects/-p/b.jsonl');
-    expect(s.pending[0]!.reason).toBe('new');
+    const got = await computeOtherDevices(vault, 'dev1', adapters);
+    expect(got).toEqual([{ id: 'dev2', name: '另一台', sessionCount: 2, bytes: 5 }]);
   });
+
 });

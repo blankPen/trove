@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { defaultConfig, loadConfig, saveConfig } from '../src/config.js';
+import { defaultConfig, loadConfig, saveConfig, resolveRawSync } from '../src/config.js';
 import { trovePaths } from '../src/paths.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -26,8 +26,24 @@ describe('config(设计 §10.2)', () => {
     expect(c.device.name).toBeTypeOf('string');
     expect(c.device.name.length).toBeGreaterThan(0);
     expect(c.sources['claude-code']?.enabled).toBe(true);
-    expect(c.sources.codex?.enabled).toBe(false);
-    expect(c.sources.doubao?.enabled).toBe(false);
+    expect(c.sources.codex?.enabled).toBe(true);
+    expect(c.sources.opencode?.enabled).toBe(true);
+    expect(c.sources.doubao?.enabled).toBe(true);
+  });
+
+  it('默认同步 raw,可由 config.sync.raw 关闭,命令行显式开关优先', () => {
+    expect(defaultConfig().sync.raw).toBe(true);
+
+    const off = defaultConfig();
+    off.sync = { raw: false };
+    expect(resolveRawSync(off)).toBe(false);
+    expect(resolveRawSync(off, true)).toBe(true); // --raw 覆盖配置
+    expect(resolveRawSync(defaultConfig(), false)).toBe(false); // --no-raw 覆盖配置
+
+    // 老配置文件没有 sync 字段时按开启处理
+    const legacy = defaultConfig() as unknown as Record<string, unknown>;
+    delete legacy['sync'];
+    expect(resolveRawSync(legacy as never)).toBe(true);
   });
 
   it('defaultConfig 允许注入固定设备身份(便于测试)', () => {
@@ -80,7 +96,7 @@ describe('paths(设计 §6.1)', () => {
     const p = trovePaths('/Users/pz/.trove');
     expect(p.config).toBe('/Users/pz/.trove/config.json');
     expect(p.vault).toBe('/Users/pz/.trove/vault');
-    expect(p.manifest).toBe('/Users/pz/.trove/vault/.trove/manifest.json');
+    expect(p.state).toBe('/Users/pz/.trove/state.json');
     expect(p.logs).toBe('/Users/pz/.trove/logs');
     expect(p.tmp).toBe('/Users/pz/.trove/tmp');
   });

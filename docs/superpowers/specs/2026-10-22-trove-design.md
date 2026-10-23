@@ -1,6 +1,7 @@
 # Trove — AI 资产归档工具 · 设计文档
 
 - **日期**:2026-10-22
+- **⚠️ 已被取代**:本版描述的是整文件指纹 + manifest 的 v1 设计;sync 已按 Beacon poll 骨架重构,见 `2026-10-22-trove-poll-refactor.md`。本文件仅作历史记录。
 - **状态**:待评审
 - **作者**:brainstorming 会话
 

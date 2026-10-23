@@ -1,6 +1,6 @@
 {
   "name": "trove",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI 资产归档工具 —— 可靠、增量地把本地 AI agent 资产归档到 WebDAV",
   "type": "module",
   "bin": {

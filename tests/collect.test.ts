@@ -1,108 +1,199 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createClaudeCodeSource } from '../src/adapters/claude-code.js';
-import { collectSource } from '../src/collect.js';
+import { describe, it, expect } from 'vitest';
+import { collect } from '../src/core/collect.js';
+import { emptyState } from '../src/core/state.js';
+import type { Adapter } from '../src/adapters/index.js';
+import { DatabaseSync } from '../src/sqlite.js';
 
-describe('collect(agent 源 → vault,字节一致)', () => {
-  let src: string;
-  let vaultRoot: string;
-  const deviceId = 'a3f2c81e';
+async function tmp(prefix: string) {
+  return mkdtemp(join(tmpdir(), prefix));
+}
 
-  async function write(rel: string, content: string) {
-    const p = join(src, rel);
-    await mkdir(join(p, '..'), { recursive: true });
-    await writeFile(p, content);
-    return p;
+function fileAdapter(root: string, patterns: string[] = ['**/*.jsonl']): Adapter {
+  return {
+    kind: 'files',
+    id: 'claude-code',
+    displayName: 'Claude Code',
+    source: { id: 'claude-code', displayName: 'Claude Code', root, patterns, exclusions: [] },
+  };
+}
+
+describe('collect(文件源)', () => {
+  it('首次归档全部文件,第二次无变化则全部跳过', async () => {
+    const src = await tmp('trove-c-src-');
+    const vault = await tmp('trove-c-vault-');
+    await mkdir(join(src, 'projects'), { recursive: true });
+    await writeFile(join(src, 'projects/a.jsonl'), 'aaa');
+    await writeFile(join(src, 'projects/b.jsonl'), 'bbb');
+    const state = emptyState();
+    const o = { adapters: [fileAdapter(src)], deviceId: 'dev1', vaultRoot: vault, state, cutoff: 0 };
+
+    const first = await collect(o);
+    expect(first.archived).toBe(2);
+    expect(await readFile(join(vault, 'raw/dev1/claude-code/projects/a.jsonl'), 'utf8')).toBe('aaa');
+    expect(Object.keys(state.sources['claude-code']!)).toHaveLength(2);
+
+    const second = await collect(o);
+    expect(second.archived).toBe(0);
+    expect(second.skipped).toBe(2);
+    expect(second.bytesCopied).toBe(0);
+  });
+
+  it('追加只搬新增字节', async () => {
+    const src = await tmp('trove-c-src-');
+    const vault = await tmp('trove-c-vault-');
+    await writeFile(join(src, 'a.jsonl'), 'hello');
+    const state = emptyState();
+    const o = { adapters: [fileAdapter(src)], deviceId: 'dev1', vaultRoot: vault, state, cutoff: 0 };
+    await collect(o);
+
+    await writeFile(join(src, 'a.jsonl'), 'hello world');
+    const r = await collect(o);
+
+    expect(r.appended).toBe(1);
+    expect(r.bytesCopied).toBe(6);
+    expect(await readFile(join(vault, 'raw/dev1/claude-code/a.jsonl'), 'utf8')).toBe('hello world');
+  });
+
+  it('--since 只收集窗口内变更的会话;已归档的旧会话不受影响', async () => {
+    const src = await tmp('trove-c-src-');
+    const vault = await tmp('trove-c-vault-');
+    await writeFile(join(src, 'old.jsonl'), 'old');
+    await writeFile(join(src, 'new.jsonl'), 'new');
+    const state = emptyState();
+
+    // old 已在窗口外;先归档它
+    const r0 = await collect({
+      adapters: [fileAdapter(src)],
+      deviceId: 'dev1',
+      vaultRoot: vault,
+      state,
+      cutoff: 0,
+    });
+    expect(r0.archived).toBe(2);
+
+    // 新的窗口:两个文件 mtime 都不在窗口内 → 全部跳过(但已归档的仍在状态里)
+    const r1 = await collect({
+      adapters: [fileAdapter(src)],
+      deviceId: 'dev1',
+      vaultRoot: vault,
+      state,
+      cutoff: Date.now() + 10_000,
+    });
+    expect(r1.archived).toBe(0);
+    expect(r1.skipped).toBe(0);
+    expect(r1.outOfWindow).toBe(2);
+    expect(await readFile(join(vault, 'raw/dev1/claude-code/old.jsonl'), 'utf8')).toBe('old');
+  });
+
+  it('会话时间取同目录最大 mtime:窗口内的会话会带上同目录旧附件', async () => {
+    const src = await tmp('trove-c-src-');
+    const vault = await tmp('trove-c-vault-');
+    await mkdir(join(src, '.sessions/s1'), { recursive: true });
+    await writeFile(join(src, '.sessions/s1/board.md'), 'board');
+    await writeFile(join(src, '.sessions/s1/old.jsonl'), 'traj');
+    // 让 board.md 显得很新,old.jsonl 很旧
+    const old = new Date(Date.now() - 30 * 86400_000);
+    const { utimes } = await import('node:fs/promises');
+    await utimes(join(src, '.sessions/s1/old.jsonl'), old, old);
+
+    const adapter: Adapter = {
+      kind: 'files',
+      id: 'doubao',
+      displayName: '豆包',
+      source: {
+        id: 'doubao',
+        displayName: '豆包',
+        root: src,
+        patterns: ['.sessions/**'],
+        exclusions: [],
+        sessionKeyOf: (rel) => rel.split('/')[1]!,
+      },
+    };
+    const r = await collect({
+      adapters: [adapter],
+      deviceId: 'dev1',
+      vaultRoot: vault,
+      state: emptyState(),
+      cutoff: Date.now() - 7 * 86400_000,
+    });
+    expect(r.archived).toBe(2);
+  });
+});
+
+describe('collect(OpenCode SQLite 源)', () => {
+  async function db() {
+    const dir = await tmp('trove-c-oc-');
+    const path = join(dir, 'opencode.db');
+    const d = new DatabaseSync(path);
+    d.exec(`
+      CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL,
+        directory TEXT NOT NULL, title TEXT, version TEXT NOT NULL, time_created INTEGER NOT NULL,
+        time_updated INTEGER NOT NULL);
+      CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, type TEXT NOT NULL,
+        seq INTEGER NOT NULL, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL, data TEXT NOT NULL);
+    `);
+    d.prepare(
+      'INSERT INTO session_v2 (id,project_id,slug,directory,title,version,time_created,time_updated) VALUES (?,?,?,?,?,?,?,?)',
+    ).run('ses_1', 'p', 'slug', '/d', '会话一', '2.0', 100, 200);
+    d.prepare(
+      'INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)',
+    ).run('m1', 'ses_1', 'user', 1, 100, 100, '{"text":"你好"}');
+    d.close();
+    return path;
   }
 
-  beforeEach(async () => {
-    src = await mkdtemp(join(tmpdir(), 'trove-src-'));
-    vaultRoot = await mkdtemp(join(tmpdir(), 'trove-vault-'));
+  it('导出会话到 vault,重复运行跳过,新增消息后增量追加', async () => {
+    const dbPath = await db();
+    const vault = await tmp('trove-c-vault-');
+    const state = emptyState();
+    const adapters: Adapter[] = [
+      { kind: 'opencode', id: 'opencode', displayName: 'OpenCode', dbPath },
+    ];
+    const o = { adapters, deviceId: 'dev1', vaultRoot: vault, state, cutoff: 0, tmpDir: vault };
+
+    const first = await collect(o);
+    expect(first.archived).toBe(1);
+    const target = join(vault, 'raw/dev1/opencode/sessions/ses_1.jsonl');
+    const text = await readFile(target, 'utf8');
+    expect(text).toContain('"table":"session_v2"');
+    expect(text).toContain('你好');
+    expect(state.sources['opencode']!['sessions/ses_1.jsonl']).toMatchObject({ sessionKey: 'ses_1' });
+
+    const second = await collect(o);
+    expect(second.skipped).toBe(1);
+    expect(second.bytesCopied).toBe(0);
+
+    const d = new DatabaseSync(dbPath);
+    d.prepare(
+      'INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)',
+    ).run('m2', 'ses_1', 'assistant', 2, 300, 300, '{"text":"世界"}');
+    d.close();
+
+    const third = await collect(o);
+    expect(third.appended).toBe(1);
+    const after = await readFile(target, 'utf8');
+    expect(after).toContain('你好');
+    expect(after).toContain('世界');
   });
 
-  afterEach(async () => {
-    await rm(src, { recursive: true, force: true });
-    await rm(vaultRoot, { recursive: true, force: true });
-  });
-
-  it('首次 collect 把白名单文件复制到 devices/{id}/claude-code/...', async () => {
-    await write('projects/-p/a.jsonl', 'line1\nline2\n');
-    await write('CLAUDE.md', '# claude\n');
-
-    const r = await collectSource({
-      source: createClaudeCodeSource(src),
-      deviceId,
-      vaultRoot,
+  it('--since 过滤掉窗口外的会话', async () => {
+    const dbPath = await db();
+    const vault = await tmp('trove-c-vault-');
+    const adapters: Adapter[] = [
+      { kind: 'opencode', id: 'opencode', displayName: 'OpenCode', dbPath },
+    ];
+    const r = await collect({
+      adapters,
+      deviceId: 'dev1',
+      vaultRoot: vault,
+      state: emptyState(),
+      cutoff: 200_000,
+      tmpDir: vault,
     });
-
-    expect(r.copied).toBe(2);
-    expect(r.skipped).toBe(0);
-
-    const vaultJsonl = await readFile(
-      join(vaultRoot, 'devices', deviceId, 'claude-code', 'projects', '-p', 'a.jsonl'),
-      'utf8',
-    );
-    expect(vaultJsonl).toBe('line1\nline2\n');
-    const vaultMd = await readFile(
-      join(vaultRoot, 'devices', deviceId, 'claude-code', 'CLAUDE.md'),
-      'utf8',
-    );
-    expect(vaultMd).toBe('# claude\n');
-  });
-
-  it('第二次 collect 无变化 → 全部 skipped,不再复制', async () => {
-    await write('projects/-p/a.jsonl', 'line1\nline2\n');
-    await collectSource({ source: createClaudeCodeSource(src), deviceId, vaultRoot });
-
-    const r = await collectSource({ source: createClaudeCodeSource(src), deviceId, vaultRoot });
-    expect(r.copied).toBe(0);
-    expect(r.skipped).toBe(1);
-  });
-
-  it('源文件追加内容 → 重新复制,vault 反映最新完整内容', async () => {
-    await write('projects/-p/a.jsonl', 'line1\n');
-    await collectSource({ source: createClaudeCodeSource(src), deviceId, vaultRoot });
-
-    await write('projects/-p/a.jsonl', 'line1\nline2\nline3\n');
-    const r = await collectSource({ source: createClaudeCodeSource(src), deviceId, vaultRoot });
-
-    expect(r.copied).toBe(1);
-    const vaultJsonl = await readFile(
-      join(vaultRoot, 'devices', deviceId, 'claude-code', 'projects', '-p', 'a.jsonl'),
-      'utf8',
-    );
-    expect(vaultJsonl).toBe('line1\nline2\nline3\n');
-  });
-
-  it('源文件删除后 vault 保留(只增不删,设计原则 3)', async () => {
-    await write('projects/-p/a.jsonl', 'keep me\n');
-    await write('projects/-p/b.jsonl', 'also keep\n');
-    await collectSource({ source: createClaudeCodeSource(src), deviceId, vaultRoot });
-
-    // 删除源里的 a.jsonl
-    await rm(join(src, 'projects', '-p', 'a.jsonl'));
-
-    const r = await collectSource({ source: createClaudeCodeSource(src), deviceId, vaultRoot });
-    expect(r.copied).toBe(0);
-    // a.jsonl 仍在 vault 里
-    const a = await readFile(
-      join(vaultRoot, 'devices', deviceId, 'claude-code', 'projects', '-p', 'a.jsonl'),
-      'utf8',
-    );
-    expect(a).toBe('keep me\n');
-  });
-
-  it('二进制内容也逐字节一致(保真,原则 1)', async () => {
-    const bytes = Buffer.from([0x00, 0x01, 0x02, 0xff, 0xfe, 0x0a, 0x0d]);
-    const p = join(src, 'history.jsonl');
-    await writeFile(p, bytes);
-    await collectSource({ source: createClaudeCodeSource(src), deviceId, vaultRoot });
-
-    const got = await readFile(
-      join(vaultRoot, 'devices', deviceId, 'claude-code', 'history.jsonl'),
-    );
-    expect(got.equals(bytes)).toBe(true);
+    expect(r.archived).toBe(0);
+    expect(r.outOfWindow).toBe(1);
   });
 });

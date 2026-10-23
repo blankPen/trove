@@ -15,7 +15,7 @@ describe('trovePaths 目录推导(设计 §6.1)', () => {
     expect(p.base).toMatch(/\.trove$/);
     expect(p.vault).toBe(`${p.base}/vault`);
     expect(p.config).toBe(`${p.base}/config.json`);
-    expect(p.manifest).toBe(`${p.base}/vault/.trove/manifest.json`);
+    expect(p.state).toBe(`${p.base}/state.json`);
   });
 
   it('TROVE_HOME 覆盖整个 base,所有子路径随之迁移', () => {
@@ -23,7 +23,7 @@ describe('trovePaths 目录推导(设计 §6.1)', () => {
     const p = trovePaths();
     expect(p.base).toBe('/Volumes/Data2/trove-home');
     expect(p.vault).toBe('/Volumes/Data2/trove-home/vault');
-    expect(p.manifest).toBe('/Volumes/Data2/trove-home/vault/.trove/manifest.json');
+    expect(p.state).toBe('/Volumes/Data2/trove-home/state.json');
   });
 
   it('空字符串 TROVE_HOME 视为未设置', () => {

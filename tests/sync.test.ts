@@ -1,237 +1,130 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import type { Remote, RemoteFile } from '../src/remote/types.js';
-import { pullRemote, pushLocal, sync } from '../src/sync.js';
-import type { Manifest } from '../src/core/types.js';
+import { join } from 'node:path';
+import { describe, it, expect } from 'vitest';
+import { sync } from '../src/core/sync.js';
+import { loadState } from '../src/core/state.js';
+import { indexPath, metaPath, type DeviceIndex } from '../src/core/remote-layout.js';
+import type { Adapter } from '../src/adapters/index.js';
+import type { Progress } from '../src/progress.js';
+import { MemoryRemote } from './helpers/memory-remote.js';
 
-/** 内存版远端:用真实文件系统承载本地端,远端用 Map 模拟。 */
-class FakeRemote implements Remote {
-  files = new Map<string, Buffer>();
-  uploaded: string[] = [];
-  downloaded: string[] = [];
-
-  async listAll(): Promise<RemoteFile[]> {
-    return [...this.files.entries()].map(([path, buf]) => ({ path, size: buf.length }));
-  }
-  async download(remotePath: string, localPath: string): Promise<void> {
-    this.downloaded.push(remotePath);
-    const buf = this.files.get(remotePath);
-    if (!buf) throw new Error(`远端无此文件: ${remotePath}`);
-    await mkdir(dirname(localPath), { recursive: true });
-    await writeFile(localPath, buf);
-  }
-  async upload(localPath: string, remotePath: string): Promise<void> {
-    this.uploaded.push(remotePath);
-    this.files.set(remotePath, await readFile(localPath));
-  }
-  async delete(remotePath: string): Promise<void> {
-    this.files.delete(remotePath);
-  }
+async function tmp(prefix: string) {
+  return mkdtemp(join(tmpdir(), prefix));
 }
 
-const DEVICE = 'a3f2c81e';
+function adapter(root: string): Adapter {
+  return {
+    kind: 'files',
+    id: 'claude-code',
+    displayName: 'Claude Code',
+    source: {
+      id: 'claude-code',
+      displayName: 'Claude Code',
+      root,
+      patterns: ['**/*.jsonl'],
+      exclusions: [],
+    },
+  };
+}
 
-describe('pushLocal(vault → 远端)', () => {
-  let vaultRoot: string;
-  let remote: FakeRemote;
-  let manifest: Manifest;
+async function setup(body = 'hello world') {
+  const src = await tmp('trove-s-src-');
+  const vault = await tmp('trove-s-vault-');
+  await mkdir(join(src, 'projects'), { recursive: true });
+  await writeFile(join(src, 'projects/a.jsonl'), body);
+  const remote = new MemoryRemote();
+  const opts = {
+    adapters: [adapter(src)],
+    deviceId: 'dev1',
+    deviceName: '本机',
+    vaultRoot: vault,
+    statePath: join(vault, 'state.json'),
+    tmpDir: join(vault, 'tmp'),
+    remote,
+    cutoff: 0,
+    chunkSize: 4,
+    now: () => 999,
+  };
+  return { src, vault, remote, opts, source: join(src, 'projects/a.jsonl') };
+}
 
-  beforeEach(async () => {
-    vaultRoot = await mkdtemp(join(tmpdir(), 'trove-push-'));
-    remote = new FakeRemote();
-    manifest = {};
-  });
-  afterEach(async () => {
-    await rm(vaultRoot, { recursive: true, force: true });
-  });
+async function myIndex(remote: MemoryRemote): Promise<DeviceIndex> {
+  return (await remote.readJson(indexPath('dev1'))) as DeviceIndex;
+}
 
-  async function putVault(rel: string, content: string) {
-    const p = join(vaultRoot, 'devices', DEVICE, rel);
-    await mkdir(dirname(p), { recursive: true });
-    await writeFile(p, content);
-  }
+describe('sync(collect → pull → push)', () => {
+  it('首次同步:归档 + 上传 + 落状态 + 写设备 meta', async () => {
+    const { opts, remote, vault } = await setup();
 
-  it('新文件上传到远端 {deviceId}/... 并写入 manifest', async () => {
-    await putVault('claude-code/projects/-p/a.jsonl', 'hello\n');
+    const report = await sync(opts);
 
-    const r = await pushLocal({ remote, deviceId: DEVICE, vaultRoot, manifest });
+    expect(report.collected.archived).toBe(1);
+    expect(report.pushed.uploadedItems).toBe(1);
+    const item = Object.values((await myIndex(remote)).items)[0]!;
+    expect(item.size).toBe(11);
+    expect(item.chunks).toHaveLength(3);
+    expect(await remote.readJson(metaPath('dev1'))).toMatchObject({ id: 'dev1', name: '本机' });
 
-    expect(r.uploaded).toBe(1);
-    expect(r.skipped).toBe(0);
-    // 远端布局是 {device_id}/...,没有 devices/ 前缀(设计 §6.3)
-    expect(remote.files.get('a3f2c81e/claude-code/projects/-p/a.jsonl')?.toString()).toBe(
-      'hello\n',
-    );
-    expect(manifest['claude-code/projects/-p/a.jsonl']).toBeDefined();
-  });
-
-  it('指纹未变 → skip,不重复上传', async () => {
-    await putVault('claude-code/projects/-p/a.jsonl', 'hello\n');
-    await pushLocal({ remote, deviceId: DEVICE, vaultRoot, manifest });
-
-    const r = await pushLocal({ remote, deviceId: DEVICE, vaultRoot, manifest });
-    expect(r.uploaded).toBe(0);
-    expect(r.skipped).toBe(1);
-    expect(remote.uploaded).toHaveLength(1);
-  });
-
-  it('内容变化 → full 重传', async () => {
-    await putVault('claude-code/projects/-p/a.jsonl', 'hello\n');
-    await pushLocal({ remote, deviceId: DEVICE, vaultRoot, manifest });
-
-    await putVault('claude-code/projects/-p/a.jsonl', 'hello\nworld\n');
-    const r = await pushLocal({ remote, deviceId: DEVICE, vaultRoot, manifest });
-
-    expect(r.uploaded).toBe(1);
-    expect(remote.files.get('a3f2c81e/claude-code/projects/-p/a.jsonl')?.toString()).toBe(
-      'hello\nworld\n',
-    );
-  });
-
-  it('远端文件被删 → 即使 manifest 一致也重传(远端即真相)', async () => {
-    await putVault('claude-code/projects/-p/a.jsonl', 'hello\n');
-    await pushLocal({ remote, deviceId: DEVICE, vaultRoot, manifest });
-    expect(remote.files.size).toBe(1);
-
-    // 模拟远端整盘被清空(本地 manifest 仍标着已同步)
-    remote.files.clear();
-
-    const r = await pushLocal({ remote, deviceId: DEVICE, vaultRoot, manifest });
-    expect(r.uploaded).toBe(1);
-    expect(remote.files.get('a3f2c81e/claude-code/projects/-p/a.jsonl')?.toString()).toBe(
-      'hello\n',
-    );
-  });
-});
-
-describe('pullRemote(远端 → vault)', () => {
-  let vaultRoot: string;
-  let remote: FakeRemote;
-
-  beforeEach(async () => {
-    vaultRoot = await mkdtemp(join(tmpdir(), 'trove-pull-'));
-    remote = new FakeRemote();
-  });
-  afterEach(async () => {
-    await rm(vaultRoot, { recursive: true, force: true });
+    const state = await loadState(join(vault, 'state.json'));
+    expect(state.sources['claude-code']!['projects/a.jsonl']).toBeDefined();
+    expect(state.pushed['claude-code']!['projects/a.jsonl']!.size).toBe(11);
   });
 
-  it('下载别人的设备目录,字节一致', async () => {
-    remote.files.set('b91d4a07/claude-code/projects/-q/b.jsonl', Buffer.from('world\n'));
+  it('第二次同步无变化 → 零上传零复制', async () => {
+    const { opts, remote } = await setup();
+    await sync(opts);
+    const chunkWrites = remote.writes.filter((w) => w.endsWith('.bin')).length;
 
-    const r = await pullRemote({ remote, deviceId: DEVICE, vaultRoot });
+    const report = await sync(opts);
 
-    expect(r.downloaded).toBe(1);
-    const local = await readFile(
-      join(vaultRoot, 'devices', 'b91d4a07', 'claude-code', 'projects', '-q', 'b.jsonl'),
-      'utf8',
-    );
-    expect(local).toBe('world\n');
+    expect(report.collected.skipped).toBe(1);
+    expect(report.pushed.uploadedChunks).toBe(0);
+    expect(remote.writes.filter((w) => w.endsWith('.bin')).length).toBe(chunkWrites);
   });
 
-  it('跳过自己的设备目录(设计 §10.3 ②)', async () => {
-    remote.files.set('a3f2c81e/claude-code/projects/-p/a.jsonl', Buffer.from('mine\n'));
-    remote.files.set('b91d4a07/claude-code/projects/-q/b.jsonl', Buffer.from('other\n'));
+  it('源文件增长 → 只上传新块,远端索引大小跟进', async () => {
+    const { opts, remote, source } = await setup('0123456789');
+    await sync(opts);
+    const before = remote.writes.filter((w) => w.endsWith('.bin')).length;
 
-    const r = await pullRemote({ remote, deviceId: DEVICE, vaultRoot });
+    await writeFile(source, '0123456789WXYZ');
+    const report = await sync(opts);
 
-    expect(r.downloaded).toBe(1); // 只下载别人的
-    expect(remote.downloaded).toEqual(['b91d4a07/claude-code/projects/-q/b.jsonl']);
+    expect(report.collected.appended).toBe(1);
+    expect(remote.writes.filter((w) => w.endsWith('.bin')).length - before).toBe(2);
+    const item = Object.values((await myIndex(remote)).items)[0]!;
+    expect(item.size).toBe(14);
   });
 
-  it('本地已存在且 size 一致 → 跳过(阶段 1 用 size 判定)', async () => {
-    remote.files.set('b91d4a07/claude-code/projects/-q/b.jsonl', Buffer.from('world\n'));
-    await pullRemote({ remote, deviceId: DEVICE, vaultRoot });
+  it('--since 过滤窗口外的旧会话:不归档也不上传,但状态文件仍生成', async () => {
+    const { opts, remote, source, vault } = await setup();
+    const old = new Date(Date.now() - 30 * 86400_000);
+    const { utimes } = await import('node:fs/promises');
+    await utimes(source, old, old);
 
-    const r2 = await pullRemote({ remote, deviceId: DEVICE, vaultRoot });
-    expect(r2.downloaded).toBe(0);
-    expect(r2.skipped).toBe(1);
+    const report = await sync({ ...opts, cutoff: Date.now() - 7 * 86400_000 });
+
+    expect(report.collected.outOfWindow).toBe(1);
+    expect(report.pushed.uploadedItems).toBe(0);
+    expect([...remote.files.keys()].filter((k) => k.includes('index.json') || k.endsWith('.bin'))).toEqual([]);
+    await expect(loadState(join(vault, 'state.json'))).resolves.toBeDefined();
   });
 
-  it('拒绝含 .. 的路径(远端不可信,防路径穿越)', async () => {
-    remote.files.set('evil/../../etc/pwned.jsonl', Buffer.from('x\n'));
+  it('上报 collect / pull / push 三个阶段', async () => {
+    const { opts } = await setup();
+    const phases: string[] = [];
+    const progress: Progress = { phase: (n) => phases.push(n), item: () => {} };
 
-    const r = await pullRemote({ remote, deviceId: DEVICE, vaultRoot });
+    await sync({ ...opts, progress });
 
-    expect(r.downloaded).toBe(0);
-    expect(remote.downloaded).toHaveLength(0);
-  });
-});
-
-describe('sync(pull → push 端到端)', () => {
-  it('两设备互相可见:先 pull 别人的,再 push 自己的', async () => {
-    const vaultRoot = await mkdtemp(join(tmpdir(), 'trove-sync-'));
-    const remote = new FakeRemote();
-    try {
-      // 远端已有另一台设备的文件
-      remote.files.set('b91d4a07/claude-code/projects/-q/b.jsonl', Buffer.from('world\n'));
-
-      // 本地已有自己的文件
-      const mine = join(vaultRoot, 'devices', DEVICE, 'claude-code', 'projects', '-p', 'a.jsonl');
-      await mkdir(dirname(mine), { recursive: true });
-      await writeFile(mine, 'hello\n');
-
-      const manifestPath = join(vaultRoot, '.trove', 'manifest.json');
-      const report = await sync({
-        remote,
-        deviceId: DEVICE,
-        deviceName: 'pz-macbook',
-        vaultRoot,
-        manifestPath,
-        now: () => 1_700_000_000_000,
-      });
-
-      expect(report.pulled).toBe(1);
-      expect(report.pushed).toBe(2); // a.jsonl + meta.json
-      // 自己的文件已到远端
-      expect(remote.files.get('a3f2c81e/claude-code/projects/-p/a.jsonl')?.toString()).toBe(
-        'hello\n',
-      );
-      // 别人的文件已到本地
-      expect(
-        await readFile(
-          join(vaultRoot, 'devices', 'b91d4a07', 'claude-code', 'projects', '-q', 'b.jsonl'),
-          'utf8',
-        ),
-      ).toBe('world\n');
-      // meta.json 写入本地并上传
-      const meta = JSON.parse(
-        (await readFile(join(vaultRoot, 'devices', DEVICE, 'meta.json'), 'utf8')) as string,
-      );
-      expect(meta).toEqual({ id: DEVICE, name: 'pz-macbook', lastSeen: 1_700_000_000_000 });
-    } finally {
-      await rm(vaultRoot, { recursive: true, force: true });
-    }
+    expect(phases).toEqual(['collect', 'pull', 'library', 'push']);
   });
 
-  it('dry-run 不拉取、不写 meta、不落盘', async () => {
-    const vaultRoot = await mkdtemp(join(tmpdir(), 'trove-dryrun-'));
-    const remote = new FakeRemote();
-    try {
-      remote.files.set('b91d4a07/claude-code/projects/-q/b.jsonl', Buffer.from('world\n'));
-
-      const manifestPath = join(vaultRoot, '.trove', 'manifest.json');
-      const report = await sync({
-        remote,
-        deviceId: DEVICE,
-        deviceName: 'pz-macbook',
-        vaultRoot,
-        manifestPath,
-        dryRun: true,
-        now: () => 1_700_000_000_000,
-      });
-
-      expect(report.pulled).toBe(0);
-      await expect(
-        readFile(join(vaultRoot, 'devices', 'b91d4a07', 'claude-code', 'projects', '-q', 'b.jsonl'), 'utf8'),
-      ).rejects.toThrow();
-      await expect(
-        readFile(join(vaultRoot, 'devices', DEVICE, 'meta.json'), 'utf8'),
-      ).rejects.toThrow();
-    } finally {
-      await rm(vaultRoot, { recursive: true, force: true });
-    }
+  it('pullOnly 只拉不推', async () => {
+    const { opts, remote } = await setup();
+    const report = await sync({ ...opts, pullOnly: true });
+    expect(report.pushed.uploadedItems).toBe(0);
+    expect(remote.files.size).toBe(0);
   });
 });

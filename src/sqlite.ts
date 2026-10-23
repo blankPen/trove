@@ -6,5 +6,10 @@ import { createRequire } from 'node:module';
  */
 const require = createRequire(import.meta.url);
 
-export const DatabaseSync = require('node:sqlite').DatabaseSync as typeof import('node:sqlite').DatabaseSync;
-export type DatabaseSync = InstanceType<typeof DatabaseSync>;
+export type DatabaseSync = InstanceType<typeof import('node:sqlite').DatabaseSync>;
+
+/** node:sqlite 仍是实验模块,加载即打 ExperimentalWarning,所以延迟到真正打开库时再 require。 */
+export function openSqlite(path: string, readOnly = true): DatabaseSync {
+  const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite');
+  return new DatabaseSync(path, { readOnly });
+}

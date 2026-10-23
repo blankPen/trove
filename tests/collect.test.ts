@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { collect } from '../src/core/collect.js';
 import { emptyState } from '../src/core/state.js';
 import type { Adapter } from '../src/adapters/index.js';
-import { DatabaseSync } from '../src/sqlite.js';
+import { openSqlite } from '../src/sqlite.js';
 
 async function tmp(prefix: string) {
   return mkdtemp(join(tmpdir(), prefix));
@@ -127,7 +127,7 @@ describe('collect(OpenCode SQLite 源)', () => {
   async function db() {
     const dir = await tmp('trove-c-oc-');
     const path = join(dir, 'opencode.db');
-    const d = new DatabaseSync(path);
+    const d = openSqlite(path, false);
     d.exec(`
       CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, slug TEXT NOT NULL,
         directory TEXT NOT NULL, title TEXT, version TEXT NOT NULL, time_created INTEGER NOT NULL,
@@ -166,7 +166,7 @@ describe('collect(OpenCode SQLite 源)', () => {
     expect(second.skipped).toBe(1);
     expect(second.bytesCopied).toBe(0);
 
-    const d = new DatabaseSync(dbPath);
+    const d = openSqlite(dbPath, false);
     d.prepare(
       'INSERT INTO session_message (id,session_id,type,seq,time_created,time_updated,data) VALUES (?,?,?,?,?,?,?)',
     ).run('m2', 'ses_1', 'assistant', 2, 300, 300, '{"text":"世界"}');

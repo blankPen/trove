@@ -1,4 +1,4 @@
-import { DatabaseSync } from '../sqlite.js';
+import { openSqlite, type DatabaseSync } from '../sqlite.js';
 
 /**
  * OpenCode 适配器(设计:SQLite 全表对比,Beacon 游标档位 3)。
@@ -34,7 +34,7 @@ export class OpenCodeStore {
   private db: DatabaseSync;
 
   constructor(dbPath: string) {
-    this.db = new DatabaseSync(dbPath, { readOnly: true });
+    this.db = openSqlite(dbPath);
   }
 
   close(): void {

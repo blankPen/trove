@@ -5,7 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { collect } from '../src/core/collect.js';
 import { emptyState } from '../src/core/state.js';
 import { listSessions } from '../src/core/sessions.js';
-import { DatabaseSync } from '../src/sqlite.js';
+import { openSqlite } from '../src/sqlite.js';
 import type { Adapter, FileAdapter } from '../src/adapters/index.js';
 import { doubaoAdapter } from '../src/adapters/index.js';
 
@@ -612,7 +612,7 @@ describe('对话层:collect → sessions', () => {
   it('OpenCode:session_message 展开为 推理/文本/工具,旧表重复行不重复出事件', async () => {
     const src = await tmp('trove-ev-src-');
     const vault = await tmp('trove-ev-vault-');
-    const db = new DatabaseSync(join(src, 'opencode.db'));
+    const db = openSqlite(join(src, 'opencode.db'), false);
     db.exec(`
       CREATE TABLE session_v2 (
         id TEXT PRIMARY KEY, project_id TEXT, workspace_id TEXT, parent_id TEXT,

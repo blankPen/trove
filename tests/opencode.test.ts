@@ -1,7 +1,7 @@
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from '../src/sqlite.js';
+import { openSqlite } from '../src/sqlite.js';
 import { describe, it, expect } from 'vitest';
 import { exportSession, listSessions } from '../src/adapters/opencode.js';
 
@@ -9,7 +9,7 @@ import { exportSession, listSessions } from '../src/adapters/opencode.js';
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'trove-oc-'));
   const path = join(dir, 'opencode.db');
-  const db = new DatabaseSync(path);
+  const db = openSqlite(path, false);
   db.exec(`
     CREATE TABLE session (
       id TEXT PRIMARY KEY, project_id TEXT NOT NULL, parent_id TEXT, slug TEXT NOT NULL,
@@ -144,7 +144,7 @@ const REAL_DB = join(homedir(), '.local/share/opencode/opencode.db');
 
 describe.skipIf(!existsSync(REAL_DB))('真实 OpenCode 库:导出覆盖全部行', () => {
   it('导出行数 = 会话行 + 新表消息 + 旧表独有消息 + 其 part', () => {
-    const db = new DatabaseSync(REAL_DB, { readOnly: true });
+    const db = openSqlite(REAL_DB);
     const store = new OpenCodeStore(REAL_DB);
     try {
       const sessions = store.listSessions();

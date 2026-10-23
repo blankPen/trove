@@ -17,7 +17,8 @@ export interface ArchiveInput {
 
 export interface ArchiveResult {
   action: FileAction;
-  cursor: FileCursor;
+  /** skip(源文件复制期间被改写)且无旧游标时为 undefined,调用方据此跳过写入 */
+  cursor: FileCursor | undefined;
   bytesCopied: number;
 }
 
@@ -55,12 +56,12 @@ export async function archiveFile(input: ArchiveInput): Promise<ArchiveResult> {
     // 就地改写后又增长时,直接追加会拼出源文件中从未存在过的内容,因此再校验源前缀。
     const srcPrefix = await hashRange(sourcePath, 0, offset);
     if (srcPrefix !== cursor!.prefixHash) {
-      return resetCopy(sourcePath, targetPath, srcStat, newGeneration, 'reset');
+      return resetCopy(sourcePath, targetPath, srcStat, newGeneration, 'reset', cursor);
     }
     // 目标大小必须等于游标位置,否则视作归档异常,退化为全量重置
     const tst = await stat(targetPath);
     if (tst.size !== offset) {
-      return resetCopy(sourcePath, targetPath, srcStat, newGeneration, 'reset');
+      return resetCopy(sourcePath, targetPath, srcStat, newGeneration, 'reset', cursor);
     }
     const length = srcStat.size - offset;
     if (length > 0) {
@@ -70,7 +71,7 @@ export async function archiveFile(input: ArchiveInput): Promise<ArchiveResult> {
       // 严格对齐:源在复制期间若被截断,回退到重置,绝不半信半疑
       const now = await stat(targetPath);
       if (now.size !== srcStat.size) {
-        return resetCopy(sourcePath, targetPath, srcStat, newGeneration, 'reset');
+        return resetCopy(sourcePath, targetPath, srcStat, newGeneration, 'reset', cursor);
       }
     }
     return {
@@ -85,7 +86,7 @@ export async function archiveFile(input: ArchiveInput): Promise<ArchiveResult> {
     };
   }
 
-  return resetCopy(sourcePath, targetPath, srcStat, newGeneration, action);
+  return resetCopy(sourcePath, targetPath, srcStat, newGeneration, action, cursor);
 }
 
 /** 全量复制到临时文件再 rename,保证目标要么是旧内容要么是完整新内容。 */
@@ -95,13 +96,16 @@ async function resetCopy(
   srcStat: { size: number; mtimeMs: number },
   newGeneration: () => string,
   action: 'new' | 'reset',
+  cursor: FileCursor | undefined,
 ): Promise<ArchiveResult> {
   const tmp = `${targetPath}.tmp-${randomUUID()}`;
   try {
     await pipeline(createReadStream(sourcePath), createWriteStream(tmp));
     const st = await stat(tmp);
     if (st.size !== srcStat.size) {
-      throw new Error(`归档字节数不一致: ${sourcePath} 期望 ${srcStat.size} 实得 ${st.size}`);
+      // 源文件复制期间被改写(活跃会话在增长/被截断):本轮跳过,下轮稳定后重新全量归档
+      await unlink(tmp).catch(() => {});
+      return { action: 'skip', cursor, bytesCopied: 0 };
     }
     const prefixHash = (await hashFile(tmp))!;
     await rename(tmp, targetPath);

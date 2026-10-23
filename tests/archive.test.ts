@@ -173,4 +173,22 @@ describe('archiveFile(raw 无损副本)', () => {
     expect(r.action).toBe('reset');
     expect(await readFile(target, 'utf8')).toBe('hello world');
   });
+
+  it('源文件复制期间被改写(增长)→ 不抛错,返回 skip 且不写目标', async () => {
+    const { source, target } = await paths();
+    await writeFile(source, 'hello world'); // 实际 11 字节
+
+    // srcStat.size 谎报 5 字节,模拟 discover 之后文件又增长
+    const r = await archiveFile({
+      sourcePath: source,
+      targetPath: target,
+      srcStat: { size: 5, mtimeMs: 1000 },
+      newGeneration: gen,
+    });
+
+    expect(r.action).toBe('skip');
+    expect(r.cursor).toBeUndefined();
+    expect(r.bytesCopied).toBe(0);
+    await expect(readFile(target, 'utf8')).rejects.toThrow();
+  });
 });

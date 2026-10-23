@@ -93,11 +93,13 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
           newGeneration: opts.newGeneration,
         });
         tally(result, r.action, r.bytesCopied);
-        bucket[f.relPath] = {
-          ...r.cursor,
-          sessionKey: f.sessionKey,
-          sessionMtimeMs: f.sessionMtimeMs,
-        };
+        if (r.cursor) {
+          bucket[f.relPath] = {
+            ...r.cursor,
+            sessionKey: f.sessionKey,
+            sessionMtimeMs: f.sessionMtimeMs,
+          };
+        }
         const list = sessionFiles.get(f.sessionKey) ?? [];
         list.push(f.relPath);
         sessionFiles.set(f.sessionKey, list);
@@ -108,6 +110,11 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
     }
 
     // SQLite(OpenCode):按会话导出确定性 JSONL,再走同一套归档逻辑
+    // 数据库不存在 = 该工具未安装,静默跳过,不让缺库中断整轮同步
+    if (!(await fileExists(adapter.dbPath))) {
+      progress.phase('collect', `${adapter.displayName}: 0 个会话`);
+      continue;
+    }
     const store = new OpenCodeStore(adapter.dbPath);
     try {
       const sessions = store.listSessions();
@@ -172,12 +179,14 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
           });
           tally(result, r.action, r.bytesCopied);
           if (r.action !== 'skip') changedSessions.add(s.id);
-          bucket[relPath] = {
-            ...r.cursor,
-            sessionKey: s.id,
-            sessionMtimeMs: s.updatedAt,
-            formatVersion: OPENCODE_EXPORT_VERSION,
-          };
+          if (r.cursor) {
+            bucket[relPath] = {
+              ...r.cursor,
+              sessionKey: s.id,
+              sessionMtimeMs: s.updatedAt,
+              formatVersion: OPENCODE_EXPORT_VERSION,
+            };
+          }
           progress.item(relPath, n, sessions.length, r.bytesCopied);
         } finally {
           await unlink(tmp).catch(() => {});

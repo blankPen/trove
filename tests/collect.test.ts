@@ -196,4 +196,22 @@ describe('collect(OpenCode SQLite 源)', () => {
     expect(r.archived).toBe(0);
     expect(r.outOfWindow).toBe(1);
   });
+
+  it('数据库文件缺失时静默跳过,不中断整轮收集', async () => {
+    const vault = await tmp('trove-c-vault-');
+    const missingDb = join(vault, 'no-such-dir', 'opencode.db');
+    const adapters: Adapter[] = [
+      { kind: 'opencode', id: 'opencode', displayName: 'OpenCode', dbPath: missingDb },
+    ];
+    const r = await collect({
+      adapters,
+      deviceId: 'dev1',
+      vaultRoot: vault,
+      state: emptyState(),
+      cutoff: 0,
+      tmpDir: vault,
+    });
+    expect(r.discovered).toBe(0);
+    expect(r.archived).toBe(0);
+  });
 });

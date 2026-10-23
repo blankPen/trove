@@ -140,6 +140,7 @@ async function syncUnlocked(opts: SyncOptions): Promise<SyncReport> {
       vaultRoot: opts.vaultRoot,
       deviceId: opts.deviceId,
       state,
+      statePath: opts.statePath,
       progress,
       signal: opts.signal,
     });

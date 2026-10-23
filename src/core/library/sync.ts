@@ -7,6 +7,7 @@ import { silentProgress, type Progress } from '../../progress.js';
 import type { RemoteStore } from '../../remote/store.js';
 import type { State } from '../state.js';
 import { rebuildUnifiedIndex } from './index-file.js';
+import { saveState } from '../state.js';
 import type { IndexShard } from './schema.js';
 
 async function walk(root: string, rel = ''): Promise<string[]> {
@@ -37,9 +38,14 @@ export interface PushLibraryOptions {
   vaultRoot: string;
   deviceId: string;
   state: State;
+  /** 用于周期性落盘进度:中断后已完成文件不会被重推 */
+  statePath: string;
   progress?: Progress;
   signal?: AbortSignal;
 }
+
+/** 检查点间隔(ms):中断最多损失一分钟的已推记录。 */
+const CHECKPOINT_MS = 60_000;
 
 export interface PushLibraryResult {
   uploaded: number;
@@ -55,11 +61,13 @@ export interface PushLibraryResult {
 /** library 里需要推送的文件(相对 library 根);status 的待同步计数复用同一口径。 */
 export async function listLibraryFiles(vaultRoot: string): Promise<string[]> {
   const root = libraryDir(vaultRoot);
+  const rank = (rel: string) => (rel.startsWith('index/') ? 1 : 0);
   return [
     ...(await walk(root, 'sessions')),
     ...(await walk(root, 'skills')),
     ...(await walk(root, 'index')).filter((rel) => rel.endsWith('.json')),
-  ].sort();
+    // index 分片是引用其他文件的提交点:必须最后传,否则中断会留下指向不存在文件的悬空引用
+  ].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 }
 
 export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibraryResult> {
@@ -72,22 +80,34 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
   let bytes = 0;
   let skipped = 0;
   let n = 0;
+  let lastCheckpoint = Date.now();
 
-  for (const rel of files) {
-    throwIfAborted(opts.signal);
-    n++;
-    const abs = join(root, ...rel.split('/'));
-    const st = await stat(abs);
-    const prev = state.library.pushed[rel];
-    if (prev && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs)) {
-      skipped++;
-      continue;
+  // 中断(abort/报错)时保住已完成文件的记账:重启后按 state 跳过,不整轮重推
+  const checkpoint = async () => {
+    await saveState(opts.statePath, state);
+    lastCheckpoint = Date.now();
+  };
+
+  try {
+    for (const rel of files) {
+      throwIfAborted(opts.signal);
+      n++;
+      const abs = join(root, ...rel.split('/'));
+      const st = await stat(abs);
+      const prev = state.library.pushed[rel];
+      if (prev && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs)) {
+        skipped++;
+        continue;
+      }
+      await remote.writeFile(`library/${rel}`, abs);
+      state.library.pushed[rel] = { size: st.size, mtimeMs: Math.round(st.mtimeMs) };
+      uploaded++;
+      bytes += st.size;
+      progress.item(rel, n, files.length, st.size);
+      if (Date.now() - lastCheckpoint >= CHECKPOINT_MS) await checkpoint();
     }
-    await remote.writeFile(`library/${rel}`, abs);
-    state.library.pushed[rel] = { size: st.size, mtimeMs: Math.round(st.mtimeMs) };
-    uploaded++;
-    bytes += st.size;
-    progress.item(rel, n, files.length, st.size);
+  } finally {
+    if (uploaded > 0) await checkpoint();
   }
 
   return { uploaded, bytes, skipped };
@@ -148,12 +168,18 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
     );
     const device = shard.device;
     const pulled = (state.library.pulled[device] ??= {});
+    const isSelf = device === opts.deviceId;
 
     for (const entry of Object.values(shard.sessions)) {
       throwIfAborted(opts.signal);
       itemNo++;
       const remotePath = `library/${entry.path}`;
       const abs = join(root, ...entry.path.split('/'));
+      // 本机文件是权威:存在就不拿远端(可能是旧分片)覆盖,只在缺失时恢复
+      if (isSelf && (await localHash(abs)) !== null) {
+        skipped++;
+        continue;
+      }
       if (pulled[entry.path] === entry.hash) {
         skipped++;
         continue;

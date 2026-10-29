@@ -103,4 +103,53 @@ describe('daemon 生命周期', () => {
     const paths = await base();
     expect(await daemonState(paths)).toEqual({ running: false, status: null });
   });
+
+  it('同步成功后触发 afterSync,其返回的日志行写入 daemon 日志(用例 9-3)', async () => {
+    const paths = await base();
+    const controller = new AbortController();
+    let synced = false;
+    await runDaemon(
+      {
+        paths,
+        intervalSeconds: 3600,
+        since: '7d',
+        runOnce: async (_p, _s) => {
+          controller.abort();
+          return report(3);
+        },
+        afterSync: async () => {
+          synced = true;
+          return '经验提取:新增 2 · 跳过 0 · 失败 0';
+        },
+      },
+      controller.signal,
+    );
+    expect(synced).toBe(true);
+    const log = await readFile(paths.daemonLog, 'utf8');
+    expect(log).toContain('经验提取:新增 2 · 跳过 0 · 失败 0');
+  });
+
+  it('afterSync 抛错只记日志,不污染 lastError 也不中断循环', async () => {
+    const paths = await base();
+    const controller = new AbortController();
+    await runDaemon(
+      {
+        paths,
+        intervalSeconds: 3600,
+        since: '7d',
+        runOnce: async (_p, _s) => {
+          controller.abort();
+          return report(1);
+        },
+        afterSync: async () => {
+          throw new Error('LLM 配置缺失');
+        },
+      },
+      controller.signal,
+    );
+    const status = await readDaemonStatus(paths);
+    expect(status!.lastError).toBeUndefined();
+    const log = await readFile(paths.daemonLog, 'utf8');
+    expect(log).toContain('经验提取失败: LLM 配置缺失');
+  });
 });

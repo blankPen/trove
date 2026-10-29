@@ -161,14 +161,14 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
     if (!raw || typeof raw !== 'object') continue;
     const shard = raw as IndexShard;
     if (shard.v !== 1 || !shard.sessions) continue;
-    // 分片本身也要落地,统一索引才能离线重建
-    await writeAtomic(
-      join(root, 'index', shardEntry.name),
-      JSON.stringify(shard, null, 2) + '\n',
-    );
     const device = shard.device;
-    const pulled = (state.library.pulled[device] ??= {});
     const isSelf = device === opts.deviceId;
+    // 分片本身也要落地,统一索引才能离线重建;本机分片是权威,只在缺失时恢复
+    const shardAbs = join(root, 'index', shardEntry.name);
+    if (!isSelf || (await localHash(shardAbs)) === null) {
+      await writeAtomic(shardAbs, JSON.stringify(shard, null, 2) + '\n');
+    }
+    const pulled = (state.library.pulled[device] ??= {});
 
     for (const entry of Object.values(shard.sessions)) {
       throwIfAborted(opts.signal);

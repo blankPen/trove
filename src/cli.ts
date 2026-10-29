@@ -10,7 +10,7 @@ import { loadConfig, resolveRawSync, saveConfig, type Config } from './config.js
 import { loadState } from './core/state.js';
 import { sync } from './core/sync.js';
 import { listSessions } from './core/sessions.js';
-import { ensureLibraryLayout, cleanupLegacyEvents, migrateLegacyLayout, librarySkillsDir, safeSessionName } from './core/layout.js';
+import { ensureLibraryLayout, cleanupLegacyEvents, migrateLegacyLayout, librarySkillsDir, libraryLessonsDir, safeSessionName } from './core/layout.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from './core/library/index-file.js';
 import { parseSince, formatSince } from './core/time-window.js';
 import { computeLibraryPending, computeStatus, probeRemote, type StatusReport } from './status.js';
@@ -21,8 +21,14 @@ import type { Adapter } from './adapters/index.js';
 import { createAdapters } from './adapters/index.js';
 import { createConsoleProgress } from './progress-console.js';
 import { silentProgress } from './progress.js';
+import { formatDiff, readLatestDiff, readSessionDiff } from './core/lessons/audit.js';
+import { LocalStorageAdapter } from './core/lessons/storage.js';
+import { refreshSidecars } from './core/lessons/sidecar.js';
+import { runLessonExtraction, learnNewSessions } from './core/lessons/learn.js';
+import type { LessonProviderDeps } from './core/lessons/learn.js';
 import {
   daemonState,
+  daemonLog,
   runDaemon,
   startDaemon,
   stopDaemon,
@@ -44,6 +50,8 @@ export interface CliDeps {
   now?: () => number;
   /** 启动 daemon;测试注入 stub,避免真的 spawn 子进程 */
   startDaemon?: (opts: StartDaemonOptions) => Promise<number>;
+  /** 经验提取的提供方注入;测试传 mock,生产由 daemon/CLI 懒构造 */
+  lessonDeps?: LessonProviderDeps;
 }
 
 function defaultCreateRemote(url: string, username: string, password: string): RemoteStore {
@@ -198,13 +206,15 @@ async function loadRuntime(
   resolveAdapters: (config: Config) => Adapter[],
 ): Promise<{
   config: Config;
-  remote: RemoteStore;
+  remote: RemoteStore | null;
   adapters: Adapter[];
 }> {
   const config = await loadConfig(paths.config);
-  if (!config.remote.url) throw new Error('尚未配置远端 URL,先运行 `trove init`。');
-  if (!config.remote.password) throw new Error('未配置密码,先运行 `trove init`。');
-  const remote = createRemote(config.remote.url, config.remote.username, config.remote.password);
+  // 未配置远端时降级为本地模式,不报错
+  const remote =
+    config.remote.url && config.remote.password
+      ? createRemote(config.remote.url, config.remote.username, config.remote.password)
+      : null;
   return { config, remote, adapters: resolveAdapters(config) };
 }
 
@@ -253,6 +263,7 @@ async function cmdSync(
     `发现 ${c.discovered} 项 · 会话 ${c.sessions} · 归档 ${c.archived} · 追加 ${c.appended} · ` +
       `跳过 ${c.skipped} · 窗口外 ${c.outOfWindow}`,
   );
+  if (!remote) out(pc.yellow('本地模式(未配置远端,仅本地 .trove 归档)'));
   out(
     `拉取 ${report.pulled.downloadedItems} 项 (${humanSize(report.pulled.downloadedBytes)}) · ` +
       `推送 ${report.pushed.uploadedItems} 项 (${humanSize(report.pushed.uploadedBytes)}) · ` +
@@ -382,6 +393,35 @@ async function cmdLibraryReindex(
   );
 }
 
+async function cmdLearnList(
+  paths: ReturnType<typeof trovePaths>,
+  sessionId: string | undefined,
+  out: (l: string) => void,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const diff = sessionId ? await readSessionDiff(storage, sessionId) : await readLatestDiff(storage);
+  out(diff ? formatDiff(diff) : sessionId ? `无会话 ${sessionId} 的提取记录` : '尚无提取记录');
+}
+
+async function cmdLearnExtract(
+  paths: ReturnType<typeof trovePaths>,
+  sessionId: string,
+  lessonDeps: LessonProviderDeps | undefined,
+  out: (l: string) => void,
+  force: boolean,
+): Promise<void> {
+  const outcome = await runLessonExtraction(paths.vault, sessionId, lessonDeps, { force });
+  if (outcome.skipReason === 'already_learned') {
+    out('该会话已提取过,跳过(用 --force 强制重跑)');
+    return;
+  }
+  if (outcome.skipReason) {
+    out(`会话未达提取阈值,跳过: ${outcome.skipReason}`);
+    return;
+  }
+  out(formatDiff(outcome.diff!));
+}
+
 async function cmdStatus(
   paths: ReturnType<typeof trovePaths>,
   createRemote: (url: string, username: string, password: string) => RemoteStore,
@@ -465,6 +505,46 @@ export async function resolveInitInputs(opts: InitOptions, interactive = false) 
   return { name, url, username, password };
 }
 
+async function cmdConfig(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  err: (l: string) => void,
+  interactive: boolean,
+): Promise<number> {
+  if (!interactive) {
+    throw new Error('非交互环境无法交互式配置,请用 `trove config set <key> <value>`。');
+  }
+  const existing = await loadConfig(paths.config);
+
+  const name = await text({ message: '设备名', initialValue: existing.device.name });
+  const url = await text({
+    message: 'WebDAV 地址',
+    placeholder: '留空 = 本地模式',
+    initialValue: existing.remote.url,
+  });
+  const username = await text({ message: 'WebDAV 用户名', initialValue: existing.remote.username });
+  const password = await clackPassword({ message: 'WebDAV 密码(留空 = 不变)' });
+  if ([name, url, username, password].some(isCancel)) {
+    err('已取消。');
+    return 1;
+  }
+
+  const config: Config = {
+    ...existing,
+    device: { ...existing.device, name: name as string },
+    remote: {
+      url: (url as string).trim(),
+      username: username as string,
+      password: password === '' ? existing.remote.password : (password as string),
+    },
+  };
+  await saveConfig(paths.config, config);
+  out(pc.green('配置已保存'));
+  out(`  设备: ${config.device.name}`);
+  out(`  远端: ${config.remote.url || '未配置(本地模式)'}`);
+  return 0;
+}
+
 async function cmdInit(
   opts: InitOptions,
   paths: ReturnType<typeof trovePaths>,
@@ -479,32 +559,37 @@ async function cmdInit(
     err('已取消。');
     return 1;
   }
-  if (!url) throw new Error('需要 WebDAV 地址(--url)。');
-  if (!password) throw new Error('未提供密码(--password 或 TROVE_PASSWORD)。');
+  // url 可选:不填则进入本地模式(仅本地 .trove 归档);填了就必须有密码
+  if (url && !password) throw new Error('未提供密码(--password 或 TROVE_PASSWORD)。');
 
   // 保留已有的 sources / sync / daemon 设置,只覆盖设备名与远端
   const existing = await loadConfig(paths.config);
   const config: Config = {
     ...existing,
     device: { id: existing.device.id, name: name as string },
-    remote: { url: url as string, username: username as string, password: password as string },
+    remote: url
+      ? { url: url as string, username: username as string, password: password as string }
+      : existing.remote,
   };
 
-  const remote = createRemote(url as string, username as string, password as string);
-  await mkdir(paths.tmp, { recursive: true });
-  const probePath = `.trove-probe/${randomUUID()}.json`;
-  const probeLocal = join(paths.tmp, `probe-${randomUUID()}.json`);
-  await writeFile(probeLocal, '{"probe":true}\n');
-  await remote.writeFile(probePath, probeLocal);
-  const echoed = await remote.readJson(probePath);
-  await remote.delete(probePath);
-  await rm(probeLocal, { force: true });
-  if (!echoed) throw new Error('连通性探针失败:写入的文件读不回来。');
+  if (url) {
+    const remote = createRemote(url as string, username as string, password as string);
+    await mkdir(paths.tmp, { recursive: true });
+    const probePath = `.trove-probe/${randomUUID()}.json`;
+    const probeLocal = join(paths.tmp, `probe-${randomUUID()}.json`);
+    await writeFile(probeLocal, '{"probe":true}\n');
+    await remote.writeFile(probePath, probeLocal);
+    const echoed = await remote.readJson(probePath);
+    await remote.delete(probePath);
+    await rm(probeLocal, { force: true });
+    if (!echoed) throw new Error('连通性探针失败:写入的文件读不回来。');
+  }
 
   await saveConfig(paths.config, config);
   out(pc.green('初始化完成'));
   out(`  设备: ${name as string} (${config.device.id})`);
-  out(`  远端: ${url as string}`);
+  if (url) out(`  远端: ${url as string}`);
+  else out(`  远端: ${pc.yellow('未配置(本地模式,仅本地 .trove 归档)')}`);
 
   if (opts.daemon === false || !config.daemon.startOnInit) return 0;
   try {
@@ -531,6 +616,7 @@ function daemonRuntime(
   createRemote: (url: string, username: string, password: string) => RemoteStore,
   resolveAdapters: (config: Config) => Adapter[],
   now: () => number,
+  lessonDeps: LessonProviderDeps | undefined,
 ): DaemonRuntime {
   const intervalSeconds = Math.max(5, Number(opts.interval) || 300);
   return {
@@ -553,6 +639,12 @@ function daemonRuntime(
         rawSync: resolveRawSync(config, opts.rawExplicit),
         signal,
       });
+    },
+    afterSync: async () => {
+      const res = await learnNewSessions(paths.vault, lessonDeps, {
+        log: (l) => void daemonLog(paths, l),
+      });
+      return `经验提取:新增 ${res.extracted} · 跳过 ${res.skipped} · 失败 ${res.errors.length}`;
     },
   };
 }
@@ -589,7 +681,11 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
       if (code !== 0) process.exitCode = code;
     });
 
-  const configCmd = program.command('config').description('查看/修改配置');
+  const configCmd = program.command('config').description('交互式配置(子命令:path/get/set)');
+  configCmd.action(async () => {
+    const code = await cmdConfig(paths, out, err, interactive);
+    if (code !== 0) process.exitCode = code;
+  });
   configCmd
     .command('path')
     .description('打印配置文件路径')
@@ -697,6 +793,32 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     });
 
   program
+    .command('learn')
+    .description('经验提取与审计查看')
+    .argument('[sessionId]', '对单会话跑提取流水线(缺省需配合 --list)')
+    .option('--list', '查看最近一次提取的审计 diff')
+    .option('--session <id>', '配合 --list 指定会话')
+    .option('--force', '即使已提取过也强制重跑')
+    .action(async (sessionId: string | undefined, opts: { list?: boolean; session?: string; force?: boolean }) => {
+      if (opts.list) {
+        await cmdLearnList(paths, opts.session, out);
+      } else if (sessionId) {
+        await cmdLearnExtract(paths, sessionId, deps.lessonDeps, out, opts.force === true);
+      } else {
+        err('用法: trove learn <session-id> 或 trove learn --list [--session <id>]');
+      }
+    });
+
+  program
+    .command('refresh')
+    .description('强制重建 lessons 分层概览(index/.abstract.md/.overview.md)')
+    .action(async () => {
+      const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+      const written = await refreshSidecars(storage, { trigger: 'manual_refresh', now: () => new Date(now()) });
+      out(pc.green(`已重建 ${written.length} 个分层概览文件`));
+    });
+
+  program
     .command('status')
     .description('概览(本地归档、远端、daemon、待同步)')
     .action(async () => {
@@ -776,7 +898,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
       const rawExplicit =
         this.getOptionValueSource('raw') === 'cli' ? opts.raw === true : undefined;
       await runDaemon(
-        daemonRuntime(paths, { ...opts, rawExplicit }, createRemote, resolveAdapters, now),
+        daemonRuntime(paths, { ...opts, rawExplicit }, createRemote, resolveAdapters, now, deps.lessonDeps),
         controller.signal,
       );
     });

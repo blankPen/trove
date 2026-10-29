@@ -127,4 +127,18 @@ describe('sync(collect → pull → push)', () => {
     expect(report.pushed.uploadedItems).toBe(0);
     expect(remote.files.size).toBe(0);
   });
+
+  it('remote 为 null 时仅本地 collect,零拉零推且不写远端', async () => {
+    const { opts, remote, vault } = await setup();
+
+    const report = await sync({ ...opts, remote: null });
+
+    expect(report.collected.archived).toBe(1);
+    expect(report.pulled.downloadedItems).toBe(0);
+    expect(report.pushed.uploadedItems).toBe(0);
+    expect(report.library.pulled.downloaded).toBe(0);
+    expect(report.library.pushed.uploaded).toBe(0);
+    expect(remote.files.size).toBe(0);
+    await expect(loadState(join(vault, 'state.json'))).resolves.toBeDefined();
+  });
 });

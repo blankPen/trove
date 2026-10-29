@@ -1,5 +1,48 @@
 # TODO
 
+## 待办
+
+- [x] 参考 [分层架构方案](https://feishu.doubao.com/docx/WoxKd0aeroqotexUoLgctahHnxI) 完成分层架构改造与验证
+- [x] 优化 sync 策略：远端模式改为可配置（可选），不配置时仅做本地 `.trove` 目录同步（需相应改动 `init` / `sync` 等逻辑流程）
+- [x] `config` 配置改为与 `init` 一致的交互式（现有 `config set` 可保留）
+- [x] 重做 `preferences/` 提取：围绕「当前使用用户」做用户形象分析提取。`profile` 提取用户信息（我是谁 / 年龄 / 职责 / 工作背景 / 人际关系），其余提取编码风格、写作风格、对话风格、最近事项等；提取规则与 prompt 需重点打磨
+
+## 已完成（2026-10-29 偏好提取重做）
+
+- [x] `preferences/` 由 4 类改为 5 类：删 `reply_format`，新增 `dialogue_style`（对话风格）与 `recent_matters`（最近事项），均为 `patch` 合并到固定文件
+- [x] `profile` 提取提示词聚焦六维度「我是谁/年龄/职责/工作背景/人际关系」，并强调「围绕当前使用用户、只写会话中真实出现的信息」
+- [x] 其余三类（编码/写作/对话风格）与「最近事项」各给专属提取口径；`recent_matters` 合并提示词额外保留「近期」时效语义（过期旧事项可移除）
+- [x] 把 schema 的 `extractionPrompt` 死字段接活：偏好类提取在 `extractCategory` 里按 type 注入各类型提取口径到真实 LLM 提示词
+- [x] 同步更新 `sidecar.ts` 偏好目录 brief（去掉「回复格式」，补「画像/对话风格/最近事项」）
+- [x] TDD：新增 `tests/lessons/preferences.test.ts` 5 条用例（画像六维度、其余四类口径与文件名、五类集合、recent 时效、提示词注入 LLM）
+- [x] 真实核验：全量 303 测试全绿 + `tsc --noEmit` 通过；重建 dist 冒烟确认 5 类新集合 + 画像提示词；真实 DeepSeek 跑一次 `preferences` 提取，`profile` 产出「姓名/年龄/岗位/工作背景/团队关系」，`dialogue_style`/`recent_matters` 正常产出
+
+## 已完成（2026-10-29 交互式 config）
+
+- [x] 裸 `trove config` 进入与 `init` 一致的交互式流程:设备名 / WebDAV 地址 / 用户名 / 密码,`initialValue` 取当前配置
+- [x] 密码留空保留原值;地址留空进入本地模式;非交互环境报错并提示 `config set`
+- [x] `config set` / `get` / `path` 子命令保留,与裸命令的 `.action()` 共存
+- [x] TDD:`tests/config-interactive.test.ts` 3 条用例(改写/密码留空保留/非交互退出 1)
+- [x] 真实 CLI 验证:`config path`/`set`/`get` 往返正常,裸 `config` 非交互环境 exit 1
+
+## 已完成（2026-10-29 本地模式）
+
+- [x] `SyncOptions.remote` 改为 `RemoteStore | null`,四段远端拉/推与设备 meta 写全部闸在 `opts.remote` 存在时;本地 collect 与 state 落盘始终执行
+- [x] `loadRuntime` 不再因缺远端抛错,url/password 任一缺失即返回 `remote: null`
+- [x] `cmdInit` 的 `--url` 改为可选:不填进入本地模式(跳过密码校验与连通探针),填了仍要求密码
+- [x] `cmdSync` 本地模式追加「本地模式(未配置远端,仅本地 .trove 归档)」提示
+- [x] TDD:sync null-remote 用例(仅 collect/零拉零推/远端零写入)+ cli 两条用例(sync 降级不报错、init 无 url 本地模式)
+- [x] 真实 CLI 验证:临时 TROVE_HOME 下 `init`(无 url)落空 remote 配置、`sync` 归档 1 项零拉零推且不触远端
+
+## 已完成（2026-10-29 分层架构改造）
+
+- [x] Sidecar 分层存储 L0/L1/L2：`src/core/lessons/sidecar.ts` 新增 `.abstract.md`(L0 ≤256 字) / `.overview.md`(L1 ≤4000 字,含 H1+Brief+Quick Navigation) / 正文(L2)
+- [x] 根 + 5 类目录（preferences/entities/experiences/events/resources）共 12 个 sidecar 文件
+- [x] 新鲜度机制：子写 `pending_child_changes` 递增,跨 10% 阈值触发整目录刷新;`trove refresh` 强制重建
+- [x] write 管线接入：`applyOperations` 由旧 `updateOverview` 改为 `touchSidecars`
+- [x] 新增 `trove refresh` 命令
+- [x] 真实 vault 验证：`node dist/main.js refresh` 产出 12 个分层文件,Quick Navigation 统计与磁盘一致
+
 ## 已完成（2026-10-23 个人资产层）
 
 - [x] `vault/devices` → `vault/raw`（本地 rename，远端一次 MOVE，不重传）

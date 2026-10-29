@@ -195,12 +195,28 @@ describe('trove CLI', () => {
     expect(lines.join('\n')).toContain('daemon 未运行');
   });
 
-  it('未配置远端时 sync 报错退出', async () => {
+  it('未配置远端时 sync 降级为本地模式,仅本地归档不报错', async () => {
     const { paths, lines, deps } = await setup();
     const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });
     await saveConfig(paths.config, config);
     const code = await run(['sync'], deps);
-    expect(code).toBe(1);
-    expect(lines.join('\n')).toContain('trove init');
+    expect(code).toBe(0);
+    expect(lines.join('\n')).toContain('本地模式');
+    expect(lines.join('\n')).toContain('归档 1');
+  });
+
+  it('init:未提供 --url 时进入本地模式,不探测远端', async () => {
+    const { lines, deps } = await setup();
+    const started: number[] = [];
+    const code = await run(['init', '--name', '本机'], {
+      ...deps,
+      startDaemon: async () => {
+        started.push(1);
+        return 456;
+      },
+    });
+    expect(code).toBe(0);
+    expect(lines.join('\n')).toContain('本地模式');
+    expect(started).toHaveLength(1);
   });
 });

@@ -15,7 +15,8 @@ export interface SyncOptions {
   deviceName: string;
   vaultRoot: string;
   statePath: string;
-  remote: RemoteStore;
+  /** null = 本地模式(未配置远端),只归档到本地 vault,不做远端拉/推 */
+  remote: RemoteStore | null;
   /** 0 = 全量;否则只收集最近变更的会话 */
   cutoff: number;
   tmpDir?: string;
@@ -102,54 +103,58 @@ async function syncUnlocked(opts: SyncOptions): Promise<SyncReport> {
   let pulled = emptyPull;
   let libraryPulled = emptyLibrary.pulled;
   if (!opts.pushOnly) {
-    if (opts.rawSync !== false) pulled = await pullRemote({
-      remote: opts.remote,
-      deviceId: opts.deviceId,
-      vaultRoot: opts.vaultRoot,
-      state,
-      progress,
-      signal: opts.signal,
-    });
-    libraryPulled = await pullLibrary({
-      remote: opts.remote,
-      vaultRoot: opts.vaultRoot,
-      deviceId: opts.deviceId,
-      state,
-      progress,
-      signal: opts.signal,
-    });
+    if (opts.remote) {
+      if (opts.rawSync !== false) pulled = await pullRemote({
+        remote: opts.remote,
+        deviceId: opts.deviceId,
+        vaultRoot: opts.vaultRoot,
+        state,
+        progress,
+        signal: opts.signal,
+      });
+      libraryPulled = await pullLibrary({
+        remote: opts.remote,
+        vaultRoot: opts.vaultRoot,
+        deviceId: opts.deviceId,
+        state,
+        progress,
+        signal: opts.signal,
+      });
+    }
     await saveState(opts.statePath, state);
   }
 
   let pushed = emptyPush;
   let libraryPushed = emptyLibrary.pushed;
   if (!opts.pullOnly) {
-    if (opts.rawSync !== false) pushed = await pushLocal({
-      remote: opts.remote,
-      deviceId: opts.deviceId,
-      vaultRoot: opts.vaultRoot,
-      state,
-      now,
-      chunkSize: opts.chunkSize,
-      concurrency: opts.concurrency,
-      progress,
-      signal: opts.signal,
-    });
-    libraryPushed = await pushLibrary({
-      remote: opts.remote,
-      vaultRoot: opts.vaultRoot,
-      deviceId: opts.deviceId,
-      state,
-      statePath: opts.statePath,
-      progress,
-      signal: opts.signal,
-    });
-    if (opts.rawSync !== false) {
-      await opts.remote.writeJson(metaPath(opts.deviceId), {
-        id: opts.deviceId,
-        name: opts.deviceName,
-        lastSeen: now(),
+    if (opts.remote) {
+      if (opts.rawSync !== false) pushed = await pushLocal({
+        remote: opts.remote,
+        deviceId: opts.deviceId,
+        vaultRoot: opts.vaultRoot,
+        state,
+        now,
+        chunkSize: opts.chunkSize,
+        concurrency: opts.concurrency,
+        progress,
+        signal: opts.signal,
       });
+      libraryPushed = await pushLibrary({
+        remote: opts.remote,
+        vaultRoot: opts.vaultRoot,
+        deviceId: opts.deviceId,
+        state,
+        statePath: opts.statePath,
+        progress,
+        signal: opts.signal,
+      });
+      if (opts.rawSync !== false) {
+        await opts.remote.writeJson(metaPath(opts.deviceId), {
+          id: opts.deviceId,
+          name: opts.deviceName,
+          lastSeen: now(),
+        });
+      }
     }
     await saveState(opts.statePath, state);
   }

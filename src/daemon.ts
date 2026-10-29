@@ -26,6 +26,8 @@ export interface DaemonRuntime {
   since: string;
   /** 一轮同步;由 CLI 注入(config/adapters/remote 的组装) */
   runOnce: (progress: Progress, signal: AbortSignal) => Promise<SyncReport>;
+  /** 同步成功后触发(经验提取等);返回可选的日志行。失败只记日志,不中断循环。 */
+  afterSync?: (report: SyncReport) => Promise<string | undefined>;
 }
 
 export const isAlive = isProcessAlive;
@@ -162,6 +164,14 @@ export async function runDaemon(runtime: DaemonRuntime, signal: AbortSignal): Pr
             `库拉取 ${report.library?.pulled.downloaded ?? 0} · 库推送 ${report.library?.pushed.uploaded ?? 0} · ` +
             `${report.durationMs}ms`,
         );
+        if (runtime.afterSync) {
+          try {
+            const note = await runtime.afterSync(report);
+            if (note) await daemonLog(paths, note);
+          } catch (e) {
+            await daemonLog(paths, `经验提取失败: ${(e as Error).message}`);
+          }
+        }
       } catch (err) {
         if (signal.aborted) break; // 主动停止,不算同步失败
         status.lastError = (err as Error).message;

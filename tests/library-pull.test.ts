@@ -66,3 +66,39 @@ describe('pullLibrary 本机文件权威', () => {
     expect(await readFile(abs, 'utf8')).toBe('remote');
   });
 });
+
+describe('pullLibrary 分片本机权威', () => {
+  const shardAbs = (vault: string) => join(vault, 'library', 'index', 'dev1.json');
+  const NEW = '{"v":1,"device":"dev1","updatedAt":"2026-10-29T00:00:00.000Z","sessions":{}}\n';
+
+  it('本机分片已存在时不拿远端同名旧分片覆盖', async () => {
+    const { vault, remote } = await setup('newer');
+    await mkdir(dirname(shardAbs(vault)), { recursive: true });
+    await writeFile(shardAbs(vault), NEW);
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
+
+    const got = JSON.parse(await readFile(shardAbs(vault), 'utf8')) as IndexShard;
+    expect(got.updatedAt).toBe('2026-10-29T00:00:00.000Z');
+  });
+
+  it('本机分片缺失时仍从远端恢复', async () => {
+    const { vault, remote } = await setup('newer');
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
+
+    const got = JSON.parse(await readFile(shardAbs(vault), 'utf8')) as IndexShard;
+    expect(got.updatedAt).toBe('2026-10-23T00:00:00.000Z');
+  });
+
+  it('其他设备的分片仍照常覆盖', async () => {
+    const { vault, remote } = await setup('newer');
+    await mkdir(dirname(shardAbs(vault)), { recursive: true });
+    await writeFile(shardAbs(vault), NEW);
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state: emptyState() });
+
+    const got = JSON.parse(await readFile(shardAbs(vault), 'utf8')) as IndexShard;
+    expect(got.updatedAt).toBe('2026-10-23T00:00:00.000Z');
+  });
+});

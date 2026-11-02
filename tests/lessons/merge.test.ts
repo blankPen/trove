@@ -30,6 +30,21 @@ describe('合并与冲突处理(Stage 6)', () => {
     }
   });
 
+  it('合并与冲突的 LLM 调用带任务标签,供 token 用量归因', async () => {
+    const tasks: string[] = [];
+    const llm = new MockLlm((_prompt, schema, task) => {
+      tasks.push(task ?? '');
+      const props = (schema.properties ?? {}) as Record<string, unknown>;
+      return 'content' in props ? { content: 'merged' } : { conflict: false };
+    });
+    const writing: ExistingMemory[] = [{ type: 'preferences/writing_style', path: 'preferences/writing_style.md', title: '写作风格', content: '回复用简体中文' }];
+    await mergeMemories([cand({ type: 'preferences/writing_style', title: '简体中文回复，技术名词可保留英文' })], writing, { llm });
+    const corrections: ExistingMemory[] = [{ type: 'experiences/correction', path: 'experiences/correction-should-use-set-x.md', title: '脚本应该用 set -x 退出', content: '脚本应该用 set -x' }];
+    await mergeMemories([cand({ type: 'experiences/correction', title: '脚本应该用 set -e 退出' })], corrections, { llm });
+
+    expect(tasks).toEqual(['learn:merge', 'learn:conflict']);
+  });
+
   it('用例 6-3:结论冲突 → 新记忆 add,旧记忆进 archive(superseded_by)', async () => {
     const llm = new MockLlm(() => ({ conflict: true, path: 'experiences/correction-should-use-set-x.md' }));
     const existing: ExistingMemory[] = [{ type: 'experiences/correction', path: 'experiences/correction-should-use-set-x.md', title: '脚本应该用 set -x 退出', content: '脚本应该用 set -x' }];

@@ -94,7 +94,7 @@ async function extractCategory(
     renderEvents(events),
     ...(deps.existing ? [`已有记忆(避免重复提取):${deps.existing}`] : []),
   ].join('\n');
-  const raw = await deps.llm.generate<{ memories?: unknown }>(prompt, CANDIDATE_SCHEMA);
+  const raw = await deps.llm.generate<{ memories?: unknown }>(prompt, CANDIDATE_SCHEMA, 'learn:extract');
   const list = Array.isArray(raw?.memories) ? raw.memories : [];
   const validTypes = new Set(allowed);
   const seqs = new Set(events.map((e) => e.seq));

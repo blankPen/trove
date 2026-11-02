@@ -78,7 +78,7 @@ async function mergeContent(c: MemoryCandidate, existing: ExistingMemory, llm: L
   const prompt = (getMemoryType(c.type)?.mergePrompt ?? '')
     .replace('{summary}', `标题:${c.title}\n正文:${c.content}`)
     .replace('{existing}', existing.content);
-  const raw = await llm.generate<{ content?: unknown }>(prompt, MERGE_SCHEMA);
+  const raw = await llm.generate<{ content?: unknown }>(prompt, MERGE_SCHEMA, 'learn:merge');
   return typeof raw?.content === 'string' ? raw.content : c.content;
 }
 
@@ -95,7 +95,7 @@ async function detectConflict(c: MemoryCandidate, sameType: ExistingMemory[], ll
     '现有记忆:',
     sameType.map((e) => `- ${e.path}: ${e.content}`).join('\n'),
   ].join('\n');
-  const raw = await llm.generate<{ conflict?: unknown; path?: unknown }>(prompt, CONFLICT_SCHEMA);
+  const raw = await llm.generate<{ conflict?: unknown; path?: unknown }>(prompt, CONFLICT_SCHEMA, 'learn:conflict');
   if (raw?.conflict !== true) return null;
   const p = typeof raw.path === 'string' ? raw.path : undefined;
   const matched = p ? sameType.find((e) => e.path === p) : undefined;

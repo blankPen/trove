@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Event } from '../events/schema.js';
 import { libraryDir, libraryLessonsDir } from '../layout.js';
+import { trovePaths } from '../../paths.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from '../library/index-file.js';
 import { listSessions } from '../sessions.js';
 import { ensureLessonsLayout } from './layout.js';
@@ -10,6 +11,7 @@ import { LocalStorageAdapter } from './storage.js';
 import { readLlmConfig, readJevConfig } from './config.js';
 import { DeepSeekLlm } from './llm.js';
 import type { LlmProvider } from './llm.js';
+import { createUsageSink } from './usage.js';
 import { TypeSafeJevScorer } from './jev.js';
 import type { JevProvider } from './jev.js';
 import { buildLessonGraph } from './graph.js';
@@ -22,6 +24,8 @@ export interface LessonProviderDeps {
   now?: () => Date;
   /** 覆盖环境变量;缺省读 process.env。 */
   env?: Record<string, string | undefined>;
+  /** token 用量台账路径;缺省 ~/.trove/usage.jsonl。 */
+  usagePath?: string;
 }
 
 export interface ExtractionOutcome {
@@ -64,7 +68,8 @@ export async function loadSessionEvents(vaultRoot: string, sessionId: string): P
 
 function resolveProviders(deps: LessonProviderDeps): { llm: LlmProvider; jev: JevProvider } {
   // 懒构造:LLM/Jev 配置缺失时由调用方决定跳过还是报错,不拖垮无关命令与 daemon。
-  const llm = deps.llm ?? new DeepSeekLlm(readLlmConfig(deps.env));
+  const usagePath = deps.usagePath ?? trovePaths(deps.env?.TROVE_HOME).usageLog;
+  const llm = deps.llm ?? new DeepSeekLlm(readLlmConfig(deps.env), { onUsage: createUsageSink(usagePath) });
   const jev = deps.jev ?? new TypeSafeJevScorer(readJevConfig(deps.env));
   return { llm, jev };
 }

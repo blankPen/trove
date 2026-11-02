@@ -8,6 +8,8 @@ export interface TrovePaths {
   vault: string;
   /** 游标 + 推送/拉取水位(单文件,原子写) */
   state: string;
+  /** 自身 LLM 调用的 token 用量台账(JSONL,只追加) */
+  usageLog: string;
   logs: string;
   tmp: string;
   daemonPid: string;
@@ -24,6 +26,7 @@ export function trovePaths(
     config: join(base, 'config.json'),
     vault: join(base, 'vault'),
     state: join(base, 'state.json'),
+    usageLog: join(base, 'usage.jsonl'),
     logs: join(base, 'logs'),
     tmp: join(base, 'tmp'),
     daemonPid: join(base, 'daemon.pid'),

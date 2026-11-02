@@ -28,6 +28,8 @@ trove sessions --harness opencode --json
 trove skills                    # 汇总后的技能(最新版本)
 trove skills show review        # 某技能的全部版本与来源
 trove library reindex           # 从设备分片重建统一索引
+trove usage                     # trove 自身 LLM 消耗的 token 用量
+trove usage --since 7d --json   # 限定时间窗,机器可读
 
 # 常驻服务:间隔/时间窗默认取 config.daemon,显式参数优先
 trove config set daemon.intervalSeconds 300
@@ -100,12 +102,19 @@ trove daemon stop
 - 配置示例:`trove config set sync.raw false`;`trove sync --raw` 可临时覆盖。
 - 索引分片按设备隔离,拉取时落盘后本地重建统一索引。
 
+## LLM 用量统计
+
+trove 自己调用 LLM 的场景(手动 `trove learn`、daemon 每轮同步后的经验提取)会把每次调用的 token 用量追加到 `~/.trove/usage.jsonl`:时间、任务(如 `learn:summarize`)、模型、输入/输出/合计 tokens。`trove usage` 按任务与模型汇总,`--since` 限定时间窗,`--json` 输出机器可读结果。
+
+该台账只统计 trove 自身调用 LLM 的消耗,不包含被归档会话里的 usage 字段;Jev 打分走 TypeSafe API,响应不含 token 用量,因此不计入。台账只留本机,不参与同步。
+
 ## 本地布局
 
 ```
 ~/.trove/
 ├── config.json              设备身份与 WebDAV 凭证(600)
 ├── state.json               游标 + 推送/拉取水位 + library 记录(原子写)
+├── usage.jsonl              trove 自身 LLM 调用的 token 用量(只追加,不同步)
 ├── daemon.pid / daemon.status.json
 ├── vault/raw/<device>/<harness>/...       原始字节归档
 ├── vault/library/                         个人资产(会话/技能/索引/lessons)

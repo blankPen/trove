@@ -26,6 +26,7 @@ import { LocalStorageAdapter } from './core/lessons/storage.js';
 import { refreshSidecars } from './core/lessons/sidecar.js';
 import { runLessonExtraction, learnNewSessions } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
+import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
 import {
   daemonState,
   daemonLog,
@@ -410,7 +411,12 @@ async function cmdLearnExtract(
   out: (l: string) => void,
   force: boolean,
 ): Promise<void> {
-  const outcome = await runLessonExtraction(paths.vault, sessionId, lessonDeps, { force });
+  const outcome = await runLessonExtraction(
+    paths.vault,
+    sessionId,
+    { ...lessonDeps, usagePath: paths.usageLog },
+    { force },
+  );
   if (outcome.skipReason === 'already_learned') {
     out('该会话已提取过,跳过(用 --force 强制重跑)');
     return;
@@ -641,9 +647,11 @@ function daemonRuntime(
       });
     },
     afterSync: async () => {
-      const res = await learnNewSessions(paths.vault, lessonDeps, {
-        log: (l) => void daemonLog(paths, l),
-      });
+      const res = await learnNewSessions(
+        paths.vault,
+        { ...lessonDeps, usagePath: paths.usageLog },
+        { log: (l) => void daemonLog(paths, l) },
+      );
       return `经验提取:新增 ${res.extracted} · 跳过 ${res.skipped} · 失败 ${res.errors.length}`;
     },
   };
@@ -807,6 +815,24 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
       } else {
         err('用法: trove learn <session-id> 或 trove learn --list [--session <id>]');
       }
+    });
+
+  program
+    .command('usage')
+    .description('查看 trove 自身消耗的 LLM token 用量(learn 与 daemon 定时任务)')
+    .option('--since <range>', '时间范围(如 7d / 24h / 2026-10-01 / all)', 'all')
+    .option('--json', '输出 JSON')
+    .action(async (opts: { since?: string; json?: boolean }) => {
+      const since = opts.since ?? 'all';
+      const cutoff = parseSince(since, now()); // 非法值抛错,由 run 统一报错退出
+      const records = await readUsageRecords(paths.usageLog);
+      const filtered = cutoff ? records.filter((r) => Date.parse(r.at) >= cutoff) : records;
+      const summary = summarizeUsage(filtered);
+      if (opts.json) {
+        out(JSON.stringify({ since, ...summary }, null, 2));
+        return;
+      }
+      out(formatUsageSummary(summary, since).join('\n'));
     });
 
   program

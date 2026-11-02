@@ -1,5 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { DeepSeekLlm, MockLlm, parseJsonObject } from '../../src/core/lessons/llm.js';
+import { ChatOpenAI } from '@langchain/openai';
+import {
+  DeepSeekLlm,
+  MockLlm,
+  parseJsonObject,
+  usageOfMessage,
+} from '../../src/core/lessons/llm.js';
 import { readJevConfig, readLlmConfig } from '../../src/core/lessons/config.js';
 
 describe('LlmProvider(mock)', () => {
@@ -69,18 +75,98 @@ describe('parseJsonObject', () => {
 });
 
 describe('DeepSeekLlm', () => {
+  const config = {
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-v4-flash',
+    apiKey: 'sk-test',
+  };
+
   it('用配置构造不抛错,且不发起网络请求', () => {
     const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('不应发起网络请求'));
     try {
-      const llm = new DeepSeekLlm({
-        baseUrl: 'https://api.deepseek.com/v1',
-        model: 'deepseek-v4-flash',
-        apiKey: 'sk-test',
-      });
+      const llm = new DeepSeekLlm(config);
       expect(llm).toBeInstanceOf(DeepSeekLlm);
       expect(fetch).not.toHaveBeenCalled();
     } finally {
       fetch.mockRestore();
     }
+  });
+
+  it('调用后按 task 上报模型与 token 用量', async () => {
+    const invoke = vi.spyOn(ChatOpenAI.prototype, 'invoke').mockResolvedValue({
+      content: '{"ok":true}',
+      usage_metadata: { input_tokens: 100, output_tokens: 20, total_tokens: 120 },
+    } as never);
+    const got: unknown[] = [];
+    try {
+      const llm = new DeepSeekLlm(config, { onUsage: (u) => void got.push(u) });
+      expect(await llm.generate('提示词', {}, 'learn:summarize')).toEqual({ ok: true });
+    } finally {
+      invoke.mockRestore();
+    }
+    expect(got).toEqual([
+      {
+        task: 'learn:summarize',
+        model: 'deepseek-v4-flash',
+        promptTokens: 100,
+        completionTokens: 20,
+        totalTokens: 120,
+      },
+    ]);
+  });
+
+  it('返回无法解析的 JSON 时仍记账(token 已消耗)', async () => {
+    const invoke = vi.spyOn(ChatOpenAI.prototype, 'invoke').mockResolvedValue({
+      content: '不是 JSON',
+      usage_metadata: { input_tokens: 7, output_tokens: 3, total_tokens: 10 },
+    } as never);
+    const got: unknown[] = [];
+    try {
+      const llm = new DeepSeekLlm(config, { onUsage: (u) => void got.push(u) });
+      await expect(llm.generate('提示词', {})).rejects.toThrow(/无法解析为 JSON/);
+    } finally {
+      invoke.mockRestore();
+    }
+    expect(got).toEqual([
+      { task: 'llm', model: 'deepseek-v4-flash', promptTokens: 7, completionTokens: 3, totalTokens: 10 },
+    ]);
+  });
+
+  it('用量写盘失败不影响生成结果', async () => {
+    const invoke = vi.spyOn(ChatOpenAI.prototype, 'invoke').mockResolvedValue({
+      content: '{"ok":true}',
+      usage_metadata: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+    } as never);
+    try {
+      const llm = new DeepSeekLlm(config, {
+        onUsage: () => {
+          throw new Error('磁盘炸了');
+        },
+      });
+      await expect(llm.generate('提示词', {}, 'learn:merge')).resolves.toEqual({ ok: true });
+    } finally {
+      invoke.mockRestore();
+    }
+  });
+});
+
+describe('usageOfMessage', () => {
+  it('优先 usage_metadata', () => {
+    expect(
+      usageOfMessage({ usage_metadata: { input_tokens: 10, output_tokens: 5, total_tokens: 15 } }),
+    ).toEqual({ promptTokens: 10, completionTokens: 5, totalTokens: 15 });
+  });
+
+  it('缺 usage_metadata 时回退 response_metadata.tokenUsage', () => {
+    expect(
+      usageOfMessage({
+        response_metadata: { tokenUsage: { promptTokens: 9, completionTokens: 4, totalTokens: 13 } },
+      }),
+    ).toEqual({ promptTokens: 9, completionTokens: 4, totalTokens: 13 });
+  });
+
+  it('无用量字段返回 null', () => {
+    expect(usageOfMessage({ content: 'hi' })).toBeNull();
+    expect(usageOfMessage(null)).toBeNull();
   });
 });

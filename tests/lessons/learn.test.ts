@@ -129,6 +129,22 @@ describe('learn 入口(Stage 9 编排接入)', () => {
     expect(await storage.read('audit/s-1.json')).not.toBeNull();
   });
 
+  it('runLessonExtraction 给每次 LLM 调用打任务标签,供 token 用量归因', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+    const tasks: string[] = [];
+    const inner = happyLlm();
+    const llm = new MockLlm((prompt, schema, task) => {
+      tasks.push(task ?? '');
+      return inner.generate(prompt, schema, task);
+    });
+
+    await runLessonExtraction(vault, 's-1', { llm, jev: mockJev() });
+
+    expect(tasks).toEqual(['learn:summarize', 'learn:classify', 'learn:extract']);
+  });
+
   it('runLessonExtraction 对已审计会话默认跳过,force 强制重跑', async () => {
     const ev = sampleEvents('s-1');
     await writeSession('claude-code', 's-1', ev);

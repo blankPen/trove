@@ -57,12 +57,12 @@ const SCORE_TASK_SUCCESS_MIN = 0.5;
 const SCORE_MEAN_MIN = 0.6;
 
 export async function summarizeSession(events: Event[], llm: LlmProvider): Promise<SessionSummary> {
-  const raw = await llm.generate<unknown>(renderEvents(events), SUMMARY_SCHEMA);
+  const raw = await llm.generate<unknown>(renderEvents(events), SUMMARY_SCHEMA, 'learn:summarize');
   return validateSummary(raw);
 }
 
 export async function classifySession(summary: SessionSummary, llm: LlmProvider): Promise<Classification> {
-  const raw = await llm.generate<unknown>(JSON.stringify(summary), CLASSIFY_SCHEMA);
+  const raw = await llm.generate<unknown>(JSON.stringify(summary), CLASSIFY_SCHEMA, 'learn:classify');
   return validateClassification(raw);
 }
 

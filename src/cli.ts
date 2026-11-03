@@ -699,6 +699,9 @@ async function cmdInit(
     const fromFlags = buildS3FromFlags(opts, existing.remote);
     if (fromFlags) {
       remoteConfig = fromFlags;
+    } else if (!interactive) {
+      err('S3 参数不完整:需要 --bucket --region --access-key-id --secret-access-key(或 TROVE_PASSWORD)。');
+      return 1;
     } else {
       const picked = await promptRemoteConfig(existing.remote, interactive, 's3');
       if (!picked) {

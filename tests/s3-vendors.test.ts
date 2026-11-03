@@ -3,7 +3,6 @@ import {
   S3_VENDORS,
   vendorById,
   resolveEndpoint,
-  defaultRegionFor,
 } from '../src/remote/s3-vendors.js';
 
 /**
@@ -34,8 +33,8 @@ describe('S3 厂商预设', () => {
   });
 
   it('两家默认地域不同', () => {
-    expect(defaultRegionFor('aliyun')).toBe('cn-hangzhou');
-    expect(defaultRegionFor('tencent')).toBe('ap-guangzhou');
+    expect(vendorById('aliyun').defaultRegion).toBe('cn-hangzhou');
+    expect(vendorById('tencent').defaultRegion).toBe('ap-guangzhou');
   });
 
   it('厂商带出展示名与提示文案', () => {

@@ -48,10 +48,6 @@ export function vendorById(id: string): S3Vendor {
   return v;
 }
 
-export function defaultRegionFor(id: S3VendorId): string {
-  return S3_VENDORS[id].defaultRegion;
-}
-
 export interface EndpointSpec {
   provider?: S3VendorId;
   region?: string;

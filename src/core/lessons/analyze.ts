@@ -2,6 +2,7 @@
 import type { Event } from '../events/schema.js';
 import type { LlmProvider } from './llm.js';
 import type { JevProvider, JevScores } from './jev.js';
+import { truncateText } from './select.js';
 
 export type Outcome = 'success' | 'failure' | 'partial' | 'trivial';
 
@@ -81,7 +82,9 @@ export async function analyzeSession(events: Event[], deps: AnalyzeDeps): Promis
   if (summary.outcome === 'trivial') return { status: 'skip', reason: 'trivial' };
   const classification = await classifySession(summary, deps.llm);
   if (!anyCategory(classification)) return { status: 'skip', reason: 'no_category' };
-  const scores = await deps.jev.score({ summary, events });
+  // 只传有界转录而非完整 Event 对象:后者带未截断的 parts/tool.input/非字符串 output/extra,
+  // 体积远超 Jev 输入上限,会触发 max_tokens_exceeded。
+  const scores = await deps.jev.score({ summary, transcript: renderEvents(events) });
   if (scores.taskSuccess < SCORE_TASK_SUCCESS_MIN || scores.meanScore < SCORE_MEAN_MIN) {
     return { status: 'skip', reason: 'low_score', scores };
   }
@@ -133,7 +136,8 @@ export function renderEvents(events: Event[]): string {
       if (e.raw) line += ` @${e.raw.path}:${e.raw.line}`;
       if (e.tool?.input !== undefined) {
         const input = typeof e.tool.input === 'string' ? e.tool.input : JSON.stringify(e.tool.input);
-        if (input && input !== 'undefined') line += ` (input: ${input})`;
+        // 截断:Write/Edit 等工具的入参可能含整篇文件内容,不截会让转录超模型上限。
+        if (input && input !== 'undefined') line += ` (input: ${truncateText(input)})`;
       }
       return line;
     })

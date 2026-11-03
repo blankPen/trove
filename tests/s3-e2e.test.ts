@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,13 +16,27 @@ import { S3Store } from '../src/remote/s3-store.js';
 // s3rver 的默认凭证
 const ACCOUNT = 'S3RVER';
 const SECRET = 'S3RVER';
+/** 每次跑用独立 bucket 名:端口可能撞上别的 s3rver 实例,同名 bucket 会读到别人的数据。 */
+const BUCKET = `trove-e2e-${randomUUID().slice(0, 8)}`;
+
+/** 让系统分配一个空闲端口,避免撞上残留的实例。 */
+function freePort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = createServer();
+    s.listen(0, () => {
+      const addr = s.address();
+      s.close(() => resolve(typeof addr === 'object' && addr ? addr.port : 0));
+    });
+    s.on('error', reject);
+  });
+}
 
 interface S3rverInstance {
-  run: (port: number) => Promise<void>;
+  run: (port: number) => Promise<{ port: number } | undefined>;
   close: () => void;
 }
 
-async function startServer(port: number): Promise<{ s: S3rverInstance; dir: string }> {
+async function startServer(port: number): Promise<{ s: S3rverInstance; dir: string; port: number }> {
   const { default: S3rver } = (await import('s3rver')) as unknown as {
     default: new (opts: unknown) => S3rverInstance;
   };
@@ -29,13 +45,15 @@ async function startServer(port: number): Promise<{ s: S3rverInstance; dir: stri
     port,
     address: '127.0.0.1',
     silent: true,
-    configureBuckets: [{ name: 'trove-bucket', configs: [] }],
+    configureBuckets: [{ name: BUCKET, configs: [] }],
     authentication: { accessKeyId: ACCOUNT, secretAccessKey: SECRET },
     storage: 'S3rverFileStorage',
     storageOptions: { directory: dir },
   });
-  await s.run(port);
-  return { s, dir };
+  const addr = await s.run(port);
+  // 以实际绑定的端口为准
+  const actual = (addr as { port?: number } | undefined)?.port ?? port;
+  return { s, dir, port: actual };
 }
 
 describe('S3Store(真实 S3 服务端端到端)', () => {
@@ -44,14 +62,14 @@ describe('S3Store(真实 S3 服务端端到端)', () => {
   let store: S3Store;
 
   beforeAll(async () => {
-    const port = 19100 + Math.floor(Math.random() * 500);
+    const port = await freePort();
     const started = await startServer(port);
     server = started.s;
     dir = started.dir;
     store = new S3Store({
-      endpoint: `http://127.0.0.1:${port}`,
+      endpoint: `http://127.0.0.1:${started.port}`,
       region: 'us-east-1',
-      bucket: 'trove-bucket',
+      bucket: BUCKET,
       accessKeyId: ACCOUNT,
       secretAccessKey: SECRET,
       forcePathStyle: true,

@@ -2,20 +2,21 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Event } from '../events/schema.js';
+import type { Config } from '../../config.js';
 import { libraryDir, libraryLessonsDir } from '../layout.js';
 import { trovePaths } from '../../paths.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from '../library/index-file.js';
-import { listSessions } from '../sessions.js';
 import { ensureLessonsLayout } from './layout.js';
 import { LocalStorageAdapter } from './storage.js';
 import { readLlmConfig, readJevConfig } from './config.js';
-import { DeepSeekLlm } from './llm.js';
+import { DeepSeekLlm, LlmParseError } from './llm.js';
 import type { LlmProvider } from './llm.js';
 import { createUsageSink } from './usage.js';
 import { TypeSafeJevScorer } from './jev.js';
 import type { JevProvider } from './jev.js';
 import { buildLessonGraph } from './graph.js';
 import type { MemoryDiff } from './audit.js';
+import { readLearnQueue, removeLearn } from './queue.js';
 
 export interface LessonProviderDeps {
   llm?: LlmProvider;
@@ -26,18 +27,13 @@ export interface LessonProviderDeps {
   env?: Record<string, string | undefined>;
   /** token 用量台账路径;缺省 ~/.trove/usage.jsonl。 */
   usagePath?: string;
+  /** 模型端点配置(~/.trove/config.json 的 llm/jev 段);缺省由调用方注入。 */
+  config?: Pick<Config, 'llm' | 'jev'>;
 }
 
 export interface ExtractionOutcome {
   diff?: MemoryDiff;
   skipReason?: string;
-}
-
-export interface LearnNewResult {
-  attempted: number;
-  extracted: number;
-  skipped: number;
-  errors: string[];
 }
 
 /** 从统一索引解析单会话的 canonical 事件;裸 session 错配多个 harness 时报歧义。 */
@@ -69,8 +65,8 @@ export async function loadSessionEvents(vaultRoot: string, sessionId: string): P
 function resolveProviders(deps: LessonProviderDeps): { llm: LlmProvider; jev: JevProvider } {
   // 懒构造:LLM/Jev 配置缺失时由调用方决定跳过还是报错,不拖垮无关命令与 daemon。
   const usagePath = deps.usagePath ?? trovePaths(deps.env?.TROVE_HOME).usageLog;
-  const llm = deps.llm ?? new DeepSeekLlm(readLlmConfig(deps.env), { onUsage: createUsageSink(usagePath) });
-  const jev = deps.jev ?? new TypeSafeJevScorer(readJevConfig(deps.env));
+  const llm = deps.llm ?? new DeepSeekLlm(readLlmConfig(deps.config), { onUsage: createUsageSink(usagePath) });
+  const jev = deps.jev ?? new TypeSafeJevScorer(readJevConfig(deps.config));
   return { llm, jev };
 }
 
@@ -95,56 +91,146 @@ export async function runLessonExtraction(
     loadEvents: (id) => loadSessionEvents(vaultRoot, id),
     now: deps.now,
   });
-  const out = await graph.invoke({ sessionId });
-  if (out.skip) return { skipReason: out.skip.reason };
+  const out = await graph.invoke({ sessionId }).catch((e) => {
+    // 模型重试后仍输出非 JSON:当跳过忽略,不记失败;落 skipped 标记阻止反复重跑。
+    if (e instanceof LlmParseError) return null;
+    throw e;
+  });
+  if (out === null) {
+    await storage
+      .write(
+        `audit/${sessionId}.skipped.json`,
+        JSON.stringify({ session_id: sessionId, reason: 'llm_parse_failed', at: new Date().toISOString() }, null, 2),
+      )
+      .catch(() => {});
+    return { skipReason: 'llm_parse_failed' };
+  }
+  if (out.skip) {
+    // 只在「进行中」豁免:会话尚未结束,等结束后重新进入候选;其余跳过(摘要 trivial/无分类/Jev 低分)落标记,避免反复分析。
+    if (out.skip.reason !== 'in_progress') {
+      // 落盘失败不视为提取失败:最多下次再分析一次,不误报 .failed。
+      await storage
+        .write(
+          `audit/${sessionId}.skipped.json`,
+          JSON.stringify({ session_id: sessionId, reason: out.skip.reason, at: new Date().toISOString() }, null, 2),
+        )
+        .catch(() => {});
+    }
+    return { skipReason: out.skip.reason };
+  }
   return { diff: out.diff };
 }
 
-/** 批量提取未审计过的会话;缺配置时整批跳过并记录,绝不中断调用方(尤其 daemon)。 */
-export async function learnNewSessions(
+/**
+ * 从队列取最多 batch 个候选,逐个跑流水线;处理完(成功/被过滤/失败)都出队,失败落 .failed 标记。
+ * 只学队列里的「本轮新会话」,历史会话走 `trove learn <id>` 手动补。缺配置时不 drain 队列。
+ */
+export async function learnPendingBatch(
   vaultRoot: string,
+  queuePath: string,
   deps: LessonProviderDeps = {},
+  batch = 3,
   opts: { log?: (line: string) => void } = {},
-): Promise<LearnNewResult> {
-  const sessions = await listSessions(vaultRoot);
-  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
-  const result: LearnNewResult = { attempted: 0, extracted: 0, skipped: 0, errors: [] };
-  if (sessions.length === 0) return result; // 无会话时不检查配置,避免误报缺配置
+): Promise<string | undefined> {
+  const ids = await readLearnQueue(queuePath);
+  if (ids.length === 0) return undefined;
 
   let providers: { llm: LlmProvider; jev: JevProvider };
   try {
     providers = resolveProviders(deps);
   } catch (e) {
     opts.log?.(`跳过经验提取:${(e as Error).message}`);
-    return result;
+    return undefined;
   }
 
-  for (const s of sessions) {
-    // 幂等键 = harness:session,避免裸 session 跨 harness 撞名;审计文件由 writeMemoryDiff 写为 audit/<键>.json。
-    const key = `${s.harness}:${s.session}`;
-    // 成功审计或已失败(避重试风暴)都跳过;失败标记可删后重试。
-    if ((await storage.exists(`audit/${key}.json`)) || (await storage.exists(`audit/${key}.failed.json`))) {
-      result.skipped++;
-      continue;
-    }
-    result.attempted++;
+  const candidates = ids.slice(0, batch);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  let extracted = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const key of candidates) {
     try {
       const outcome = await runLessonExtraction(vaultRoot, key, { llm: providers.llm, jev: providers.jev, now: deps.now });
       if (outcome.skipReason) {
-        result.skipped++;
+        skipped++;
         opts.log?.(`会话 ${key} 未达阈值,跳过:${outcome.skipReason}`);
       } else {
-        result.extracted++;
+        extracted++;
         const d = outcome.diff?.summary;
         opts.log?.(`会话 ${key} 提取完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}`);
       }
     } catch (e) {
+      failed++;
       const msg = (e as Error).message;
-      // 落失败标记,阻止 daemon 每轮对同一坏会话重复跑完整 LLM 流水线。
+      // 落失败标记,阻止同一坏会话被反复重跑完整 LLM 流水线;标记可删后重试。
       await storage.write(`audit/${key}.failed.json`, JSON.stringify({ session_id: key, error: msg, at: new Date().toISOString() }, null, 2)).catch(() => {});
-      result.errors.push(`${key}:${msg}`);
       opts.log?.(`会话 ${key} 提取失败:${msg}`);
     }
   }
-  return result;
+
+  await removeLearn(queuePath, candidates);
+  const remaining = (await readLearnQueue(queuePath)).length;
+  return `经验提取:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 待办 ${remaining}`;
+}
+
+/** 从统一索引按 startedAt 降序取最多 limit 个「未学习」会话 key(harness:session)。 */
+async function recentUnlearnedKeys(vaultRoot: string, limit: number): Promise<string[]> {
+  const index = (await loadLibraryIndex(vaultRoot)) ?? (await rebuildUnifiedIndex(vaultRoot));
+  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  const entries = Object.values(index.sessions).sort((a, b) =>
+    (b.startedAt ?? '') > (a.startedAt ?? '') ? 1 : -1,
+  );
+  const keys: string[] = [];
+  for (const s of entries) {
+    const key = `${s.harness}:${s.session}`;
+    // 已成功(.json)或已失败(.failed.json)都算已处理;双形式兜底历史裸 session 落盘。
+    const handled =
+      (await storage.exists(`audit/${key}.json`)) ||
+      (await storage.exists(`audit/${s.session}.json`)) ||
+      (await storage.exists(`audit/${key}.failed.json`)) ||
+      (await storage.exists(`audit/${s.session}.failed.json`)) ||
+      (await storage.exists(`audit/${key}.skipped.json`)) ||
+      (await storage.exists(`audit/${s.session}.skipped.json`));
+    if (!handled) keys.push(key);
+    if (keys.length >= limit) break;
+  }
+  return keys;
+}
+
+/** 手动批量学习:取最近 limit 个未学习会话逐条跑提取,与 daemon 队列学习互不影响。 */
+export async function learnRecentBatch(
+  vaultRoot: string,
+  limit: number,
+  deps: LessonProviderDeps = {},
+  opts: { log?: (line: string) => void } = {},
+): Promise<string> {
+  const keys = await recentUnlearnedKeys(vaultRoot, limit);
+  if (keys.length === 0) return '没有可学习的会话(都已学习或索引为空)';
+
+  // 缺配置在此抛出,与单条 `trove learn <id>` 一致,不静默吞掉手动触发的错误。
+  const { llm, jev } = resolveProviders(deps);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  let extracted = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!;
+    try {
+      const outcome = await runLessonExtraction(vaultRoot, key, { llm, jev, now: deps.now });
+      if (outcome.skipReason) {
+        skipped++;
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} 未达阈值,跳过:${outcome.skipReason}`);
+      } else {
+        extracted++;
+        const d = outcome.diff?.summary;
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} 完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}`);
+      }
+    } catch (e) {
+      failed++;
+      const msg = (e as Error).message;
+      await storage.write(`audit/${key}.failed.json`, JSON.stringify({ session_id: key, error: msg, at: new Date().toISOString() }, null, 2)).catch(() => {});
+      opts.log?.(`[${i + 1}/${keys.length}] ${key} 失败:${msg}`);
+    }
+  }
+  return `经验提取完成:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 共 ${keys.length} 个会话`;
 }

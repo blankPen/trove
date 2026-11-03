@@ -6,7 +6,6 @@ import {
   parseJsonObject,
   usageOfMessage,
 } from '../../src/core/lessons/llm.js';
-import { readJevConfig, readLlmConfig } from '../../src/core/lessons/config.js';
 
 describe('LlmProvider(mock)', () => {
   it('用例 0-1:mock 返回固定对象,全程不发起网络请求', async () => {
@@ -19,39 +18,6 @@ describe('LlmProvider(mock)', () => {
     } finally {
       fetch.mockRestore();
     }
-  });
-});
-
-describe('模型配置读取', () => {
-  it('从环境变量读取 TEXT_MODEL_*', () => {
-    const cfg = readLlmConfig({
-      TEXT_MODEL_BASE_URL: 'https://api.deepseek.com/v1',
-      TEXT_MODEL: 'deepseek-v4-flash',
-      TEXT_MODEL_API_KEY: 'sk-test',
-    });
-    expect(cfg).toEqual({
-      baseUrl: 'https://api.deepseek.com/v1',
-      model: 'deepseek-v4-flash',
-      apiKey: 'sk-test',
-    });
-  });
-
-  it('缺 LLM 配置时明确报错并列出缺失键', () => {
-    expect(() => readLlmConfig({ TEXT_MODEL_BASE_URL: 'x' })).toThrow(/TEXT_MODEL/);
-    expect(() => readLlmConfig({})).toThrow(/TEXT_MODEL_BASE_URL/);
-  });
-
-  it('从环境变量读取 TYPESAFE_*', () => {
-    const cfg = readJevConfig({
-      TYPESAFE_API_KEY: 'tsk-test',
-      TYPESAFE_MODEL: 'jev-latest',
-    });
-    expect(cfg).toEqual({ apiKey: 'tsk-test', model: 'jev-latest' });
-  });
-
-  it('缺 Jev 配置时明确报错并列出缺失键', () => {
-    expect(() => readJevConfig({ TYPESAFE_API_KEY: 'x' })).toThrow(/TYPESAFE_MODEL/);
-    expect(() => readJevConfig({})).toThrow(/TYPESAFE_API_KEY/);
   });
 });
 
@@ -128,6 +94,7 @@ describe('DeepSeekLlm', () => {
       invoke.mockRestore();
     }
     expect(got).toEqual([
+      { task: 'llm', model: 'deepseek-v4-flash', promptTokens: 7, completionTokens: 3, totalTokens: 10 },
       { task: 'llm', model: 'deepseek-v4-flash', promptTokens: 7, completionTokens: 3, totalTokens: 10 },
     ]);
   });

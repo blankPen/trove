@@ -405,9 +405,10 @@ vault/library/lessons/
 
 13. **已知风险（真实数据暴露，未修复）**：(a) 6 个相似 tabbit/飞书会话 Jev 打分波动，部分 low_score 被跳过（Jev 对相似内容打分不一致）；(b) 2 类真实 ERR——`LLM 返回无法解析为 JSON`（workflow content 超长被截断）、`Jev 打分失败 HTTP 400 max_tokens_exceeded`（事件过多超 token 上限）；(c) 幂等键用裸 session id，跨 harness 同 id 会话会碰撞（误判已学习）。
 
-14. **设计变更（待实现）：learn 自动机制与 sync 解耦，只自动学新会话、历史全手动（2026-10-29）**。
+14. **已实现：learn 自动机制与 sync 解耦，只自动学新会话、历史全手动（2026-10-29）**。
     - 现状问题（真实数据暴露）：(a) `learnNewSessions` 内联在 daemon `afterSync` 并被 `await`，sync 主循环被 learn 阻塞；(b) 无时间窗/无配额，候选 = 全部未审计会话——实测 1890 个未审计中 1388 个通过阶段 3 确定性过滤，重启后首次 `afterSync` 会串行跑完这 1388 条完整流水线（每条多次 LLM+Jev），持续数小时且阻塞 sync；(c) 触发只依赖 `audit/<id>.json` 存在性，无「新会话」判据。
     - 决策：回填策略 = **只自动学新会话，历史全手动**（历史用 `trove learn <id>` 补）；落地 = 把 learn 从 `afterSync` 拆出，成为 daemon 进程内与 sync 并列的独立调度循环。
-    - 机制：sync 完成后把「本轮新归档/变更的会话 id 集合」交给 learn 调度器（需 `CollectResult` 暴露 id 列表，当前只有 `sessions` 计数，小改）；learn 循环按 `learnInterval` tick，每 tick 最多 `learnBatch`（默认 3）条，single-flight 防重叠；复用 `audit/<id>.json` 作「已学」标记，零新增状态文件。
-    - 必处理的并发边界：learn 写 lessons 与 sync push 读 lessons 会并发，需保证不把半成品文件上传（learn 写完后再让本轮 push 可见，或两者对 lessons 互斥）。
-    - 状态：未实现，待定 `learnInterval` / `learnBatch` 默认值后实施；`daemon.since` 时间窗不变（仍约束 sync 收集范围，与 learn 范围解耦）。
+    - 机制：sync 完成后把「本轮新归档/变更的会话 id 集合」入队（`afterSync` 只做入队，`CollectResult.changedSessions` 现成暴露 id 列表）；`learnLoop` 与 `syncLoop` 并列，按 `learnIntervalSeconds`（默认 60）tick，每 tick 最多 `learnBatch`（默认 3）条，single-flight 防重叠；复用 `audit/<id>.json` 作「已学」标记，失败写 `audit/<id>.failed.json` 防重试风暴，零新增状态文件。并发边界：learn 与 sync 共享同一 AbortSignal，learn 批写入独立于 sync push 的 lessons 读取，落盘原子写。
+    - **本会话修复的关键 bug**：`collect.changedSessions` 对 claude-code 此前产出的是 relPath 形 `claude-code:projects/-Users-admin-orca-trove/<uuid>.jsonl`，而统一索引与 `loadSessionEvents` 用裸 UUID 形 `claude-code:<uuid>` 做键，两者对不上 → learn 每 tick 报 `没有找到会话`（真实 daemon 日志：`会话 claude-code:projects/...jsonl 提取失败:没有找到会话`）。修复：给 `claudeCodeAdapter` 补 `sessionKeyOf`（按文件名取 UUID，与 `group.claudeSessionOf` 同口径），`changedSessions` 现在产出 `claude-code:<uuid>`。
+    - 真实验证：(a) 运行时用真实 `.claude` 文件经 `sessionKeyOf` 产出裸 UUID（1266 个会话 key，0 个含 `projects/` 前缀）；(b) `trove learn claude-code:5d6dfa8c-5be6-4ff2-b633-ae330cb0a501` 直接解析成功（`会话未达提取阈值,跳过: low_score`，不再 `没有找到会话`）；(c) 重建 dist + 重启 daemon（pid 3337，继承 `.env` 的 LLM/Jev 环境），首轮 sync 后 learn 入队不再出现 relPath 形失败。用例见 `tests/adapters.test.ts`（sessionKeyOf）、`tests/daemon.test.ts`（learnLoop tick）。
+    - 已知限制（shortcut）：codex 会话 id 是内容派生（`session_meta.payload.id`，见 `events/codex.ts`），文件名推不出，故 codex 仍未配 `sessionKeyOf`，其 `changedSessions` 若被入队会落 `audit/<id>.failed.json` 优雅降级（不重试风暴）；当前 vault 无 codex 数据可验，待有 codex 会话时再按 `group.codexSessionOf` 读内容对齐。

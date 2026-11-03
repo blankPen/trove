@@ -39,6 +39,8 @@ export interface CollectResult {
   bytesCopied: number;
   /** 本次涉及的会话数(按 harness + sessionKey 去重) */
   sessions: number;
+  /** 本轮新归档/追加/重置的会话(harness:session),供 learn 只自动学新会话 */
+  changedSessions: string[];
 }
 
 function archivePath(vaultRoot: string, deviceId: string, harness: string, relPath: string): string {
@@ -63,8 +65,10 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
     outOfWindow: 0,
     bytesCopied: 0,
     sessions: 0,
+    changedSessions: [],
   };
   const sessionSeen = new Set<string>();
+  const changedSessions = new Set<string>();
 
   for (const adapter of adapters) {
     if (adapter.kind === 'files') {
@@ -72,7 +76,6 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
       result.discovered += files.length;
       progress.phase('collect', `${adapter.displayName}: ${files.length} 个文件`);
       const sessionFiles = new Map<string, string[]>();
-      const changedSessions = new Set<string>();
       let n = 0;
       for (const f of files) {
         throwIfAborted(opts.signal);
@@ -103,7 +106,7 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
         const list = sessionFiles.get(f.sessionKey) ?? [];
         list.push(f.relPath);
         sessionFiles.set(f.sessionKey, list);
-        if (r.action !== 'skip') changedSessions.add(f.sessionKey);
+        if (r.action !== 'skip') changedSessions.add(`${adapter.id}:${f.sessionKey}`);
         progress.item(f.relPath, n, files.length, r.bytesCopied);
       }
       continue;
@@ -121,7 +124,6 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
       result.discovered += sessions.length;
       progress.phase('collect', `${adapter.displayName}: ${sessions.length} 个会话`);
       const sessionFiles = new Map<string, string[]>();
-      const changedSessions = new Set<string>();
       let n = 0;
       for (const s of sessions) {
         throwIfAborted(opts.signal);
@@ -178,7 +180,7 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
             newGeneration: opts.newGeneration,
           });
           tally(result, r.action, r.bytesCopied);
-          if (r.action !== 'skip') changedSessions.add(s.id);
+          if (r.action !== 'skip') changedSessions.add(`${adapter.id}:${s.id}`);
           if (r.cursor) {
             bucket[relPath] = {
               ...r.cursor,
@@ -198,6 +200,7 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
   }
 
   result.sessions = sessionSeen.size;
+  result.changedSessions = [...changedSessions];
   // raw 落盘后立即构建个人资产层(library);未变化的会话按签名跳过
   await buildLibrary({ vaultRoot, deviceId, state });
   return result;

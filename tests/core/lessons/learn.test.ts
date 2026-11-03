@@ -1,0 +1,351 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch } from '../../../src/core/lessons/learn.js';
+import { readLearnQueue, enqueueLearn } from '../../../src/core/lessons/queue.js';
+import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
+import { libraryDir, libraryLessonsDir, safeSessionName } from '../../../src/core/layout.js';
+import { MockLlm, LlmParseError } from '../../../src/core/lessons/llm.js';
+import { MockJev } from '../../../src/core/lessons/jev.js';
+import type { Event } from '../../../src/core/events/schema.js';
+
+let vault: string;
+let storage: LocalStorageAdapter;
+
+beforeEach(async () => {
+  vault = await mkdtemp(join(tmpdir(), 'lessons-learn-'));
+  storage = new LocalStorageAdapter(libraryLessonsDir(vault));
+});
+
+afterEach(async () => {
+  await rm(vault, { recursive: true, force: true });
+});
+
+/** 6 条事件:含 session 头、`改成` 纠正信号、tool_call、失败的 tool_result。ts 距今 10+ 分钟,已结束。 */
+function sampleEvents(session: string): Event[] {
+  const t0 = Date.now() - 11 * 60 * 1000;
+  const mk = (seq: number, kind: Event['kind'], extra: Partial<Event> = {}): Event => ({
+    v: 1,
+    ts: new Date(t0 + seq * 1000).toISOString(),
+    seq,
+    harness: 'claude-code',
+    session,
+    kind,
+    ...extra,
+  });
+  return [
+    mk(0, 'session', { cwd: '/Users/admin/orca/trove' }),
+    mk(1, 'message', { role: 'user', text: '这里不对,脚本退出应该用 set -e,改成 set -e' }),
+    mk(2, 'tool_call', { tool: { name: 'Bash', call_id: 'c1' } }),
+    mk(3, 'tool_result', { role: 'tool', result: { call_id: 'c1', status: 'ok', output: 'ok' } }),
+    mk(4, 'tool_result', { role: 'tool', result: { call_id: 'c2', status: 'error', output: 'command not found' } }),
+    mk(5, 'message', { role: 'assistant', text: '好的,已修正' }),
+  ];
+}
+
+/** 写一个 canonical 会话 jsonl + 统一索引,供 loadSessionEvents/listSessions 使用。 */
+async function writeSession(harness: string, session: string, events: Event[]): Promise<void> {
+  const dir = join(libraryDir(vault), 'sessions', harness, safeSessionName(session));
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'd1.jsonl'), events.map((e) => JSON.stringify(e)).join('\n') + '\n', 'utf8');
+}
+
+async function writeIndex(sessions: Array<{ harness: string; session: string; events: Event[]; startedAt?: string }>): Promise<void> {
+  const sessionsMap: Record<string, unknown> = {};
+  for (const s of sessions) {
+    sessionsMap[`${s.harness}:${s.session}`] = {
+      harness: s.harness,
+      session: s.session,
+      ...(s.startedAt ? { startedAt: s.startedAt } : {}),
+      canonical: {
+        device: 'd1',
+        path: `sessions/${s.harness}/${safeSessionName(s.session)}/d1.jsonl`,
+        hash: 'h',
+        events: s.events.length,
+      },
+      variants: [],
+      sources: ['d1'],
+    };
+  }
+  const index = { v: 1, generatedAt: new Date().toISOString(), hash: '', sessions: sessionsMap, skills: {} };
+  await mkdir(libraryDir(vault), { recursive: true });
+  await writeFile(join(libraryDir(vault), 'index.json'), JSON.stringify(index, null, 2) + '\n', 'utf8');
+}
+
+/** 按 schema 的 properties 键区分要返回的 stage 结果,走通完整 happy path。 */
+function happyLlm(): MockLlm {
+  return new MockLlm((_prompt, schema) => {
+    const props = (schema.properties ?? {}) as Record<string, unknown>;
+    if ('keySteps' in props) {
+      return { topic: '调试脚本', intent: '修复脚本退出码', outcome: 'success', keySteps: ['改用 set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
+    }
+    if ('experiences' in props) return { preferences: false, entities: false, experiences: true, events: false, resources: false };
+    if ('memories' in props) {
+      return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: 'shell 脚本退出时应使用 set -e 让错误立即中断', slug: 'set-e', evidence: [1] }] };
+    }
+    if ('conflict' in props) return { conflict: false };
+    if ('content' in props) return { content: 'merged' };
+    return {};
+  });
+}
+
+function mockJev(): MockJev {
+  return new MockJev(() => ({ taskSuccess: 1, meanScore: 1 }));
+}
+
+describe('learn 入口(Stage 9 编排接入)', () => {
+  it('loadSessionEvents 从统一索引解析 canonical 事件', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const events = await loadSessionEvents(vault, 's-1');
+    expect(events).toHaveLength(6);
+    expect(events[0]).toMatchObject({ kind: 'session', cwd: '/Users/admin/orca/trove' });
+  });
+
+  it('loadSessionEvents 裸 session 在多个 harness 下报歧义', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeSession('codex', 's-1', ev);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: ev },
+      { harness: 'codex', session: 's-1', events: ev },
+    ]);
+
+    await expect(loadSessionEvents(vault, 's-1')).rejects.toThrow(/歧义/);
+  });
+
+  it('runLessonExtraction 单会话端到端:写记忆文件 + INDEX + audit', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: happyLlm(), jev: mockJev() });
+
+    expect(outcome.skipReason).toBeUndefined();
+    expect(outcome.diff?.summary.adds).toBe(1);
+    expect(await storage.read('experiences/debug-set-e.md')).not.toBeNull();
+    expect(await storage.read('INDEX.md')).not.toBeNull();
+    expect(await storage.read('audit/s-1.json')).not.toBeNull();
+  });
+
+  it('runLessonExtraction 对已审计会话默认跳过,force 强制重跑', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+    await storage.write('audit/s-1.json', '{}'); // 模拟已学习过
+
+    const skipped = await runLessonExtraction(vault, 's-1', { llm: happyLlm(), jev: mockJev() });
+    expect(skipped.skipReason).toBe('already_learned');
+    expect(skipped.diff).toBeUndefined();
+
+    const forced = await runLessonExtraction(vault, 's-1', { llm: happyLlm(), jev: mockJev() }, { force: true });
+    expect(forced.skipReason).toBeUndefined();
+    expect(forced.diff?.summary.adds).toBe(1);
+  });
+
+  it('runLessonExtraction 阶段 4 Jev 低分跳过 → 落 skipped 标记,不再重复分析', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const lowJev = new MockJev(() => ({ taskSuccess: 0, meanScore: 0 }));
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: happyLlm(), jev: lowJev });
+
+    expect(outcome.skipReason).toBe('low_score');
+    expect(await storage.read('audit/s-1.skipped.json')).not.toBeNull();
+    // 未写成功标记,也未写失败标记
+    expect(await storage.read('audit/s-1.json')).toBeNull();
+  });
+
+  it('runLessonExtraction LLM 返回无法解析为 JSON → 落 skipped(忽略),不记失败', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    // 模拟 DeepSeekLlm 重试仍失败后抛出的 LlmParseError,验证 instanceof 穿过 graph.invoke 后仍成立。
+    const parseFailingLlm = new MockLlm(() => { throw new LlmParseError('LLM 返回无法解析为 JSON:xxx'); });
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: parseFailingLlm, jev: mockJev() });
+
+    expect(outcome.skipReason).toBe('llm_parse_failed');
+    expect(await storage.read('audit/s-1.skipped.json')).not.toBeNull();
+    expect(await storage.read('audit/s-1.failed.json')).toBeNull();
+    expect(await storage.read('audit/s-1.json')).toBeNull();
+  });
+
+  it('runLessonExtraction 进行中(in_progress)跳过 → 不落 skipped 标记,可重复触发', async () => {
+    const t0 = Date.now() - 2 * 60 * 1000; // 2 分钟前,仍在进行
+    const mk = (seq: number, kind: Event['kind'], extra: Partial<Event> = {}): Event => ({
+      v: 1,
+      ts: new Date(t0 + seq * 1000).toISOString(),
+      seq,
+      harness: 'claude-code',
+      session: 's-1',
+      kind,
+      ...extra,
+    });
+    const ev = [
+      mk(0, 'session', { cwd: '/tmp' }),
+      mk(1, 'message', { role: 'user', text: '在吗' }),
+      mk(2, 'message', { role: 'assistant', text: '在' }),
+    ];
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: happyLlm(), jev: mockJev() });
+
+    expect(outcome.skipReason).toBe('in_progress');
+    expect(await storage.read('audit/s-1.skipped.json')).toBeNull();
+    expect(await storage.read('audit/s-1.json')).toBeNull();
+  });
+
+  it('learnPendingBatch 只处理队列里的候选,已审计跳过,处理完出队', async () => {
+    const e1 = sampleEvents('s-1');
+    const e2 = sampleEvents('s-2');
+    await writeSession('claude-code', 's-1', e1);
+    await writeSession('claude-code', 's-2', e2);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: e1 },
+      { harness: 'claude-code', session: 's-2', events: e2 },
+    ]);
+    // s-2 已提取过:harness:session 审计文件已存在 → 跳过
+    await storage.write('audit/claude-code:s-2.json', '{}');
+    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1', 'claude-code:s-2']);
+
+    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: happyLlm(), jev: mockJev() }, 10);
+
+    expect(note).toContain('新增 1');
+    expect(note).toContain('跳过 1');
+    expect(await storage.read('audit/claude-code:s-1.json')).not.toBeNull();
+    expect(await storage.read('audit/claude-code:s-2.json')).toBe('{}'); // 未被重写
+    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual([]);
+  });
+
+  it('learnPendingBatch 裸 session 跨 harness 撞名时各自独立去重', async () => {
+    const e1 = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', e1);
+    await writeSession('codex', 's-1', e1);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: e1 },
+      { harness: 'codex', session: 's-1', events: e1 },
+    ]);
+    // 仅 codex 已提取过
+    await storage.write('audit/codex:s-1.json', '{}');
+    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1', 'codex:s-1']);
+
+    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: happyLlm(), jev: mockJev() }, 10);
+
+    expect(note).toContain('新增 1');
+    expect(note).toContain('跳过 1');
+    expect(await storage.read('audit/claude-code:s-1.json')).not.toBeNull();
+    expect(await storage.read('audit/codex:s-1.json')).toBe('{}'); // 未被重写
+  });
+
+  it('learnPendingBatch 按 batch 限量,只处理前 N 个候选,其余留在队列', async () => {
+    // 全部预先审计 → 走 skip 分支(不碰 providers/index),便于验证出队数量与批量上限
+    for (let i = 1; i <= 5; i++) await storage.write(`audit/claude-code:s-${i}.json`, '{}');
+    await enqueueLearn(
+      join(vault, 'learn-queue.json'),
+      ['s-1', 's-2', 's-3', 's-4', 's-5'].map((s) => `claude-code:${s}`),
+    );
+
+    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: happyLlm(), jev: mockJev() }, 3);
+
+    expect(note).toContain('跳过 3');
+    expect(note).toContain('待办 2');
+    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual(['claude-code:s-4', 'claude-code:s-5']);
+  });
+
+  it('learnPendingBatch 空队列直接返回 undefined,不触碰 providers', async () => {
+    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: happyLlm(), jev: mockJev() }, 10);
+    expect(note).toBeUndefined();
+  });
+
+  it('learnPendingBatch 提取失败落标记并出队,后续不再重试', async () => {
+    const e1 = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', e1);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: e1 }]);
+    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1']);
+
+    const failingLlm = new MockLlm(() => { throw new Error('LLM 炸了'); });
+    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: failingLlm, jev: mockJev() }, 10);
+
+    expect(note).toContain('失败 1');
+    expect(await storage.read('audit/claude-code:s-1.failed.json')).not.toBeNull();
+    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual([]); // 失败也出队,防重试风暴
+
+    // 队列已空 → 第二轮不再触碰该坏会话
+    const note2 = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: happyLlm(), jev: mockJev() }, 10);
+    expect(note2).toBeUndefined();
+  });
+});
+
+describe('learnRecentBatch 手动批量学习', () => {
+  it('按 startedAt 降序取最近 N 个未学习会话,超出部分不学', async () => {
+    const e1 = sampleEvents('s-1');
+    const e2 = sampleEvents('s-2');
+    const e3 = sampleEvents('s-3');
+    for (const [s, e] of [['s-1', e1], ['s-2', e2], ['s-3', e3]] as const) await writeSession('claude-code', s, e);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: e1, startedAt: '2026-01-01T00:00:00.000Z' },
+      { harness: 'claude-code', session: 's-2', events: e2, startedAt: '2026-02-01T00:00:00.000Z' },
+      { harness: 'claude-code', session: 's-3', events: e3, startedAt: '2026-03-01T00:00:00.000Z' },
+    ]);
+
+    const logs: string[] = [];
+    const note = await learnRecentBatch(vault, 2, { llm: happyLlm(), jev: mockJev() }, { log: (l) => logs.push(l) });
+
+    expect(note).toContain('新增 2');
+    expect(note).toContain('共 2');
+    // 最近两个是 s-3、s-2;s-1 最老未被碰
+    expect(await storage.read('audit/claude-code:s-3.json')).not.toBeNull();
+    expect(await storage.read('audit/claude-code:s-2.json')).not.toBeNull();
+    expect(await storage.read('audit/claude-code:s-1.json')).toBeNull();
+    // 进度带 [i/N] 序号
+    expect(logs[0]).toMatch(/^\[1\/2\] claude-code:s-3/);
+    expect(logs[1]).toMatch(/^\[2\/2\] claude-code:s-2/);
+  });
+
+  it('跳过已学习与已失败会话(双形式兜底裸 session 历史记录)', async () => {
+    const e1 = sampleEvents('s-1');
+    const e2 = sampleEvents('s-2');
+    const e3 = sampleEvents('s-3');
+    for (const [s, e] of [['s-1', e1], ['s-2', e2], ['s-3', e3]] as const) await writeSession('claude-code', s, e);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: e1, startedAt: '2026-01-01T00:00:00.000Z' },
+      { harness: 'claude-code', session: 's-2', events: e2, startedAt: '2026-02-01T00:00:00.000Z' },
+      { harness: 'claude-code', session: 's-3', events: e3, startedAt: '2026-03-01T00:00:00.000Z' },
+    ]);
+    // s-1 已学(harness:session)、s-3 已学(裸 session,模拟历史 doubao 手动 learn 落盘)
+    await storage.write('audit/claude-code:s-1.json', '{}');
+    await storage.write('audit/s-3.json', '{}');
+    // s-2 已失败
+    await storage.write('audit/claude-code:s-2.failed.json', '{}');
+
+    const note = await learnRecentBatch(vault, 10, { llm: happyLlm(), jev: mockJev() });
+
+    expect(note).toBe('没有可学习的会话(都已学习或索引为空)');
+    // 三个会话都未被重跑
+    expect(await storage.read('audit/s-1.json')).toBeNull();
+  });
+
+  it('无 startedAt 的会话排最后,仍纳入候选', async () => {
+    const e1 = sampleEvents('s-1');
+    const e2 = sampleEvents('s-2');
+    await writeSession('claude-code', 's-1', e1);
+    await writeSession('claude-code', 's-2', e2);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: e1, startedAt: '2026-01-01T00:00:00.000Z' },
+      { harness: 'claude-code', session: 's-2', events: e2 }, // 无 startedAt
+    ]);
+
+    const note = await learnRecentBatch(vault, 1, { llm: happyLlm(), jev: mockJev() });
+
+    // 只取 1 个 → 有 startedAt 的 s-1 优先
+    expect(note).toContain('共 1');
+    expect(await storage.read('audit/claude-code:s-1.json')).not.toBeNull();
+    expect(await storage.read('audit/claude-code:s-2.json')).toBeNull();
+  });
+});

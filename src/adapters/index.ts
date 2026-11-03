@@ -85,6 +85,18 @@ export function claudeCodeAdapter(root: string): FileAdapter {
         'hooks',
         'daemon',
       ],
+      // 会话 id = 文件名 UUID(与 group.claudeSessionOf 同口径),供 learn 入队与统一索引对齐
+      sessionKeyOf: (rel) => {
+        if (rel.startsWith('transcripts/') && rel.endsWith('.jsonl')) {
+          return rel.slice('transcripts/'.length).replace(/\.jsonl$/, '');
+        }
+        if (rel.startsWith('projects/') && rel.endsWith('.jsonl')) {
+          const parts = rel.split('/');
+          const sub = parts.indexOf('subagents');
+          return (sub > 0 ? parts[sub - 1]! : parts[parts.length - 1]!).replace(/\.jsonl$/, '');
+        }
+        return rel;
+      },
     },
   };
 }
@@ -108,6 +120,8 @@ export function codexAdapter(root: string): FileAdapter {
       exclusions: ['auth.json', 'config.toml', 'config.toml.bak', '*.sqlite', '*.sqlite-wal', '*.sqlite-shm'],
       sessionPatterns: ['sessions/**/*.jsonl', 'archived_sessions/**/*.jsonl'],
       pruneDirs: ['.tmp', 'tmp', 'log', 'logs', 'shell_snapshots', 'thread-writer-locks'],
+      // shortcut: 未配 sessionKeyOf,codex 会话 id 是内容派生(session_meta.payload.id)、文件名推不出,
+      // 因此 changedSessions 会落 relPath 形 key 并在 learn 里 fail(failed.json 优雅降级);待有 codex 数据时按 group.codexSessionOf 读内容对齐
     },
   };
 }

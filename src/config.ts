@@ -33,6 +33,10 @@ export interface DaemonConfig {
   since: string;
   /** init 后自动启动 daemon */
   startOnInit: boolean;
+  /** learn 独立循环间隔秒数(与 sync 解耦) */
+  learnIntervalSeconds: number;
+  /** learn 每个 tick 最多处理的候选会话数 */
+  learnBatch: number;
 }
 
 export interface Config {
@@ -41,6 +45,10 @@ export interface Config {
   sources: SourcesConfig;
   sync: SyncConfig;
   daemon: DaemonConfig;
+  /** 经验提取 LLM 端点;缺省视为未配置,手动 learn 时报错提示 trove config set */
+  llm?: { baseUrl: string; model: string; apiKey: string };
+  /** Jev 打分端点;baseUrl 缺省用官方端点,可指向代理/镜像绕过区域限制 */
+  jev?: { apiKey: string; model: string; baseUrl?: string };
 }
 
 /** 命令行显式开关优先;否则取配置;老配置文件缺省按开启。 */
@@ -70,7 +78,7 @@ export function defaultConfig(
       doubao: { enabled: true },
     },
     sync: { raw: true },
-    daemon: { intervalSeconds: 300, since: '7d', startOnInit: true },
+    daemon: { intervalSeconds: 300, since: '7d', startOnInit: true, learnIntervalSeconds: 60, learnBatch: 3 },
   };
 }
 
@@ -97,6 +105,8 @@ export async function loadConfig(path: string): Promise<Config> {
       intervalSeconds: parsed.daemon?.intervalSeconds ?? 300,
       since: parsed.daemon?.since ?? '7d',
       startOnInit: parsed.daemon?.startOnInit !== false,
+      learnIntervalSeconds: parsed.daemon?.learnIntervalSeconds ?? 60,
+      learnBatch: parsed.daemon?.learnBatch ?? 3,
     },
   };
 }

@@ -6,8 +6,15 @@ export interface JevScores {
   meanScore: number;
 }
 
+/** Jev 批量 noul 判定的问题描述:每个 key 对应一个待判对象(如一个 tool 调用对)。 */
+export interface JevKeepQuestion {
+  instructions: string;
+}
+
 export interface JevProvider {
   score(state: unknown): Promise<JevScores>;
+  /** 快速压缩:对 questions 每个 key 出一个 0~1 关键概率(noul)。可选——未实现时 compaction 降级为确定性截断。 */
+  keepCalls?(state: unknown, questions: Record<string, JevKeepQuestion>): Promise<Record<string, number>>;
 }
 
 const JEV_ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
@@ -19,14 +26,16 @@ const VALUE_LEVELS = ['不可复用:琐碎、无通用价值', '部分可复用:
 export class TypeSafeJevScorer implements JevProvider {
   private apiKey: string;
   private model: string;
+  private baseUrl: string;
 
   constructor(config: JevConfig) {
     this.apiKey = config.apiKey;
     this.model = config.model;
+    this.baseUrl = config.baseUrl ?? JEV_ENDPOINT;
   }
 
   async score(state: unknown): Promise<JevScores> {
-    const res = await fetch(JEV_ENDPOINT, {
+    const res = await fetch(this.baseUrl, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${this.apiKey}`,
@@ -61,6 +70,36 @@ export class TypeSafeJevScorer implements JevProvider {
     const meanScore = top > 0 ? value / top : 0;
     return { taskSuccess, meanScore: clamp01(meanScore) };
   }
+
+  async keepCalls(state: unknown, questions: Record<string, JevKeepQuestion>): Promise<Record<string, number>> {
+    const res = await fetch(this.baseUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.model,
+        state,
+        questions: Object.fromEntries(
+          Object.entries(questions).map(([id, q]) => [id, { type: 'noul', instructions: q.instructions }]),
+        ),
+      }),
+    });
+    if (!res.ok) {
+      throw new Error(`Jev 压缩判定失败:HTTP ${res.status} ${await res.text()}`);
+    }
+    const data = (await res.json()) as { answers?: Record<string, { noul?: number }> };
+    const out: Record<string, number> = {};
+    for (const id of Object.keys(questions)) {
+      const n = data.answers?.[id]?.noul;
+      if (typeof n !== 'number') {
+        throw new Error(`Jev 压缩判定结构不符:${JSON.stringify(data)}`);
+      }
+      out[id] = clamp01(n);
+    }
+    return out;
+  }
 }
 
 interface JevResponse {
@@ -70,10 +109,14 @@ interface JevResponse {
   };
 }
 
-/** 降级开关:恒返回通过分数,仅本地调试用,默认不使用。 */
+/** 降级开关:恒返回通过分数、压缩时全保留,仅本地调试用,默认不使用。 */
 export class PassThroughJev implements JevProvider {
   async score(_state: unknown): Promise<JevScores> {
     return { taskSuccess: 1, meanScore: 1 };
+  }
+
+  async keepCalls(_state: unknown, questions: Record<string, JevKeepQuestion>): Promise<Record<string, number>> {
+    return Object.fromEntries(Object.keys(questions).map((id) => [id, 1]));
   }
 }
 

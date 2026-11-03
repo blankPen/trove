@@ -47,6 +47,7 @@ const emptyCollect: CollectResult = {
   outOfWindow: 0,
   bytesCopied: 0,
   sessions: 0,
+  changedSessions: [],
 };
 const emptyPull: PullResult = {
   downloadedChunks: 0,

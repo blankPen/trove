@@ -22,7 +22,7 @@ export interface ExtractDeps {
 }
 
 const TYPES_BY_CATEGORY: Record<keyof Classification, string[]> = {
-  preferences: ['preferences/profile', 'preferences/coding_style', 'preferences/writing_style', 'preferences/dialogue_style', 'preferences/recent_matters'],
+  preferences: ['preferences/profile', 'preferences/coding_style', 'preferences/writing_style', 'preferences/dialogue_style'],
   entities: ['entities/project', 'entities/people', 'entities/organization', 'entities/tool', 'entities/tech'],
   experiences: ['experiences/debug_pattern', 'experiences/workflow', 'experiences/gotcha', 'experiences/correction'],
   events: ['events/decision'],

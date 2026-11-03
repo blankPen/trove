@@ -37,6 +37,17 @@ export class DeepSeekLlm implements LlmProvider {
   async generate<T>(prompt: string, schema: Record<string, unknown>, task = 'llm'): Promise<T> {
     // schema 注入 prompt 引导字段;json_object 要求 prompt 含 "json" 字样,故用 JSON Schema 措辞。
     const full = `${prompt}\n\n按以下 JSON Schema 返回一个 JSON 对象,不要输出其它内容:\n${JSON.stringify(schema)}`;
+    try {
+      return parseJsonObject<T>(await this.invokeText(full, task));
+    } catch (e) {
+      if (!(e instanceof LlmParseError)) throw e;
+      // 纠错:模型偶尔无视 json_object 输出非 JSON(如写文档会话),重试一次并把格式约束说死。
+      const retry = `${full}\n\n上次输出不是合法 JSON。忽略原任务,只返回一个 JSON 对象,不要任何解释或原文。`;
+      return parseJsonObject<T>(await this.invokeText(retry, task));
+    }
+  }
+
+  private async invokeText(full: string, task: string): Promise<string> {
     const res = await this.llm.invoke(full);
     // tokens 已实际消耗:先记账再解析,解析失败也不能漏记;写盘失败不拖垮提取。
     const usage = usageOfMessage(res);
@@ -47,8 +58,7 @@ export class DeepSeekLlm implements LlmProvider {
         // 用量统计失败不影响生成
       }
     }
-    const text = typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
-    return parseJsonObject<T>(text);
+    return typeof res.content === 'string' ? res.content : JSON.stringify(res.content);
   }
 }
 
@@ -91,13 +101,21 @@ function intOf(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
 }
 
-/** 清洗 LLM 返回文本(去掉 ```json 围栏与首尾空白)并解析为对象;失败抛可读错误。 */
+/** 模型返回文本无法解析为 JSON 时抛出;区别于网络/服务错误,供上层决定「重试后忽略」还是「记失败」。 */
+export class LlmParseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'LlmParseError';
+  }
+}
+
+/** 清洗 LLM 返回文本(去掉 ```json 围栏与首尾空白)并解析为对象;失败抛 LlmParseError。 */
 export function parseJsonObject<T>(text: string): T {
   const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   try {
     return JSON.parse(cleaned) as T;
   } catch {
-    throw new Error(`LLM 返回无法解析为 JSON:${text.slice(0, 200)}`);
+    throw new LlmParseError(`LLM 返回无法解析为 JSON:${text.slice(0, 200)}`);
   }
 }
 

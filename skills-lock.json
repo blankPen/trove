@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "skills": {
+    "tdd": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/tdd/SKILL.md",
+      "computedHash": "daf55026f456af104a72fa43247f7bcec89e5127316dc5b1b8d675d6a9d8ce94"
+    },
+    "vitest": {
+      "source": "antfu/skills",
+      "sourceType": "github",
+      "skillPath": "skills/vitest/SKILL.md",
+      "computedHash": "90f1cee9326269c91b46a601b3a575491505d8e771009dacff01329381d45291"
+    },
+    "writing-unit-tests": {
+      "source": "riekelt/principal-engineer",
+      "sourceType": "github",
+      "skillPath": "plugins/principal-engineer/skills/writing-unit-tests/SKILL.md",
+      "computedHash": "89b53c5d7ada2c26cb03b69374ec6e319794b540d402ec3f93f14a4acad957df"
+    }
+  }
+}

@@ -3,6 +3,7 @@ import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import type { BaseCheckpointSaver } from '@langchain/langgraph';
 import type { Event } from '../events/schema.js';
 import { selectSession } from './select.js';
+import { compactEvents } from './compaction.js';
 import { analyzeSession } from './analyze.js';
 import type { AnalyzeResult } from './analyze.js';
 import { extractMemories } from './extract.js';
@@ -69,9 +70,10 @@ export function buildLessonGraph(deps: LessonDeps, opts: LessonGraphOptions = {}
   }
 
   async function analyze(state: State) {
-    const analysis = await analyzeSession(state.events ?? [], { llm: deps.llm, jev: deps.jev });
+    const compressed = await compactEvents(state.events ?? [], deps.jev);
+    const analysis = await analyzeSession(compressed, { llm: deps.llm, jev: deps.jev });
     if (analysis.status === 'skip') return { skip: { reason: analysis.reason } };
-    return { analysis };
+    return { events: compressed, analysis };
   }
 
   function afterAnalyze(state: State) {

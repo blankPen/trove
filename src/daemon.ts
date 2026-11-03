@@ -26,8 +26,12 @@ export interface DaemonRuntime {
   since: string;
   /** 一轮同步;由 CLI 注入(config/adapters/remote 的组装) */
   runOnce: (progress: Progress, signal: AbortSignal) => Promise<SyncReport>;
-  /** 同步成功后触发(经验提取等);返回可选的日志行。失败只记日志,不中断循环。 */
+  /** 同步成功后触发(把本轮新会话入队等);返回可选的日志行。失败只记日志,不中断循环。 */
   afterSync?: (report: SyncReport) => Promise<string | undefined>;
+  /** learn 独立循环的 tick:处理队列里最多 learnBatch 个候选。缺省不启 learn 循环。 */
+  learnTick?: () => Promise<string | undefined>;
+  /** learn 循环间隔秒数;缺省等同 intervalSeconds。 */
+  learnIntervalSeconds?: number;
 }
 
 export const isAlive = isProcessAlive;
@@ -127,11 +131,11 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * daemon 主循环:立即跑一轮,之后每 interval 秒一轮;SIGTERM/abort 后清理 pid 退出。
- * 每轮状态写 daemon.status.json,供 `trove daemon status` 读取。
+ * daemon 主循环:sync 与 learn 两个循环并发跑,共享 abort 信号;SIGTERM/abort 后清理 pid 退出。
+ * sync 循环每轮状态写 daemon.status.json,供 `trove daemon status` 读取;learn 循环只写日志。
  */
 export async function runDaemon(runtime: DaemonRuntime, signal: AbortSignal): Promise<void> {
-  const { paths, intervalSeconds, since, runOnce } = runtime;
+  const { paths, intervalSeconds, since } = runtime;
   await acquireDaemonPid(paths);
 
   const status: DaemonStatusFile = {
@@ -145,49 +149,71 @@ export async function runDaemon(runtime: DaemonRuntime, signal: AbortSignal): Pr
   await daemonLog(paths, `daemon 启动 pid=${process.pid} interval=${intervalSeconds}s since=${since}`);
 
   try {
-    while (!signal.aborted) {
-      const started = Date.now();
-      status.lastRunAt = started;
-      await writeDaemonStatus(paths, status); // 让 status 命令能看到"正在跑"
-      try {
-        const report = await runOnce(logProgress(paths), signal);
-        status.lastResult = {
-          collected: report.collected,
-          pulled: report.pulled,
-          pushed: report.pushed,
-        };
-        status.lastError = undefined;
-        await daemonLog(
-          paths,
-          `同步完成:收集 ${report.collected.archived}/${report.collected.appended} · ` +
-            `拉取 ${report.pulled.downloadedItems} · 推送 ${report.pushed.uploadedItems} · ` +
-            `库拉取 ${report.library?.pulled.downloaded ?? 0} · 库推送 ${report.library?.pushed.uploaded ?? 0} · ` +
-            `${report.durationMs}ms`,
-        );
-        if (runtime.afterSync) {
-          try {
-            const note = await runtime.afterSync(report);
-            if (note) await daemonLog(paths, note);
-          } catch (e) {
-            await daemonLog(paths, `经验提取失败: ${(e as Error).message}`);
-          }
-        }
-      } catch (err) {
-        if (signal.aborted) break; // 主动停止,不算同步失败
-        status.lastError = (err as Error).message;
-        await daemonLog(paths, `同步失败: ${status.lastError}`);
-      }
-      status.lastDurationMs = Date.now() - started;
-      status.nextRunAt = Date.now() + intervalSeconds * 1000;
-      await writeDaemonStatus(paths, status);
-      await sleep(intervalSeconds * 1000, signal);
-    }
+    const loops: Promise<void>[] = [syncLoop(runtime, status, signal)];
+    if (runtime.learnTick) loops.push(learnLoop(runtime, signal));
+    await Promise.all(loops);
   } finally {
     status.running = false;
     status.nextRunAt = undefined;
     await writeDaemonStatus(paths, status);
     await releaseDaemonPid(paths);
     await daemonLog(paths, 'daemon 退出');
+  }
+}
+
+async function syncLoop(runtime: DaemonRuntime, status: DaemonStatusFile, signal: AbortSignal): Promise<void> {
+  const { paths, intervalSeconds, runOnce } = runtime;
+  while (!signal.aborted) {
+    const started = Date.now();
+    status.lastRunAt = started;
+    await writeDaemonStatus(paths, status); // 让 status 命令能看到"正在跑"
+    try {
+      const report = await runOnce(logProgress(paths), signal);
+      status.lastResult = {
+        collected: report.collected,
+        pulled: report.pulled,
+        pushed: report.pushed,
+      };
+      status.lastError = undefined;
+      await daemonLog(
+        paths,
+        `同步完成:收集 ${report.collected.archived}/${report.collected.appended} · ` +
+          `拉取 ${report.pulled.downloadedItems} · 推送 ${report.pushed.uploadedItems} · ` +
+          `库拉取 ${report.library?.pulled.downloaded ?? 0} · 库推送 ${report.library?.pushed.uploaded ?? 0} · ` +
+          `${report.durationMs}ms`,
+      );
+      if (runtime.afterSync) {
+        try {
+          const note = await runtime.afterSync(report);
+          if (note) await daemonLog(paths, note);
+        } catch (e) {
+          await daemonLog(paths, `同步后处理失败: ${(e as Error).message}`);
+        }
+      }
+    } catch (err) {
+      if (signal.aborted) break; // 主动停止,不算同步失败
+      status.lastError = (err as Error).message;
+      await daemonLog(paths, `同步失败: ${status.lastError}`);
+    }
+    status.lastDurationMs = Date.now() - started;
+    status.nextRunAt = Date.now() + intervalSeconds * 1000;
+    await writeDaemonStatus(paths, status);
+    await sleep(intervalSeconds * 1000, signal);
+  }
+}
+
+/** learn 循环:串行 tick(上一 tick 跑完 LLM 再睡),天然 single-flight,不会与自身重叠。 */
+async function learnLoop(runtime: DaemonRuntime, signal: AbortSignal): Promise<void> {
+  const { paths, learnTick, intervalSeconds } = runtime;
+  const interval = runtime.learnIntervalSeconds ?? intervalSeconds;
+  while (!signal.aborted) {
+    try {
+      const note = await learnTick!();
+      if (note) await daemonLog(paths, note);
+    } catch (e) {
+      await daemonLog(paths, `经验提取失败: ${(e as Error).message}`);
+    }
+    await sleep(interval * 1000, signal);
   }
 }
 

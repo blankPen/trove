@@ -1,8 +1,9 @@
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isSessionPath, type Adapter } from './adapters/index.js';
-import { libraryDir } from './core/layout.js';
+import { libraryDir, libraryLessonsDir } from './core/layout.js';
 import { listLibraryFiles } from './core/library/sync.js';
+import { LocalStorageAdapter } from './core/lessons/storage.js';
 import { metaPath } from './core/remote-layout.js';
 import type { State } from './core/state.js';
 import type { RemoteStore } from './remote/store.js';
@@ -154,6 +155,46 @@ export interface RemoteDeviceInfo {
   id: string;
   name: string;
   lastSeen?: number;
+}
+
+/** lessons 五类记忆的文件计数(排除 sidecar/INDEX/README/archive/audit)。 */
+export interface LessonsSummary {
+  total: number;
+  preferences: number;
+  entities: number;
+  experiences: number;
+  events: number;
+  resources: number;
+}
+
+const LESSON_CATEGORIES: Array<Exclude<keyof LessonsSummary, 'total'>> = [
+  'preferences',
+  'entities',
+  'experiences',
+  'events',
+  'resources',
+];
+
+/** 统计 lessons 目录下的记忆文件数;目录不存在时全 0。 */
+export async function computeLessonsSummary(vaultRoot: string): Promise<LessonsSummary> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  const counts: Record<Exclude<keyof LessonsSummary, 'total'>, number> = {
+    preferences: 0,
+    entities: 0,
+    experiences: 0,
+    events: 0,
+    resources: 0,
+  };
+  for (const rel of await storage.list('')) {
+    const cat = rel.split('/')[0] ?? '';
+    if (!(cat in counts)) continue; // archive/audit/根级 INDEX、README 等
+    const base = rel.split('/').pop() ?? '';
+    if (base.startsWith('.') || base === 'INDEX.md' || base === 'README.md') continue;
+    if (!rel.endsWith('.md')) continue;
+    counts[cat as keyof typeof counts]++;
+  }
+  const total = LESSON_CATEGORIES.reduce((sum, c) => sum + counts[c], 0);
+  return { total, ...counts };
 }
 
 export interface RemoteStatus {

@@ -29,6 +29,8 @@ export interface MemoryDiff {
   session_id: string;
   project: string;
   extracted_at: string;
+  /** 可选:跨会话聚合(recent)的输入指纹,用于滚动幂等;会话/memo 渠道无此字段。 */
+  inputHash?: string;
   operations: {
     adds: AddEntry[];
     updates: UpdateEntry[];

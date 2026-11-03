@@ -13,7 +13,15 @@ import { listSessions } from './core/sessions.js';
 import { ensureLibraryLayout, cleanupLegacyEvents, migrateLegacyLayout, librarySkillsDir, libraryLessonsDir, safeSessionName } from './core/layout.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from './core/library/index-file.js';
 import { parseSince, formatSince } from './core/time-window.js';
-import { computeLibraryPending, computeStatus, probeRemote, type StatusReport } from './status.js';
+import {
+  computeLessonsSummary,
+  computeLibraryPending,
+  computeStatus,
+  probeRemote,
+  type LessonsSummary,
+  type RemoteStatus,
+  type StatusReport,
+} from './status.js';
 import { humanSize, humanSpan } from './format.js';
 import { WebDavStore } from './remote/webdav-store.js';
 import type { RemoteStore } from './remote/store.js';
@@ -24,9 +32,12 @@ import { silentProgress } from './progress.js';
 import { formatDiff, readLatestDiff, readSessionDiff } from './core/lessons/audit.js';
 import { LocalStorageAdapter } from './core/lessons/storage.js';
 import { refreshSidecars } from './core/lessons/sidecar.js';
-import { runLessonExtraction, learnNewSessions } from './core/lessons/learn.js';
+import { runLessonExtraction, learnPendingBatch, learnRecentBatch } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
+import { learnClaudeMemo } from './core/lessons/memo.js';
+import { learnRecentMatters } from './core/lessons/recent.js';
+import { enqueueLearn, readLearnQueue } from './core/lessons/queue.js';
 import {
   daemonState,
   daemonLog,
@@ -91,7 +102,7 @@ function parseValue(raw: string): unknown {
 
 function formatStatus(
   r: StatusReport,
-  opts: { library: { sessions: number; skills: number; hash: string } | null },
+  opts: { library: { skills: number } | null },
 ): string[] {
   const lines = [pc.bold(`设备 ${r.deviceName} (${r.deviceId})`), '', pc.bold('本地')];
   if (r.harnesses.every((h) => h.sessionCount === 0)) lines.push('  (还没有归档数据)');
@@ -102,17 +113,39 @@ function formatStatus(
   }
   lines.push(
     '',
+    pc.bold('技能'),
     opts.library
-      ? `库 ${pc.green(`${opts.library.sessions} 个会话`)} · ${opts.library.skills} 个技能 · ` +
-          `索引 ${opts.library.hash.slice(0, 12)}`
-      : '库 尚未构建(跑一次 trove sync)',
+      ? `  ${pc.green(`${opts.library.skills} 个技能`)}`
+      : '  尚未构建(跑一次 trove sync)',
+  );
+  return lines;
+}
+
+const LESSON_LABELS: Array<[Exclude<keyof LessonsSummary, 'total'>, string]> = [
+  ['preferences', '偏好'],
+  ['entities', '实体'],
+  ['experiences', '经验'],
+  ['events', '事件'],
+  ['resources', '资源'],
+];
+
+function formatLessons(lessons: LessonsSummary, learnQueue: string[]): string[] {
+  const lines = ['', pc.bold('学习沉淀')];
+  if (lessons.total === 0) {
+    lines.push('  暂无记忆(跑一次 trove learn)');
+  } else {
+    const parts = LESSON_LABELS.map(([k, label]) => `${label} ${lessons[k]}`).join(' · ');
+    lines.push(`  ${pc.green(`${lessons.total} 条记忆`)} · ${parts}`);
+  }
+  lines.push(
+    `  待学习 ${learnQueue.length > 0 ? pc.yellow(`${learnQueue.length} 个会话`) : '无'}`,
   );
   return lines;
 }
 
 function formatRemote(
   url: string,
-  probe: { ok: boolean; devices: Array<{ id: string; name: string; lastSeen?: number }>; error?: string } | null,
+  probe: RemoteStatus | null,
   selfId: string,
   now: number,
 ): string[] {
@@ -428,6 +461,49 @@ async function cmdLearnExtract(
   out(formatDiff(outcome.diff!));
 }
 
+async function cmdLearnMemo(
+  paths: ReturnType<typeof trovePaths>,
+  lessonDeps: LessonProviderDeps | undefined,
+  out: (l: string) => void,
+  force: boolean,
+): Promise<void> {
+  const adapter = createAdapters().find((a) => a.id === 'claude-code');
+  if (!adapter || adapter.kind !== 'files') {
+    out('未找到 claude-code 适配器,无法读取其记忆目录');
+    return;
+  }
+  const config = await loadConfig(paths.config);
+  const outcome = await learnClaudeMemo(paths.vault, adapter.source.root, { ...lessonDeps, config }, { force });
+  if (outcome.skipReason === 'already_learned') {
+    out('Claude Code 记忆已学习过,跳过(用 --force 强制重跑)');
+    return;
+  }
+  if (outcome.skipReason) {
+    out(`未学习到 Claude Code 记忆,跳过: ${outcome.skipReason}`);
+    return;
+  }
+  out(formatDiff(outcome.diff!));
+}
+
+async function cmdLearnRecent(
+  paths: ReturnType<typeof trovePaths>,
+  lessonDeps: LessonProviderDeps | undefined,
+  out: (l: string) => void,
+  force: boolean,
+): Promise<void> {
+  const config = await loadConfig(paths.config);
+  const outcome = await learnRecentMatters(paths.vault, { ...lessonDeps, config }, { force });
+  if (outcome.skipReason === 'unchanged') {
+    out('近期方向无变化,跳过(用 --force 强制重跑)');
+    return;
+  }
+  if (outcome.skipReason) {
+    out(`无近期会话可聚合,跳过: ${outcome.skipReason}`);
+    return;
+  }
+  out(formatDiff(outcome.diff!));
+}
+
 async function cmdStatus(
   paths: ReturnType<typeof trovePaths>,
   createRemote: (url: string, username: string, password: string) => RemoteStore,
@@ -454,25 +530,22 @@ async function cmdStatus(
           AbortSignal.timeout(5000),
         )
       : Promise.resolve(null);
-  const [index, libraryPending, daemon, remote] = await Promise.all([
+  const [index, libraryPending, daemon, remote, lessons, learnQueue] = await Promise.all([
     loadLibraryIndex(paths.vault),
     computeLibraryPending(paths.vault, state),
     daemonState(paths),
     probe,
+    computeLessonsSummary(paths.vault),
+    readLearnQueue(paths.learnQueue),
   ]);
 
   const nowMs = now();
   out(
     [
       ...formatStatus(report, {
-        library: index
-          ? {
-              sessions: Object.keys(index.sessions).length,
-              skills: Object.keys(index.skills).length,
-              hash: index.hash,
-            }
-          : null,
+        library: index ? { skills: Object.keys(index.skills).length } : null,
       }),
+      ...formatLessons(lessons, learnQueue),
       ...formatRemote(config.remote.url, remote, config.device.id, nowMs),
       ...formatDaemon(daemon, nowMs),
       ...formatPending(report.pending, libraryPending, rawSync),
@@ -551,6 +624,20 @@ async function cmdConfig(
   return 0;
 }
 
+async function cmdRename(
+  name: string,
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('设备名不能为空');
+  const existing = await loadConfig(paths.config);
+  // 只改显示名;设备 id 保持稳定,已归档路径与远端索引不受影响
+  await saveConfig(paths.config, { ...existing, device: { ...existing.device, name: trimmed } });
+  out(pc.green(`设备已重命名为 ${trimmed} (id ${existing.device.id} 不变)`));
+  out('  下次 trove sync 会把新名字写回远端设备 meta');
+}
+
 async function cmdInit(
   opts: InitOptions,
   paths: ReturnType<typeof trovePaths>,
@@ -623,6 +710,8 @@ function daemonRuntime(
   resolveAdapters: (config: Config) => Adapter[],
   now: () => number,
   lessonDeps: LessonProviderDeps | undefined,
+  learnIntervalSeconds: number,
+  learnBatch: number,
 ): DaemonRuntime {
   const intervalSeconds = Math.max(5, Number(opts.interval) || 300);
   return {
@@ -646,14 +735,23 @@ function daemonRuntime(
         signal,
       });
     },
-    afterSync: async () => {
-      const res = await learnNewSessions(
-        paths.vault,
-        { ...lessonDeps, usagePath: paths.usageLog },
-        { log: (l) => void daemonLog(paths, l) },
-      );
-      return `经验提取:新增 ${res.extracted} · 跳过 ${res.skipped} · 失败 ${res.errors.length}`;
+    afterSync: async (report) => {
+      const ids = report.collected.changedSessions;
+      await enqueueLearn(paths.learnQueue, ids);
+      return ids.length ? `经验提取入队 ${ids.length} 个新会话` : undefined;
     },
+    learnTick: async () => {
+      // 每 tick 重读配置,模型端点变更即时生效,无需重启 daemon。
+      const config = await loadConfig(paths.config);
+      const pending = await learnPendingBatch(paths.vault, paths.learnQueue, { ...lessonDeps, config, usagePath: paths.usageLog }, learnBatch, {
+        log: (l) => void daemonLog(paths, l),
+      });
+      // 近期方向聚合:hash 不变则 skip(不烧 token),有实际更新才记一行,避免每 tick 刷噪音。
+      const recent = await learnRecentMatters(paths.vault, { ...lessonDeps, config });
+      const parts = [pending, recent.diff ? '近期方向已刷新' : undefined].filter((x): x is string => !!x);
+      return parts.length ? parts.join(' · ') : undefined;
+    },
+    learnIntervalSeconds,
   };
 }
 
@@ -687,6 +785,13 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .action(async (opts: InitOptions) => {
       const code = await cmdInit(opts, paths, createRemote, start, out, err, interactive);
       if (code !== 0) process.exitCode = code;
+    });
+
+  program
+    .command('rename <name>')
+    .description('重命名当前设备(只改显示名,设备 id 与已归档路径不变)')
+    .action(async (name: string) => {
+      await cmdRename(name, paths, out);
     });
 
   const configCmd = program.command('config').description('交互式配置(子命令:path/get/set)');
@@ -807,14 +912,44 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--list', '查看最近一次提取的审计 diff')
     .option('--session <id>', '配合 --list 指定会话')
     .option('--force', '即使已提取过也强制重跑')
-    .action(async (sessionId: string | undefined, opts: { list?: boolean; session?: string; force?: boolean }) => {
-      if (opts.list) {
-        await cmdLearnList(paths, opts.session, out);
-      } else if (sessionId) {
-        await cmdLearnExtract(paths, sessionId, deps.lessonDeps, out, opts.force === true);
-      } else {
-        err('用法: trove learn <session-id> 或 trove learn --list [--session <id>]');
-      }
+    .option('-n, --recent <n>', '按最近优先提取 n 个未学习会话')
+    .action(
+      async (sessionId: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string }) => {
+        if (opts.list) {
+          await cmdLearnList(paths, opts.session, out);
+        } else if (opts.recent !== undefined) {
+          const n = Number(opts.recent);
+          if (!Number.isInteger(n) || n <= 0) {
+            err('用法: trove learn -n <正整数>');
+            return;
+          }
+          const config = await loadConfig(paths.config);
+          out(`准备提取最近 ${n} 个未学习会话...`);
+          const summary = await learnRecentBatch(paths.vault, n, { ...deps.lessonDeps, config }, { log: (l) => out(l) });
+          out(pc.green(summary));
+        } else if (sessionId) {
+          const config = await loadConfig(paths.config);
+          await cmdLearnExtract(paths, sessionId, { ...deps.lessonDeps, config }, out, opts.force === true);
+        } else {
+          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>]');
+        }
+      },
+    );
+
+  program
+    .command('learn-memo')
+    .description('学习 Claude Code 自带记忆系统(~/.claude/projects/*/memory)进入 lessons')
+    .option('--force', '即使已学习过也强制重跑')
+    .action(async (opts: { force?: boolean }) => {
+      await cmdLearnMemo(paths, deps.lessonDeps, out, opts.force === true);
+    });
+
+  program
+    .command('learn-recent')
+    .description('从最近会话聚合用户近期工作方向(时间+项目+主题)写入 recent_matters')
+    .option('--force', '即使输入无变化也强制重跑')
+    .action(async (opts: { force?: boolean }) => {
+      await cmdLearnRecent(paths, deps.lessonDeps, out, opts.force === true);
     });
 
   program
@@ -917,6 +1052,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--no-raw', '只同步 library(raw 只归档到本地)')
     .action(async function (this: Command, opts: { interval: string; since: string; raw?: boolean }) {
       parseSince(opts.since, now());
+      const config = await loadConfig(paths.config);
       const controller = new AbortController();
       const stop = () => controller.abort();
       process.once('SIGTERM', stop);
@@ -924,7 +1060,16 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
       const rawExplicit =
         this.getOptionValueSource('raw') === 'cli' ? opts.raw === true : undefined;
       await runDaemon(
-        daemonRuntime(paths, { ...opts, rawExplicit }, createRemote, resolveAdapters, now, deps.lessonDeps),
+        daemonRuntime(
+          paths,
+          { ...opts, rawExplicit },
+          createRemote,
+          resolveAdapters,
+          now,
+          deps.lessonDeps,
+          config.daemon.learnIntervalSeconds,
+          config.daemon.learnBatch,
+        ),
         controller.signal,
       );
     });

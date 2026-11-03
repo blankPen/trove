@@ -6,6 +6,16 @@
 - [x] 优化 sync 策略：远端模式改为可配置（可选），不配置时仅做本地 `.trove` 目录同步（需相应改动 `init` / `sync` 等逻辑流程）
 - [x] `config` 配置改为与 `init` 一致的交互式（现有 `config set` 可保留）
 - [x] 重做 `preferences/` 提取：围绕「当前使用用户」做用户形象分析提取。`profile` 提取用户信息（我是谁 / 年龄 / 职责 / 工作背景 / 人际关系），其余提取编码风格、写作风格、对话风格、最近事项等；提取规则与 prompt 需重点打磨
+- [x] 优化 `trove status` 展示：让输出更美观清晰，分层展示 Devices（设备）/ Sessions（本地、远端）/ Skills / Lessons / Daemon 状态 / 待同步、待学习等
+- [x] 设备支持重命名（当前设备名在同步/索引中作为标识，重命名需连带处理远端设备 meta 与已归档路径）
+
+## 已完成（2026-10-29 status 展示与设备重命名）
+
+- [x] `trove status` 分层展示：设备 / 本地会话(按 harness) / 技能 / 学习沉淀(五类记忆 + 待学习) / 远端设备 / daemon / 待同步
+- [x] `src/status.ts` 新增 `computeLessonsSummary`：统计 lessons 五类记忆文件，排除 sidecar(. 前缀)/INDEX/README/非 md/非类目目录
+- [x] `trove rename <name>` 新命令：只改 `device.name` 显示名，`device.id` 与已归档路径/远端索引不变，下次 sync 回写远端设备 meta
+- [x] 核实设备名与设备 id 已分离：core 层 `deviceName` 仅用于远端 `meta.json` 的 `name` 字段，归档/索引路径全走 `deviceId`
+- [x] TDD：`tests/infra/status.test.ts` 补 `computeLessonsSummary` 2 条；`tests/cli/index.test.ts` 补 status 分层断言 + rename 2 条；全量 329 测试 + `tsc --noEmit` 全绿
 
 ## 已完成（2026-10-29 偏好提取重做）
 

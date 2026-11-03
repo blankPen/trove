@@ -15,6 +15,8 @@ export interface TrovePaths {
   daemonPid: string;
   daemonStatus: string;
   daemonLog: string;
+  /** learn 待办队列(不在 vault 内,不参与同步) */
+  learnQueue: string;
 }
 
 /** 从 base 目录推导全部路径。默认 ~/.trove,可用 TROVE_HOME 覆盖;测试可注入临时 base。 */
@@ -32,5 +34,6 @@ export function trovePaths(
     daemonPid: join(base, 'daemon.pid'),
     daemonStatus: join(base, 'daemon.status.json'),
     daemonLog: join(base, 'logs', 'daemon.log'),
+    learnQueue: join(base, 'learn-queue.json'),
   };
 }

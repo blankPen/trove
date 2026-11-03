@@ -37,6 +37,7 @@ trove config set daemon.since 7d
 trove config set daemon.startOnInit false   # init 不再自动启动
 trove daemon start                          # 等价于每 300s、时间窗 7d
 trove daemon start --interval 60 --since 24h
+trove daemon restart                        # 停止后按同样参数重新拉起
 trove daemon status
 trove daemon stop
 ```
@@ -69,7 +70,7 @@ trove daemon stop
 - **只增不删**:远端和本地 vault 都不删除;源文件被删后归档仍保留。
 - **时间窗**:`--since 7d|24h|2026-10-01|all` 按会话最近变更时间过滤,避免首次全量过大。
 - **进度**:collect / pull / push 三阶段,TTY 单行刷新,管道按秒节流。
-- **daemon**:单实例 pid 锁、跨进程 sync 锁、SIGTERM 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。间隔/时间窗/init 是否自动启动由 `config.daemon.{intervalSeconds,since,startOnInit}` 决定(默认 `300 / 7d / true`),`daemon start --interval/--since` 显式参数优先于配置。
+- **daemon**:单实例 pid 锁、跨进程 sync 锁、SIGTERM 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。间隔/时间窗/init 是否自动启动由 `config.daemon.{intervalSeconds,since,startOnInit}` 决定(默认 `300 / 7d / true`),`daemon start --interval/--since` 显式参数优先于配置。`daemon restart` 先优雅停止再按同样参数拉起;旧进程没停干净时不会起第二个实例。
 
 ## library(个人资产层)
 

@@ -300,6 +300,22 @@ export async function stopDaemon(paths: TrovePaths): Promise<boolean> {
   return false;
 }
 
+export interface RestartDaemonOptions extends StartDaemonOptions {
+  /** 停止函数;测试注入 stub */
+  stop?: (paths: TrovePaths) => Promise<boolean>;
+}
+
+/**
+ * 重启:先优雅停止(没在跑就直接跳过),再按同样的参数后台拉起。
+ * 停止失败(进程没退)时 startDaemon 会因 pid 锁仍在而报错,不会起两个实例。
+ */
+export async function restartDaemon(opts: RestartDaemonOptions): Promise<{ pid: number; wasRunning: boolean }> {
+  const stop = opts.stop ?? stopDaemon;
+  const wasRunning = await stop(opts.paths);
+  const pid = await startDaemon(opts);
+  return { pid, wasRunning };
+}
+
 export async function daemonState(paths: TrovePaths): Promise<{
   running: boolean;
   pid?: number;

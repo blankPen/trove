@@ -42,9 +42,11 @@ import {
   daemonState,
   daemonLog,
   runDaemon,
+  restartDaemon,
   startDaemon,
   stopDaemon,
   type DaemonRuntime,
+  type RestartDaemonOptions,
   type StartDaemonOptions,
 } from './daemon.js';
 
@@ -62,6 +64,8 @@ export interface CliDeps {
   now?: () => number;
   /** 启动 daemon;测试注入 stub,避免真的 spawn 子进程 */
   startDaemon?: (opts: StartDaemonOptions) => Promise<number>;
+  /** 重启 daemon;测试注入 stub,避免真的 stop/start 子进程 */
+  restartDaemon?: (opts: RestartDaemonOptions) => Promise<{ pid: number; wasRunning: boolean }>;
   /** 经验提取的提供方注入;测试传 mock,生产由 daemon/CLI 懒构造 */
   lessonDeps?: LessonProviderDeps;
 }
@@ -765,6 +769,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   const resolveAdapters = deps.resolveAdapters ?? defaultResolveAdapters;
   const now = deps.now ?? Date.now;
   const start = deps.startDaemon ?? startDaemon;
+  const restart = deps.restartDaemon ?? restartDaemon;
   const interactive = deps.isTTY ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   const tty = deps.isTTY ?? Boolean(process.stdout.isTTY);
 
@@ -988,6 +993,20 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
 
   const daemonCmd = program.command('daemon').description('常驻后台同步服务');
 
+  /** start/restart 共用:解析 interval/since/raw,CLI 显式参数优先于 config。 */
+  async function daemonStartOptions(
+    cmd: Command,
+    opts: { interval?: string; since?: string; raw?: boolean },
+  ): Promise<StartDaemonOptions> {
+    const config = await loadConfig(paths.config);
+    const since = opts.since ?? config.daemon.since;
+    parseSince(since, now()); // 启动前校验,避免子进程每轮都失败
+    const interval = Math.max(5, Number(opts.interval ?? config.daemon.intervalSeconds) || 300);
+    const rawExplicit =
+      cmd.getOptionValueSource('raw') === 'cli' ? opts.raw === true : undefined;
+    return { paths, intervalSeconds: interval, since, raw: rawExplicit };
+  }
+
   daemonCmd
     .command('start')
     .description('后台启动 daemon')
@@ -996,19 +1015,33 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--raw', '同步 raw(覆盖配置)')
     .option('--no-raw', '只同步 library(raw 只归档到本地)')
     .action(async function (this: Command, opts: { interval?: string; since?: string; raw?: boolean }) {
-      const config = await loadConfig(paths.config);
-      const since = opts.since ?? config.daemon.since;
-      parseSince(since, now()); // 启动前校验,避免子进程每轮都失败
-      const interval = Math.max(5, Number(opts.interval ?? config.daemon.intervalSeconds) || 300);
-      const rawExplicit =
-        this.getOptionValueSource('raw') === 'cli' ? opts.raw === true : undefined;
-      const pid = await start({
-        paths,
-        intervalSeconds: interval,
-        since,
-        raw: rawExplicit,
-      });
-      out(pc.green(`daemon 已启动 (pid ${pid}) · 每 ${interval}s · 时间窗 ${looksLikeDateWindow(since)}`));
+      const startOpts = await daemonStartOptions(this, opts);
+      const pid = await start(startOpts);
+      out(
+        pc.green(
+          `daemon 已启动 (pid ${pid}) · 每 ${startOpts.intervalSeconds}s · ` +
+            `时间窗 ${looksLikeDateWindow(startOpts.since)}`,
+        ),
+      );
+    });
+
+  daemonCmd
+    .command('restart')
+    .description('重启 daemon(停止后按同样参数重新拉起)')
+    .option('--interval <seconds>', '轮询间隔秒数(默认取 config.daemon.intervalSeconds)')
+    .option('--since <range>', '只收集最近变更的会话(默认取 config.daemon.since)')
+    .option('--raw', '同步 raw(覆盖配置)')
+    .option('--no-raw', '只同步 library(raw 只归档到本地)')
+    .action(async function (this: Command, opts: { interval?: string; since?: string; raw?: boolean }) {
+      const startOpts = await daemonStartOptions(this, opts);
+      const { pid, wasRunning } = await restart(startOpts);
+      out(
+        pc.green(
+          `daemon 已重启 (pid ${pid}) · 每 ${startOpts.intervalSeconds}s · ` +
+            `时间窗 ${looksLikeDateWindow(startOpts.since)}`,
+        ),
+      );
+      if (!wasRunning) out(pc.yellow('  原 daemon 未在运行,已直接启动'));
     });
 
   daemonCmd

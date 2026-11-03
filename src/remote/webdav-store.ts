@@ -238,6 +238,11 @@ export class WebDavStore implements RemoteStore {
     }, 3, signal);
   }
 
+  /** WebDAV 实测并发 PUT 会 ECONNRESET,保持单连接顺序上传。 */
+  concurrencyHint(): number {
+    return 1;
+  }
+
   /** 逐段建父目录;已建过的段落直接跳过(缓存跨文件生效)。 */
   private async ensureDir(path: string): Promise<void> {
     const segments = strip(path).split('/');

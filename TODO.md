@@ -17,6 +17,19 @@
 - [x] 核实设备名与设备 id 已分离：core 层 `deviceName` 仅用于远端 `meta.json` 的 `name` 字段，归档/索引路径全走 `deviceId`
 - [x] TDD：`tests/infra/status.test.ts` 补 `computeLessonsSummary` 2 条；`tests/cli/index.test.ts` 补 status 分层断言 + rename 2 条；全量 329 测试 + `tsc --noEmit` 全绿
 
+## 已完成（2026-11-03 S3 兼容对象存储后端）
+
+- [x] `RemoteConfig` 改为按 `type` 区分的判别联合（`webdav` / `s3`）；老配置没有 `type` 时按 `webdav` 读，现有用户不受影响
+- [x] `S3Store` 实现 `RemoteStore` 的 7 个原语：目录语义用 `ListObjectsV2` 的 `delimiter` 模拟，索引写入靠 `PutObject` 覆盖同 key 的原子性
+- [x] 自实现 SigV4 签名（`src/remote/s3-sigv4.ts`），不引第三方 SDK —— 只需 4 个已签名请求，省掉一整个依赖树
+- [x] 厂商预设（`src/remote/s3-vendors.ts`）：阿里云 OSS（`s3.oss-{region}.aliyuncs.com`）与腾讯云 COS（`cos.{region}.myqcloud.com`），均走 virtual-hosted 寻址（OSS 走 path-style 会 403）
+- [x] `init` / `config` 交互式引导：先问远端类型，再按类型问字段；S3 分支问厂商、地域、Bucket、AccessKey
+- [x] `init` 支持非交互的 S3 参数（`--type/--provider/--region/--bucket/--access-key-id/--secret-access-key`）
+- [x] 换后端的历史数据迁移：`state.json` 新增 `remoteId`，后端变了本地推送水位自动作废，历史数据整份重推（修掉了"新远端只剩索引没有数据"的静默丢数据）
+- [x] 并发按后端自适应：`RemoteStore.concurrencyHint()` —— WebDAV 保持 1（并发 PUT 会 ECONNRESET），S3 走 8
+- [x] TDD：新增 `tests/s3-sigv4.test.ts`、`tests/s3-store.integration.test.ts`、`tests/s3-vendors.test.ts`、`tests/s3-e2e.test.ts`（真 S3 服务端 s3rver，验签）、`tests/s3-sync-e2e.test.ts`（完整 CLI sync）、`tests/remote-config.test.ts`、`tests/remote-onboarding.test.ts`、`tests/backend-migration.test.ts`
+- [x] 验证：403 测试通过（`tests/adapters.test.ts` 的真实环境用例在本机失败，与本次改动无关：它期望本机 >1000 个 Claude Code 会话，实际 217）
+
 ## 已完成（2026-10-29 偏好提取重做）
 
 - [x] `preferences/` 由 4 类改为 5 类：删 `reply_format`，新增 `dialogue_style`（对话风格）与 `recent_matters`（最近事项），均为 `patch` 合并到固定文件

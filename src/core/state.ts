@@ -77,6 +77,11 @@ export interface State {
   pulled: Record<string, Record<string, PulledEntry>>;
   library: LibraryState;
   daemon?: DaemonStatus;
+  /**
+   * pushed/pulled 记录所属的远端身份指纹。
+   * 换后端(WebDAV → S3)后这些记录对新远端无效,必须整份重推。
+   */
+  remoteId?: string;
 }
 
 export function emptyLibraryState(): LibraryState {
@@ -115,6 +120,7 @@ export async function loadState(path: string): Promise<State> {
     pulled: parsed.pulled ?? {},
     library: parsed.library ?? emptyLibraryState(),
     ...(parsed.daemon ? { daemon: parsed.daemon } : {}),
+    ...(parsed.remoteId ? { remoteId: parsed.remoteId } : {}),
   };
 }
 

@@ -23,6 +23,8 @@ export interface PushOptions {
   deviceId: string;
   vaultRoot: string;
   state: State;
+  /** 当前远端的身份指纹;用于判断本地推送记录是否还作数(换后端时作废)。 */
+  remoteId?: string;
   now?: () => number;
   chunkSize?: number;
   concurrency?: number;
@@ -50,8 +52,9 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
   const { remote, deviceId, vaultRoot, state } = opts;
   const now = opts.now ?? Date.now;
   const chunkSize = opts.chunkSize ?? CHUNK_SIZE;
-  // 实测服务端并发 PUT 会 ECONNRESET;单连接吞吐已足够,顺序更稳
-  const concurrency = opts.concurrency ?? 1;
+  // 并发数由后端给建议:WebDAV 实测并发 PUT 会 ECONNRESET(给 1),
+  // 对象存储允许并发(给更高值),这里显式传参时以传参为准。
+  const concurrency = opts.concurrency ?? remote.concurrencyHint?.() ?? 1;
   const progress = opts.progress ?? silentProgress;
 
   const previous = (await remote.readJson(indexPath(deviceId))) as DeviceIndex | null;
@@ -121,10 +124,17 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
     }
 
     const ranges = chunkRanges(st.size, chunkSize);
+    // 可复用块的来源:
+    // - 远端索引:远端自己说有这些块(最权威)
+    // - 本地 state.pushed:只在"同一个远端"时可信(索引丢了但块还在,只补半块)
+    // 换后端后本地记录属于旧远端,不能复用 —— 否则新远端只剩索引没有数据。
+    const sameRemote = !opts.remoteId || !state.remoteId || opts.remoteId === state.remoteId;
     const reuse =
-      pushed && pushed.generation === entry.generation
-        ? reusableChunks(pushed.chunks, pushed.size, chunkSize)
-        : new Map<number, ChunkRef>();
+      inIndex && inIndex.generation === entry.generation
+        ? reusableChunks(inIndex.chunks, inIndex.size, chunkSize)
+        : pushed && sameRemote && pushed.generation === entry.generation
+          ? reusableChunks(pushed.chunks, pushed.size, chunkSize)
+          : new Map<number, ChunkRef>();
 
     const chunks: ChunkRef[] = [];
     const toUpload: Array<{ chunk: ChunkRef; remotePath: string }> = [];
@@ -181,5 +191,7 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
   }
 
   if (indexChanged) await commitIndex();
+  // 记住这次推送属于哪个远端:下次换后端时,本地的复用记录会自动作废
+  if (opts.remoteId) state.remoteId = opts.remoteId;
   return { uploadedChunks, uploadedBytes, uploadedItems, skippedItems };
 }

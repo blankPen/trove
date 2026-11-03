@@ -17,7 +17,7 @@ async function setup(body = 'hello world') {
 
   const paths = trovePaths(base);
   const config = defaultConfig({ deviceId: 'dev-cli', deviceName: '测试机' });
-  config.remote = { url: 'http://example.invalid', username: 'u', password: 'p' };
+  config.remote = { type: 'webdav', url: 'http://example.invalid', username: 'u', password: 'p' };
   config.sources = { 'claude-code': { enabled: true } };
   await saveConfig(paths.config, config);
 

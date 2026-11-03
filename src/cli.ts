@@ -6,7 +6,7 @@ import { Command, CommanderError } from 'commander';
 import { password as clackPassword, text } from '@clack/prompts';
 import pc from 'picocolors';
 import { trovePaths } from './paths.js';
-import { loadConfig, resolveRawSync, saveConfig, type Config } from './config.js';
+import { loadConfig, resolveRawSync, saveConfig, type Config, type RemoteConfig } from './config.js';
 import { loadState } from './core/state.js';
 import { sync } from './core/sync.js';
 import { listSessions } from './core/sessions.js';
@@ -23,7 +23,13 @@ import {
   type StatusReport,
 } from './status.js';
 import { humanSize, humanSpan } from './format.js';
-import { WebDavStore } from './remote/webdav-store.js';
+import {
+  createRemoteFromConfig,
+  describeRemote,
+  isRemoteConfigured,
+  remoteIdentity,
+} from './remote/create-remote.js';
+import { promptRemoteConfig } from './remote/prompt.js';
 import type { RemoteStore } from './remote/store.js';
 import type { Adapter } from './adapters/index.js';
 import { createAdapters } from './adapters/index.js';
@@ -54,7 +60,8 @@ export const VERSION = '0.2.0';
 
 export interface CliDeps {
   base?: string;
-  createRemote?: (url: string, username: string, password: string) => RemoteStore;
+  /** 按配置构造远端;测试注入 stub。 */
+  createRemote?: (config: RemoteConfig) => RemoteStore;
   resolveAdapters?: (config: Config) => Adapter[];
   out?: (line: string) => void;
   err?: (line: string) => void;
@@ -70,8 +77,8 @@ export interface CliDeps {
   lessonDeps?: LessonProviderDeps;
 }
 
-function defaultCreateRemote(url: string, username: string, password: string): RemoteStore {
-  return new WebDavStore({ url, username, password });
+function defaultCreateRemote(config: RemoteConfig): RemoteStore {
+  return createRemoteFromConfig(config);
 }
 
 function defaultResolveAdapters(config: Config): Adapter[] {
@@ -240,7 +247,7 @@ function looksLikeDateWindow(since: string): string {
 
 async function loadRuntime(
   paths: ReturnType<typeof trovePaths>,
-  createRemote: (url: string, username: string, password: string) => RemoteStore,
+  createRemote: (config: RemoteConfig) => RemoteStore,
   resolveAdapters: (config: Config) => Adapter[],
 ): Promise<{
   config: Config;
@@ -249,10 +256,7 @@ async function loadRuntime(
 }> {
   const config = await loadConfig(paths.config);
   // 未配置远端时降级为本地模式,不报错
-  const remote =
-    config.remote.url && config.remote.password
-      ? createRemote(config.remote.url, config.remote.username, config.remote.password)
-      : null;
+  const remote = isRemoteConfigured(config.remote) ? createRemote(config.remote) : null;
   return { config, remote, adapters: resolveAdapters(config) };
 }
 
@@ -265,7 +269,7 @@ async function cmdSync(
     rawExplicit?: boolean;
   },
   paths: ReturnType<typeof trovePaths>,
-  createRemote: (url: string, username: string, password: string) => RemoteStore,
+  createRemote: (config: RemoteConfig) => RemoteStore,
   resolveAdapters: (config: Config) => Adapter[],
   out: (l: string) => void,
   rawOut: (s: string) => void,
@@ -288,6 +292,7 @@ async function cmdSync(
     statePath: paths.state,
     tmpDir: paths.tmp,
     remote,
+    remoteId: remoteIdentity(config.remote),
     cutoff,
     progress,
     now,
@@ -510,7 +515,7 @@ async function cmdLearnRecent(
 
 async function cmdStatus(
   paths: ReturnType<typeof trovePaths>,
-  createRemote: (url: string, username: string, password: string) => RemoteStore,
+  createRemote: (config: RemoteConfig) => RemoteStore,
   resolveAdapters: (config: Config) => Adapter[],
   out: (l: string) => void,
   now: () => number,
@@ -527,13 +532,9 @@ async function cmdStatus(
   const rawSync = resolveRawSync(config);
 
   // 远端探测与本地统计并行;未配置就不发请求
-  const probe =
-    config.remote.url && config.remote.password
-      ? probeRemote(
-          createRemote(config.remote.url, config.remote.username, config.remote.password),
-          AbortSignal.timeout(5000),
-        )
-      : Promise.resolve(null);
+  const probe = isRemoteConfigured(config.remote)
+    ? probeRemote(createRemote(config.remote), AbortSignal.timeout(5000))
+    : Promise.resolve(null);
   const [index, libraryPending, daemon, remote, lessons, learnQueue] = await Promise.all([
     loadLibraryIndex(paths.vault),
     computeLibraryPending(paths.vault, state),
@@ -549,8 +550,8 @@ async function cmdStatus(
       ...formatStatus(report, {
         library: index ? { skills: Object.keys(index.skills).length } : null,
       }),
-      ...formatLessons(lessons, learnQueue),
-      ...formatRemote(config.remote.url, remote, config.device.id, nowMs),
+...formatLessons(lessons, learnQueue),
+      ...formatRemote(describeRemote(config.remote), remote, config.device.id, nowMs),
       ...formatDaemon(daemon, nowMs),
       ...formatPending(report.pending, libraryPending, rawSync),
     ].join('\n'),
@@ -562,12 +563,52 @@ interface InitOptions {
   url?: string;
   username?: string;
   password?: string;
+  /** 远端类型:webdav / s3;不给则交互询问 */
+  type?: 'webdav' | 's3';
+  /** S3 厂商 */
+  provider?: 'aliyun' | 'tencent';
+  /** S3 地域 */
+  region?: string;
+  /** S3 Bucket */
+  bucket?: string;
+  /** 自定义 S3 endpoint(覆盖厂商推导;MinIO 等 S3 兼容私有部署需要) */
+  endpoint?: string;
+  /** path-style 寻址(bucket 放路径里);私有 S3 兼容服务通常需要 */
+  forcePathStyle?: boolean;
+  /** S3 AccessKey ID */
+  accessKeyId?: string;
+  /** S3 Secret AccessKey(也可用 TROVE_PASSWORD 环境变量) */
+  secretAccessKey?: string;
   /** commander 的 --no-daemon 会传 false */
   daemon?: boolean;
 }
 
 function isCancel(v: unknown): v is symbol {
   return typeof v === 'symbol';
+}
+
+/**
+ * 命令行给了足够的 S3 参数就直接用(供脚本化配置);否则返回 undefined 走交互引导。
+ */
+export function buildS3FromFlags(opts: InitOptions, existing: RemoteConfig): RemoteConfig | undefined {
+  const prev = existing.type === 's3' ? existing : undefined;
+  const bucket = opts.bucket ?? prev?.bucket;
+  const region = opts.region ?? prev?.region;
+  const accessKeyId = opts.accessKeyId ?? prev?.accessKeyId;
+  const secretAccessKey =
+    opts.secretAccessKey ?? process.env.TROVE_PASSWORD ?? prev?.secretAccessKey;
+  const endpoint = opts.endpoint ?? prev?.endpoint;
+  if (!bucket || !region || !accessKeyId || !secretAccessKey) return undefined;
+  return {
+    type: 's3',
+    provider: opts.provider ?? prev?.provider ?? 'aliyun',
+    region,
+    bucket,
+    accessKeyId,
+    secretAccessKey,
+    ...(endpoint ? { endpoint } : {}),
+    forcePathStyle: opts.forcePathStyle ?? prev?.forcePathStyle ?? false,
+  };
 }
 
 export async function resolveInitInputs(opts: InitOptions, interactive = false) {
@@ -600,14 +641,14 @@ async function cmdConfig(
   const existing = await loadConfig(paths.config);
 
   const name = await text({ message: '设备名', initialValue: existing.device.name });
-  const url = await text({
-    message: 'WebDAV 地址',
-    placeholder: '留空 = 本地模式',
-    initialValue: existing.remote.url,
-  });
-  const username = await text({ message: 'WebDAV 用户名', initialValue: existing.remote.username });
-  const password = await clackPassword({ message: 'WebDAV 密码(留空 = 不变)' });
-  if ([name, url, username, password].some(isCancel)) {
+  if (isCancel(name)) {
+    err('已取消。');
+    return 1;
+  }
+
+  // 远端:先问类型,再按类型问字段
+  const remote = await promptRemoteConfig(existing.remote, true);
+  if (remote === undefined) {
     err('已取消。');
     return 1;
   }
@@ -615,16 +656,12 @@ async function cmdConfig(
   const config: Config = {
     ...existing,
     device: { ...existing.device, name: name as string },
-    remote: {
-      url: (url as string).trim(),
-      username: username as string,
-      password: password === '' ? existing.remote.password : (password as string),
-    },
+    remote,
   };
   await saveConfig(paths.config, config);
   out(pc.green('配置已保存'));
   out(`  设备: ${config.device.name}`);
-  out(`  远端: ${config.remote.url || '未配置(本地模式)'}`);
+  out(`  远端: ${describeRemote(config.remote) || '未配置(本地模式)'}`);
   return 0;
 }
 
@@ -645,32 +682,63 @@ async function cmdRename(
 async function cmdInit(
   opts: InitOptions,
   paths: ReturnType<typeof trovePaths>,
-  createRemote: (url: string, username: string, password: string) => RemoteStore,
+  createRemote: (config: RemoteConfig) => RemoteStore,
   start: (opts: StartDaemonOptions) => Promise<number>,
   out: (l: string) => void,
   err: (l: string) => void,
   interactive: boolean,
 ): Promise<number> {
+  const existing = await loadConfig(paths.config);
   const { name, url, username, password } = await resolveInitInputs(opts, interactive);
   if ([name, url, username, password].some(isCancel)) {
     err('已取消。');
     return 1;
   }
-  // url 可选:不填则进入本地模式(仅本地 .trove 归档);填了就必须有密码
-  if (url && !password) throw new Error('未提供密码(--password 或 TROVE_PASSWORD)。');
+
+  // 远端配置:命令行 flag 优先,其次交互引导,都没有则进入本地模式
+  let remoteConfig: RemoteConfig;
+  let configuredThisRun = false;
+  if (opts.type === 's3' || (opts.type === undefined && !url && interactive)) {
+    // S3 路径:命令行给了完整参数就用参数,否则交互引导
+    const fromFlags = buildS3FromFlags(opts, existing.remote);
+    if (fromFlags) {
+      remoteConfig = fromFlags;
+    } else if (!interactive) {
+      err('S3 参数不完整:需要 --bucket --region --access-key-id --secret-access-key(或 TROVE_PASSWORD)。');
+      return 1;
+    } else {
+      const picked = await promptRemoteConfig(existing.remote, interactive, 's3');
+      if (!picked) {
+        err('已取消。');
+        return 1;
+      }
+      remoteConfig = picked;
+    }
+    configuredThisRun = true;
+  } else if (url) {
+    // url 可选:不填则进入本地模式(仅本地 .trove 归档);填了就必须有密码
+    if (!password) throw new Error('未提供密码(--password 或 TROVE_PASSWORD)。');
+    remoteConfig = {
+      type: 'webdav',
+      url: url as string,
+      username: username as string,
+      password: password as string,
+    };
+    configuredThisRun = true;
+  } else {
+    // 本次 init 没给远端:进入本地模式(清掉旧远端)
+    remoteConfig = { type: 'webdav', url: '', username: 'webdav', password: '' };
+  }
 
   // 保留已有的 sources / sync / daemon 设置,只覆盖设备名与远端
-  const existing = await loadConfig(paths.config);
   const config: Config = {
     ...existing,
     device: { id: existing.device.id, name: name as string },
-    remote: url
-      ? { url: url as string, username: username as string, password: password as string }
-      : existing.remote,
+    remote: remoteConfig,
   };
 
-  if (url) {
-    const remote = createRemote(url as string, username as string, password as string);
+  if (isRemoteConfigured(remoteConfig)) {
+    const remote = createRemote(remoteConfig);
     await mkdir(paths.tmp, { recursive: true });
     const probePath = `.trove-probe/${randomUUID()}.json`;
     const probeLocal = join(paths.tmp, `probe-${randomUUID()}.json`);
@@ -685,8 +753,11 @@ async function cmdInit(
   await saveConfig(paths.config, config);
   out(pc.green('初始化完成'));
   out(`  设备: ${name as string} (${config.device.id})`);
-  if (url) out(`  远端: ${url as string}`);
-  else out(`  远端: ${pc.yellow('未配置(本地模式,仅本地 .trove 归档)')}`);
+  if (isRemoteConfigured(remoteConfig)) {
+    out(`  远端: ${describeRemote(remoteConfig)}`);
+  } else {
+    out(`  远端: ${pc.yellow('未配置(本地模式,仅本地 .trove 归档)')}`);
+  }
 
   if (opts.daemon === false || !config.daemon.startOnInit) return 0;
   try {
@@ -710,7 +781,7 @@ async function cmdInit(
 function daemonRuntime(
   paths: ReturnType<typeof trovePaths>,
   opts: { interval: string; since: string; rawExplicit?: boolean },
-  createRemote: (url: string, username: string, password: string) => RemoteStore,
+  createRemote: (config: RemoteConfig) => RemoteStore,
   resolveAdapters: (config: Config) => Adapter[],
   now: () => number,
   lessonDeps: LessonProviderDeps | undefined,
@@ -732,6 +803,7 @@ function daemonRuntime(
         statePath: paths.state,
         tmpDir: paths.tmp,
         remote,
+        remoteId: remoteIdentity(config.remote),
         cutoff: parseSince(opts.since, now()),
         progress,
         now,
@@ -781,11 +853,19 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
 
   program
     .command('init')
-    .description('首次配置(设备名、WebDAV 端点、凭证)')
+    .description('首次配置(设备名、远端后端、凭证)')
     .option('--name <name>', '设备名')
+    .option('--type <type>', '远端类型:webdav / s3(不给则交互询问)')
     .option('--url <url>', 'WebDAV 地址')
     .option('--username <user>', 'WebDAV 用户名')
     .option('--password <pass>', 'WebDAV 密码(也可用 TROVE_PASSWORD 环境变量)')
+    .option('--provider <vendor>', 'S3 厂商:aliyun / tencent')
+    .option('--region <region>', 'S3 地域(如 cn-hangzhou / ap-guangzhou)')
+    .option('--bucket <bucket>', 'S3 Bucket 名')
+    .option('--endpoint <url>', '自定义 S3 endpoint(覆盖厂商推导,MinIO 等私有部署用)')
+    .option('--force-path-style', 'S3 用 path-style 寻址(bucket 放路径里,私有部署常用)')
+    .option('--access-key-id <id>', 'S3 AccessKey ID')
+    .option('--secret-access-key <key>', 'S3 Secret AccessKey(也可用 TROVE_PASSWORD 环境变量)')
     .option('--no-daemon', '初始化后不自动启动 daemon')
     .action(async (opts: InitOptions) => {
       const code = await cmdInit(opts, paths, createRemote, start, out, err, interactive);

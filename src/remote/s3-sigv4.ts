@@ -19,6 +19,8 @@ export interface SigV4Credentials {
 export interface SignRequestInput extends SigV4Credentials {
   method: string;
   url: string;
+  /** 未编码的原始路径;省略时从 url 解析。url.pathname 已被 WHATWG URL 预编码,直接喂给 canonicalUri 会二次编码。 */
+  pathname?: string;
   headers: Record<string, string>;
   body: Buffer;
   date: Date;
@@ -93,6 +95,7 @@ function canonicalHeaders(headers: Record<string, string>): { signed: string; ca
 export function signRequest(input: SignRequestInput): SignedRequest {
   const { method, url, body, date } = input;
   const u = new URL(url);
+  const pathname = input.pathname ?? u.pathname;
 
   const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '');
   const dateStamp = amzDate.slice(0, 8);
@@ -106,7 +109,7 @@ export function signRequest(input: SignRequestInput): SignedRequest {
   const { signed, canonical } = canonicalHeaders(headers);
   const canonicalRequest = [
     method.toUpperCase(),
-    canonicalUri(u.pathname),
+    canonicalUri(pathname),
     canonicalQuery(Object.fromEntries(u.searchParams.entries())),
     canonical,
     signed,

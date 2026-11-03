@@ -1,6 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { open, readFile, stat, writeFile } from 'node:fs/promises';
+import { open, readFile, writeFile } from 'node:fs/promises';
 import { request as httpRequest, Agent as HttpAgent, type IncomingMessage } from 'node:http';
 import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import type { RemoteEntry, RemoteStore } from './store.js';
@@ -146,6 +144,7 @@ export class S3Store implements RemoteStore {
     const signed = signRequest({
       method,
       url: url.toString(),
+      pathname: path,
       headers: { host },
       body,
       region: this.region,
@@ -321,7 +320,6 @@ export class S3Store implements RemoteStore {
     range?: { offset: number; length: number },
   ): Promise<void> {
     const key = toKey(path);
-    const size = range ? range.length : (await stat(localPath)).size;
     // 读整个区间到内存再发:块最大 4MiB,内存占用可控
     const body = await this.readRange(localPath, range);
     await this.call('PUT', key, { body });
@@ -357,55 +355,5 @@ export class S3Store implements RemoteStore {
   /** 对象存储允许并发上传;OSS 官方建议大批量小文件用较高并发。 */
   concurrencyHint(): number {
     return this.concurrency;
-  }
-
-  /** 流式上传整文件(不经内存);供大文件场景使用。 */
-  async writeFileStream(path: string, localPath: string): Promise<void> {
-    const key = toKey(path);
-    const size = (await stat(localPath)).size;
-    const { host, path: p } = this.hostAndPath(key);
-    const url = new URL(this.endpoint);
-    url.host = host;
-    url.pathname = p;
-
-    const signed = signRequest({
-      method: 'PUT',
-      url: url.toString(),
-      headers: { host, 'content-length': String(size) },
-      body: Buffer.alloc(0),
-      region: this.region,
-      service: 's3',
-      accessKeyId: this.accessKeyId,
-      secretAccessKey: this.secretAccessKey,
-      date: new Date(),
-    });
-
-    const isHttps = url.protocol === 'https:';
-    const reqFn = isHttps ? httpsRequest : httpRequest;
-    await new Promise<void>((resolve, reject) => {
-      const req = reqFn(
-        {
-          protocol: url.protocol,
-          hostname: url.hostname,
-          port: url.port || (isHttps ? 443 : 80),
-          method: 'PUT',
-          path: url.pathname,
-          headers: { ...signed.headers, 'content-length': String(size) },
-          agent: isHttps ? this.agents.https : this.agents.http,
-        },
-        (res: IncomingMessage) => {
-          res.resume();
-          res.on('end', () => {
-            if ((res.statusCode ?? 0) >= 400) {
-              reject(new S3Error(`S3 PUT 失败 (${res.statusCode})`, res.statusCode));
-            } else {
-              resolve();
-            }
-          });
-        },
-      );
-      req.on('error', reject);
-      createReadStream(localPath).pipe(req);
-    });
   }
 }

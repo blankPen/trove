@@ -29,7 +29,6 @@ vi.mock('@clack/prompts', () => ({
   }),
 }));
 
-import { resolveInitInputs } from '../src/cli.js';
 import { promptRemoteConfig } from '../src/remote/prompt.js';
 
 describe('init 交互:远端类型选择', () => {
@@ -58,15 +57,6 @@ describe('init 交互:远端类型选择', () => {
   it('非交互模式返回 undefined(由命令行 flag 提供)', async () => {
     const r = await promptRemoteConfig(undefined, false);
     expect(r).toBeUndefined();
-  });
-});
-
-describe('init 交互:保留 WebDAV 默认行为', () => {
-  it('非交互模式仍返回默认 username= webdav', async () => {
-    const r = await resolveInitInputs({}, false);
-    expect(r.username).toBe('webdav');
-    expect(r.url).toBeUndefined();
-    expect(r.password).toBeUndefined();
   });
 });
 

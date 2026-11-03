@@ -69,3 +69,26 @@ describe('init 交互:保留 WebDAV 默认行为', () => {
     expect(r.password).toBeUndefined();
   });
 });
+
+describe('init 交互:S3 自定义 endpoint', () => {
+  it('命令行给了 --endpoint 时用它,不再按厂商推导', async () => {
+    const { buildS3FromFlags } = await import('../src/cli.js');
+    const cfg = buildS3FromFlags(
+      {
+        type: 's3',
+        provider: 'aliyun',
+        region: 'cn-hangzhou',
+        bucket: 'b',
+        accessKeyId: 'AK',
+        secretAccessKey: 'SK',
+        endpoint: 'http://127.0.0.1:19900',
+      },
+      { type: 'webdav', url: '', username: 'webdav', password: '' },
+    );
+    expect(cfg?.type).toBe('s3');
+    if (cfg?.type === 's3') {
+      expect(cfg.endpoint).toBe('http://127.0.0.1:19900');
+      expect(cfg.bucket).toBe('b');
+    }
+  });
+});

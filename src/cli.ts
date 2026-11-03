@@ -494,6 +494,10 @@ interface InitOptions {
   region?: string;
   /** S3 Bucket */
   bucket?: string;
+  /** 自定义 S3 endpoint(覆盖厂商推导;MinIO 等 S3 兼容私有部署需要) */
+  endpoint?: string;
+  /** path-style 寻址(bucket 放路径里);私有 S3 兼容服务通常需要 */
+  forcePathStyle?: boolean;
   /** S3 AccessKey ID */
   accessKeyId?: string;
   /** S3 Secret AccessKey(也可用 TROVE_PASSWORD 环境变量) */
@@ -509,13 +513,14 @@ function isCancel(v: unknown): v is symbol {
 /**
  * 命令行给了足够的 S3 参数就直接用(供脚本化配置);否则返回 undefined 走交互引导。
  */
-function buildS3FromFlags(opts: InitOptions, existing: RemoteConfig): RemoteConfig | undefined {
+export function buildS3FromFlags(opts: InitOptions, existing: RemoteConfig): RemoteConfig | undefined {
   const prev = existing.type === 's3' ? existing : undefined;
   const bucket = opts.bucket ?? prev?.bucket;
   const region = opts.region ?? prev?.region;
   const accessKeyId = opts.accessKeyId ?? prev?.accessKeyId;
   const secretAccessKey =
     opts.secretAccessKey ?? process.env.TROVE_PASSWORD ?? prev?.secretAccessKey;
+  const endpoint = opts.endpoint ?? prev?.endpoint;
   if (!bucket || !region || !accessKeyId || !secretAccessKey) return undefined;
   return {
     type: 's3',
@@ -524,7 +529,8 @@ function buildS3FromFlags(opts: InitOptions, existing: RemoteConfig): RemoteConf
     bucket,
     accessKeyId,
     secretAccessKey,
-    forcePathStyle: prev?.forcePathStyle ?? false,
+    ...(endpoint ? { endpoint } : {}),
+    forcePathStyle: opts.forcePathStyle ?? prev?.forcePathStyle ?? false,
   };
 }
 
@@ -750,6 +756,8 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--provider <vendor>', 'S3 厂商:aliyun / tencent')
     .option('--region <region>', 'S3 地域(如 cn-hangzhou / ap-guangzhou)')
     .option('--bucket <bucket>', 'S3 Bucket 名')
+    .option('--endpoint <url>', '自定义 S3 endpoint(覆盖厂商推导,MinIO 等私有部署用)')
+    .option('--force-path-style', 'S3 用 path-style 寻址(bucket 放路径里,私有部署常用)')
     .option('--access-key-id <id>', 'S3 AccessKey ID')
     .option('--secret-access-key <key>', 'S3 Secret AccessKey(也可用 TROVE_PASSWORD 环境变量)')
     .option('--no-daemon', '初始化后不自动启动 daemon')

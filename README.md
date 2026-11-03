@@ -17,6 +17,9 @@ trove init --type s3 --provider aliyun --region cn-hangzhou \
   --bucket my-bucket --access-key-id AKID --secret-access-key SK --no-daemon
 trove init --type s3 --provider tencent --region ap-guangzhou \
   --bucket my-bucket-1250000000 --access-key-id AKID --secret-access-key SK --no-daemon
+# 私有 S3 兼容部署(MinIO 等):自定义 endpoint + path-style 寻址
+trove init --type s3 --endpoint http://127.0.0.1:9000 --force-path-style \
+  --region us-east-1 --bucket my-bucket --access-key-id AKID --secret-access-key SK --no-daemon
 
 # 同步:默认全量;日常建议限定时间窗
 trove sync --since 7d

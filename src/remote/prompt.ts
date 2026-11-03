@@ -109,6 +109,13 @@ async function promptS3(existing?: RemoteConfig & { type: 's3' }): Promise<Remot
   if (accessKeyId === undefined) return undefined;
   const secretAccessKey = await askSecret('Secret AccessKey(留空 = 不变)');
   if (secretAccessKey === undefined) return undefined;
+  // 自定义 endpoint:留空 = 按厂商推导;MinIO 等私有部署填自己的地址
+  const endpoint = await askText(
+    '自定义 Endpoint(留空 = 用厂商默认)',
+    existing?.endpoint ?? '',
+    vendor.endpoint(region),
+  );
+  if (endpoint === undefined) return undefined;
 
   return {
     type: 's3',
@@ -117,6 +124,7 @@ async function promptS3(existing?: RemoteConfig & { type: 's3' }): Promise<Remot
     bucket,
     accessKeyId,
     secretAccessKey: secretAccessKey === '' ? (existing?.secretAccessKey ?? '') : secretAccessKey,
+    ...(endpoint ? { endpoint } : {}),
     forcePathStyle: existing?.forcePathStyle ?? vendor.forcePathStyle,
   };
 }

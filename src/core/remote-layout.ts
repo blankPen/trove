@@ -6,7 +6,11 @@ import type { ChunkRef } from './chunker.js';
  *
  *   <device>/index.json                             设备索引(清单 + 块哈希都在这里)
  *   <device>/meta.json                              设备名 / lastSeen
- *   <device>/chunks/<harness>/<key>.<gen>.<off>-<len>.bin   不可变块
+ *   <device>/chunks/<harness>/<key>.<gen>.<off>-<len>.bin   不可变块(WebDAV)
+ *   <device>/files/<harness>/<relPath>              整文件对象(S3,可读)
+ *
+ * WebDAV 没有原生分片上传,按块存;对象存储一个文件一个对象,路径即原相对路径。
+ * 两种布局由索引项的 layout 字段区分,缺省 'chunk'(兼容老索引)。
  *
  * 每个 harness 只有一个目录,避免"每会话多级 MKCOL"的数千次往返;
  * 索引是单次提交点,块先传、索引后写。
@@ -23,6 +27,8 @@ export interface IndexItem {
   chunks: ChunkRef[];
   /** chunks 数组的 sha256,拉取时判断是否需要取索引里的块列表 */
   chunksHash: string;
+  /** 缺省 'chunk':老索引没有这个字段,按分块布局解释。 */
+  layout?: 'chunk' | 'object';
   updatedAt: number;
 }
 
@@ -104,12 +110,29 @@ export function chunkRemotePath(
   return `${deviceRemoteRoot(deviceId)}/chunks/${harness}/${name}`;
 }
 
+/**
+ * 单对象布局:与本地 vault 同构,控制台里能直接浏览/下载会话原文。
+ * 路径即 relPath,同路径覆盖写(不加世代后缀)。
+ * 超长路径超过 240 字符时整体换成 relPath 的哈希,保证 S3 key 不超限。
+ */
+export function objectRemotePath(deviceId: string, harness: string, relPath: string): string {
+  const plain = `${deviceRemoteRoot(deviceId)}/files/${harness}/${relPath}`;
+  const name =
+    plain.length <= 240
+      ? relPath
+      : createHash('sha256').update(relPath).digest('hex').slice(0, 32);
+  return `${deviceRemoteRoot(deviceId)}/files/${harness}/${name}`;
+}
+
 /** 校验索引项(远端不可信):块必须从 0 连续铺满整个文件。 */
 export function validateIndexItem(item: IndexItem): void {
   if (!validateRelPath(item.relPath)) throw new Error(`非法路径(远端不可信): ${item.relPath}`);
   if (decodeKey(item.key) !== item.relPath) throw new Error(`远端索引路径不一致: ${item.relPath}`);
   if (!item.generation || item.generation.includes('/') || item.generation.includes('.')) {
     throw new Error(`远端世代名非法: ${item.generation}`);
+  }
+  if (item.layout !== undefined && item.layout !== 'chunk' && item.layout !== 'object') {
+    throw new Error(`远端布局非法: ${item.relPath}`);
   }
   let offset = 0;
   for (const c of item.chunks) {
@@ -119,6 +142,10 @@ export function validateIndexItem(item: IndexItem): void {
     offset += c.length;
   }
   if (offset !== item.size) throw new Error(`远端块未铺满文件: ${item.relPath}`);
+  // 单对象布局必须是一整块;空文件沿用零块(远端可能没有对象)
+  if (item.layout === 'object' && item.size > 0 && item.chunks.length !== 1) {
+    throw new Error(`远端单对象布局非法: ${item.relPath}`);
+  }
   if (chunksHash(item.chunks) !== item.chunksHash) {
     throw new Error(`远端块哈希不一致: ${item.relPath}`);
   }

@@ -1,8 +1,9 @@
-import { open, readFile, writeFile } from 'node:fs/promises';
+import { open, readFile, stat, writeFile, type FileHandle } from 'node:fs/promises';
 import { request as httpRequest, Agent as HttpAgent, type IncomingMessage } from 'node:http';
 import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
+import { mapLimit } from '../core/concurrency.js';
 import type { RemoteEntry, RemoteStore } from './store.js';
-import { signRequest } from './s3-sigv4.js';
+import { canonicalQuery, canonicalUri, signRequest } from './s3-sigv4.js';
 
 export interface S3Options {
   /** S3 兼容 endpoint,例如 https://s3.oss-cn-hangzhou.aliyuncs.com */
@@ -28,6 +29,12 @@ const MAX_ATTEMPTS = 3;
  * (大批量小文件场景建议 -j 100~500),这里取一个保守起点。
  */
 const DEFAULT_CONCURRENCY = 8;
+/** 超过这个大小走 Multipart Upload;以下单 PUT 更省请求。 */
+const MULTIPART_THRESHOLD = 16 * 1024 * 1024;
+/** Multipart 分片大小:满足 S3 对非末尾分片的 5 MiB 下限。 */
+const PART_SIZE = 8 * 1024 * 1024;
+/** 下载分段大小:避免整个对象进内存。 */
+const READ_PART_SIZE = 8 * 1024 * 1024;
 
 function strip(p: string): string {
   return p.replace(/^\/+|\/+$/g, '');
@@ -132,7 +139,7 @@ export class S3Store implements RemoteStore {
   private async raw(
     method: string,
     key: string,
-    opts: { query?: Record<string, string>; body?: Buffer } = {},
+    opts: { query?: Record<string, string>; body?: Buffer; headers?: Record<string, string> } = {},
   ): Promise<RawResponse> {
     const { host, path } = this.hostAndPath(key);
     const url = new URL(this.endpoint);
@@ -145,7 +152,7 @@ export class S3Store implements RemoteStore {
       method,
       url: url.toString(),
       pathname: path,
-      headers: { host },
+      headers: { host, ...opts.headers },
       body,
       region: this.region,
       service: 's3',
@@ -156,6 +163,11 @@ export class S3Store implements RemoteStore {
 
     const isHttps = url.protocol === 'https:';
     const reqFn = isHttps ? httpsRequest : httpRequest;
+    // 发送路径必须与签名用的 canonical URI 完全一致。
+    // WHATWG URL 会保留 ( ) ! * + 等字符,而 SigV4 要求按 RFC3986 编码,
+    // 混用会导致 SignatureDoesNotMatch(对象路径含这些字符时必现)。
+    const query = canonicalQuery(opts.query ?? {});
+    const sendPath = `${canonicalUri(path)}${query ? `?${query}` : ''}`;
 
     return new Promise<RawResponse>((resolve, reject) => {
       const req = reqFn(
@@ -164,7 +176,7 @@ export class S3Store implements RemoteStore {
           hostname: url.hostname,
           port: url.port || (isHttps ? 443 : 80),
           method,
-          path: `${url.pathname}${url.search}`,
+          path: sendPath,
           headers: { ...signed.headers, 'content-length': String(body.length) },
           agent: isHttps ? this.agents.https : this.agents.http,
         },
@@ -194,7 +206,7 @@ export class S3Store implements RemoteStore {
   private async call(
     method: string,
     key: string,
-    opts: { query?: Record<string, string>; body?: Buffer; allow404?: boolean } = {},
+    opts: { query?: Record<string, string>; body?: Buffer; headers?: Record<string, string>; allow404?: boolean } = {},
   ): Promise<RawResponse | null> {
     let lastErr: unknown;
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
@@ -320,9 +332,86 @@ export class S3Store implements RemoteStore {
     range?: { offset: number; length: number },
   ): Promise<void> {
     const key = toKey(path);
-    // 读整个区间到内存再发:块最大 4MiB,内存占用可控
-    const body = await this.readRange(localPath, range);
-    await this.call('PUT', key, { body });
+    // 区间上传是应用层分块(旧 chunk 布局),按区间读后单独 PUT
+    if (range) {
+      const body = await this.readRange(localPath, range);
+      await this.call('PUT', key, { body });
+      return;
+    }
+    const size = (await stat(localPath)).size;
+    if (size > MULTIPART_THRESHOLD) {
+      await this.multipart(key, localPath, size);
+      return;
+    }
+    // 读整个文件到内存再发:控制在 16MiB 以内
+    await this.call('PUT', key, { body: await readFile(localPath) });
+  }
+
+  /** 逐段落读本地文件,避免整个大文件进内存。 */
+  private async readPart(fh: FileHandle, offset: number, length: number): Promise<Buffer> {
+    const buf = Buffer.allocUnsafe(length);
+    let read = 0;
+    while (read < length) {
+      const { bytesRead } = await fh.read(buf, read, length - read, offset + read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    return buf.subarray(0, read);
+  }
+
+  /**
+   * S3 Multipart Upload:分片只在协议层,最终仍是一个对象。
+   * 失败时尽力 Abort,避免桶里留下未完成的分片。
+   */
+  private async multipart(key: string, localPath: string, size: number): Promise<void> {
+    const created = await this.call('POST', key, { query: { uploads: '' } });
+    const uploadId = /<UploadId>([\s\S]*?)<\/UploadId>/.exec(created!.body.toString('utf8'))?.[1];
+    if (!uploadId) throw new S3Error(`创建分片上传失败(缺少 UploadId): ${key}`);
+
+    const fh = await open(localPath, 'r');
+    try {
+      // shortcut: 8 MiB × 10000 片 = 78 GiB 上限,会话文件远小于此;真超了再动态放大分片
+      const count = Math.ceil(size / PART_SIZE);
+      const parts = await mapLimit(
+        Array.from({ length: count }, (_, i) => i + 1),
+        this.concurrency,
+        async (partNumber) => {
+          const offset = (partNumber - 1) * PART_SIZE;
+          const length = Math.min(PART_SIZE, size - offset);
+          const body = await this.readPart(fh, offset, length);
+          const res = await this.call('PUT', key, {
+            query: { partNumber: String(partNumber), uploadId },
+            body,
+          });
+          const raw = res!.headers.etag;
+          const etag = Array.isArray(raw) ? raw[0] : raw;
+          if (!etag) throw new S3Error(`分片 ${partNumber} 缺少 ETag: ${key}`);
+          return { partNumber, etag };
+        },
+      );
+
+      parts.sort((a, b) => a.partNumber - b.partNumber);
+      const xml = [
+        '<CompleteMultipartUpload>',
+        ...parts.map(
+          (p) => `<Part><PartNumber>${p.partNumber}</PartNumber><ETag>${p.etag}</ETag></Part>`,
+        ),
+        '</CompleteMultipartUpload>',
+      ].join('');
+      const res = await this.call('POST', key, {
+        query: { uploadId },
+        body: Buffer.from(xml, 'utf8'),
+        headers: { 'content-type': 'application/xml' },
+      });
+      // COS 的 Complete 可能返回 200 但响应体内嵌 <Error>
+      const text = res!.body.toString('utf8');
+      if (/<Error>/.test(text)) throw new S3Error(`分片上传合并失败: ${text.slice(0, 300)}`);
+    } catch (err) {
+      await this.call('DELETE', key, { query: { uploadId }, allow404: true }).catch(() => {});
+      throw err;
+    } finally {
+      await fh.close();
+    }
   }
 
   private async readRange(
@@ -334,17 +423,44 @@ export class S3Store implements RemoteStore {
     }
     const fh = await open(localPath, 'r');
     try {
-      const buf = Buffer.allocUnsafe(range.length);
-      const { bytesRead } = await fh.read(buf, 0, range.length, range.offset);
-      return buf.subarray(0, bytesRead);
+      return await this.readPart(fh, range.offset, range.length);
     } finally {
       await fh.close();
     }
   }
 
   async readFile(path: string, localPath: string): Promise<void> {
-    const res = await this.call('GET', toKey(path));
-    await writeFile(localPath, res!.body);
+    const key = toKey(path);
+    // HEAD 拿长度后分段 GET:单对象布局下文件可能很大,不能整段进内存
+    const size = await this.call('HEAD', key, { allow404: true })
+      .then((res) => {
+        const raw = res?.headers['content-length'];
+        const n = Number(Array.isArray(raw) ? raw[0] : raw);
+        return Number.isFinite(n) ? n : null;
+      })
+      .catch(() => null);
+    if (size === null) {
+      const res = await this.call('GET', key);
+      await writeFile(localPath, res!.body);
+      return;
+    }
+    const fh = await open(localPath, 'w');
+    try {
+      for (let offset = 0; offset < size; offset += READ_PART_SIZE) {
+        const end = Math.min(offset + READ_PART_SIZE, size) - 1;
+        const res = await this.call('GET', key, {
+          headers: { range: `bytes=${offset}-${end}` },
+        });
+        // 服务端忽略 Range 会回 200 全量:直接整份落盘,不能按偏移写
+        if (res!.status !== 206) {
+          await fh.write(res!.body, 0, res!.body.length, 0);
+          return;
+        }
+        await fh.write(res!.body, 0, res!.body.length, offset);
+      }
+    } finally {
+      await fh.close();
+    }
   }
 
   async delete(path: string): Promise<void> {
@@ -355,5 +471,10 @@ export class S3Store implements RemoteStore {
   /** 对象存储允许并发上传;OSS 官方建议大批量小文件用较高并发。 */
   concurrencyHint(): number {
     return this.concurrency;
+  }
+
+  /** 对象存储:一个文件一个对象,控制台可直接浏览。 */
+  layoutHint(): 'chunk' | 'object' {
+    return 'object';
   }
 }

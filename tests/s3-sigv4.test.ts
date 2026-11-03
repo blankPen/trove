@@ -101,4 +101,29 @@ describe('SigV4 签名', () => {
     const b = signRequest({ ...base, url: 'https://h/x?list-type=2&prefix=a' });
     expect(a.headers.authorization).not.toBe(b.headers.authorization);
   });
+
+  it('空值 query 保留等号(分片上传的 uploads=)', () => {
+    expect(canonicalQuery({ uploads: '' })).toBe('uploads=');
+    const signed = signRequest({
+      method: 'POST',
+      url: 'https://h/key?uploads=',
+      pathname: '/key',
+      headers: { host: 'h' },
+      body: Buffer.alloc(0),
+      ...CREDS,
+      date: new Date('2026-11-03T12:00:00Z'),
+    });
+    expect(signed.headers.authorization).toMatch(/^AWS4-HMAC-SHA256 /);
+    // 与「没有 query」的签名不同,证明 uploads= 进了 canonical request
+    const plain = signRequest({
+      method: 'POST',
+      url: 'https://h/key',
+      pathname: '/key',
+      headers: { host: 'h' },
+      body: Buffer.alloc(0),
+      ...CREDS,
+      date: new Date('2026-11-03T12:00:00Z'),
+    });
+    expect(signed.headers.authorization).not.toBe(plain.headers.authorization);
+  });
 });

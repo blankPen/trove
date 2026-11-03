@@ -7,6 +7,7 @@ import {
   indexPath,
   itemKey,
   metaPath,
+  objectRemotePath,
   validateIndexItem,
   type IndexItem,
 } from '../../src/core/remote-layout.js';
@@ -60,6 +61,25 @@ describe('远端布局与 key 编码', () => {
     expect(chunkRemotePath('dev1', 'claude-code', longKey, gen, { offset: 0, length: 4 })).toBe(p);
   });
 
+  it('单对象布局保留原始相对路径(控制台可读)', () => {
+    expect(objectRemotePath('dev1', 'codex', 'sessions/a.jsonl')).toBe(
+      'raw/dev1/files/codex/sessions/a.jsonl',
+    );
+    // 中文与空格原样保留,S3 key 支持 UTF-8
+    expect(objectRemotePath('dev1', 'claude-code', 'projects/我的 项目/x.jsonl')).toBe(
+      'raw/dev1/files/claude-code/projects/我的 项目/x.jsonl',
+    );
+  });
+
+  it('单对象布局超长 relPath 退化为哈希文件名', () => {
+    const rel = `projects/${'a'.repeat(300)}.jsonl`;
+    const p = objectRemotePath('dev1', 'codex', rel);
+    const name = p.split('/').pop()!;
+    expect(name).toHaveLength(32);
+    expect(p.length).toBeLessThanOrEqual(240);
+    expect(objectRemotePath('dev1', 'codex', rel)).toBe(p);
+  });
+
   it('合法索引项通过校验', () => {
     expect(() => validateIndexItem(item())).not.toThrow();
   });
@@ -85,5 +105,30 @@ describe('远端布局与 key 编码', () => {
   it('远端的 relPath / generation 不可信', () => {
     expect(() => validateIndexItem({ ...item(), relPath: '../x' })).toThrow(/非法路径/);
     expect(() => validateIndexItem({ ...item(), generation: '../g' })).toThrow(/世代名非法/);
+  });
+
+  it('单对象布局必须是一整块;空文件保持零块', () => {
+    const whole = { offset: 0, length: 4, sha256: 'a'.repeat(64) };
+    expect(() =>
+      validateIndexItem(item({ layout: 'object', chunks: [whole], chunksHash: chunksHash([whole]) })),
+    ).not.toThrow();
+    // 多块伪装成单对象 → 拒绝
+    const two = [
+      { offset: 0, length: 2, sha256: 'a'.repeat(64) },
+      { offset: 2, length: 2, sha256: 'b'.repeat(64) },
+    ];
+    expect(() =>
+      validateIndexItem(item({ layout: 'object', chunks: two, chunksHash: chunksHash(two) })),
+    ).toThrow(/单对象布局非法/);
+    // 空文件
+    expect(() =>
+      validateIndexItem(item({ layout: 'object', size: 0, chunks: [], chunksHash: chunksHash([]) })),
+    ).not.toThrow();
+  });
+
+  it('未知 layout 值被拒绝', () => {
+    expect(() =>
+      validateIndexItem({ ...item(), layout: 'weird' as unknown as 'chunk' }),
+    ).toThrow(/布局非法/);
   });
 });

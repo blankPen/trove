@@ -9,6 +9,13 @@ export class MemoryRemote {
   readonly writes: string[] = [];
   readonly reads: string[] = [];
 
+  /** 默认 chunk(模拟 WebDAV);传 'object' 模拟 S3 单对象布局。 */
+  constructor(private readonly layout: 'chunk' | 'object' = 'chunk') {}
+
+  layoutHint(): 'chunk' | 'object' {
+    return this.layout;
+  }
+
   async listDevices(): Promise<string[]> {
     const out = new Set<string>();
     for (const p of this.files.keys()) {

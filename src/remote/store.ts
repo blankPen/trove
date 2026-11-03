@@ -30,4 +30,11 @@ export interface RemoteStore {
 
   /** 删除单个文件;不存在时忽略。 */
   delete(path: string): Promise<void>;
+
+  /**
+   * 该后端建议的并发上传数。
+   * WebDAV 实测并发 PUT 会 ECONNRESET,返回 1;对象存储允许并发,返回更高值。
+   * 不实现则按 1 处理。
+   */
+  concurrencyHint?(): number;
 }

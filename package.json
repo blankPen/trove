@@ -31,6 +31,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
+    "s3rver": "^3.7.1",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0",
     "webdav-server": "^2.6.0"

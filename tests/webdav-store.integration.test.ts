@@ -82,3 +82,10 @@ describe('WebDavStore(真实服务端集成)', () => {
     await expect(store.delete('dev1/never-existed')).resolves.toBeUndefined();
   });
 });
+
+describe('并发提示', () => {
+  it('WebDAV 后端保持单连接(并发 PUT 会 ECONNRESET)', () => {
+    const store = new WebDavStore({ url: 'http://127.0.0.1:1' });
+    expect(store.concurrencyHint()).toBe(1);
+  });
+});

@@ -17,6 +17,8 @@ export interface SyncOptions {
   statePath: string;
   /** null = 本地模式(未配置远端),只归档到本地 vault,不做远端拉/推 */
   remote: RemoteStore | null;
+  /** 远端身份指纹;换后端时本地推送水位作废,历史数据整份重推。 */
+  remoteId?: string;
   /** 0 = 全量;否则只收集最近变更的会话 */
   cutoff: number;
   tmpDir?: string;
@@ -133,6 +135,7 @@ async function syncUnlocked(opts: SyncOptions): Promise<SyncReport> {
         deviceId: opts.deviceId,
         vaultRoot: opts.vaultRoot,
         state,
+        remoteId: opts.remoteId,
         now,
         chunkSize: opts.chunkSize,
         concurrency: opts.concurrency,

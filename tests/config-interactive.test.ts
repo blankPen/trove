@@ -14,6 +14,8 @@ vi.mock('@clack/prompts', () => ({
     return byMessage[opts.message];
   }),
   password: vi.fn(async () => 'newsecret'),
+  // 远端类型:默认选 WebDAV,保持本文件原有的 WebDAV 断言
+  select: vi.fn(async () => 'webdav'),
 }));
 
 import { run } from '../src/cli.js';
@@ -25,7 +27,7 @@ async function setup() {
   const base = await mkdtemp(join(tmpdir(), 'trove-config-'));
   const paths = trovePaths(base);
   const config = defaultConfig({ deviceId: 'dev1', deviceName: '旧设备' });
-  config.remote = { url: 'http://old.invalid/', username: 'olduser', password: 'oldpass' };
+  config.remote = { type: 'webdav', url: 'http://old.invalid/', username: 'olduser', password: 'oldpass' };
   await saveConfig(paths.config, config);
   const lines: string[] = [];
   const deps = {

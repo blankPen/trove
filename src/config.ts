@@ -10,12 +10,30 @@ export interface DeviceConfig {
   name: string;
 }
 
-export interface RemoteConfig {
+export interface WebDavRemoteConfig {
+  type: 'webdav';
   url: string;
   username: string;
   /** 明文存储,仅存于 config.json(权限 600),跨平台不依赖系统钥匙串。 */
   password: string;
 }
+
+export interface S3RemoteConfig {
+  type: 's3';
+  /** 厂商预设(aliyun / tencent);手填 endpoint 时可省略。 */
+  provider?: 'aliyun' | 'tencent';
+  region: string;
+  bucket: string;
+  /** 手填 endpoint 覆盖厂商推导。 */
+  endpoint?: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  /** path-style 寻址;阿里云 OSS 默认 false(走 path-style 会 403)。 */
+  forcePathStyle?: boolean;
+}
+
+/** 远端配置:按 type 区分后端。 */
+export type RemoteConfig = WebDavRemoteConfig | S3RemoteConfig;
 
 export type SourceId = 'claude-code' | 'codex' | 'opencode' | 'doubao';
 
@@ -58,6 +76,7 @@ export function defaultConfig(
       name: opts.deviceName ?? hostname(),
     },
     remote: {
+      type: 'webdav',
       url: '',
       username: 'webdav',
       password: '',
@@ -92,12 +111,39 @@ export async function loadConfig(path: string): Promise<Config> {
   // 老配置没有 sync / daemon 字段:按默认补齐
   return {
     ...parsed,
+    remote: normalizeRemote(parsed.remote),
     sync: { raw: parsed.sync?.raw !== false },
     daemon: {
       intervalSeconds: parsed.daemon?.intervalSeconds ?? 300,
       since: parsed.daemon?.since ?? '7d',
       startOnInit: parsed.daemon?.startOnInit !== false,
     },
+  };
+}
+
+/**
+ * 老配置(只有 url/username/password,没有 type)按 webdav 处理;
+ * 已经是 s3 的配置原样保留。
+ */
+export function normalizeRemote(remote: unknown): RemoteConfig {
+  const r = (remote ?? {}) as Record<string, unknown>;
+  if (r.type === 's3') {
+    return {
+      type: 's3',
+      provider: r.provider as 'aliyun' | 'tencent' | undefined,
+      region: (r.region as string) ?? '',
+      bucket: (r.bucket as string) ?? '',
+      endpoint: r.endpoint as string | undefined,
+      accessKeyId: (r.accessKeyId as string) ?? '',
+      secretAccessKey: (r.secretAccessKey as string) ?? '',
+      forcePathStyle: r.forcePathStyle as boolean | undefined,
+    };
+  }
+  return {
+    type: 'webdav',
+    url: (r.url as string) ?? '',
+    username: (r.username as string) ?? 'webdav',
+    password: (r.password as string) ?? '',
   };
 }
 

@@ -1,14 +1,22 @@
 # trove
 
-AI 会话资产归档工具:把本机 Claude Code / Codex / OpenCode / 豆包的会话**无损**归档到 WebDAV,并支持多设备增量同步。
+AI 会话资产归档工具:把本机 Claude Code / Codex / OpenCode / 豆包的会话**无损**归档到 WebDAV 或 S3 兼容对象存储,并支持多设备增量同步。
 
 ## 用法
 
 ```bash
-# 首次配置(设备名、WebDAV 端点、凭证)
+# 首次配置(设备名、远端后端、凭证)
 # 默认会拉起 daemon 并立即跑首轮同步;只写配置用 --no-daemon
+# 交互式:trove init 会先问远端类型(WebDAV / S3),再按类型问对应字段
+trove init
 trove init --url https://dav.example.com/ --username u --password p
 trove init --url https://dav.example.com/ --username u --password p --no-daemon
+
+# S3 兼容对象存储(阿里云 OSS / 腾讯云 COS)
+trove init --type s3 --provider aliyun --region cn-hangzhou \
+  --bucket my-bucket --access-key-id AKID --secret-access-key SK --no-daemon
+trove init --type s3 --provider tencent --region ap-guangzhou \
+  --bucket my-bucket-1250000000 --access-key-id AKID --secret-access-key SK --no-daemon
 
 # 同步:默认全量;日常建议限定时间窗
 trove sync --since 7d
@@ -112,7 +120,7 @@ trove 自己调用 LLM 的场景(手动 `trove learn`、daemon 每轮同步后�
 
 ```
 ~/.trove/
-├── config.json              设备身份与 WebDAV 凭证(600)
+├── config.json              设备身份与远端凭证(600)
 ├── state.json               游标 + 推送/拉取水位 + library 记录(原子写)
 ├── usage.jsonl              trove 自身 LLM 调用的 token 用量(只追加,不同步)
 ├── daemon.pid / daemon.status.json
@@ -122,7 +130,7 @@ trove 自己调用 LLM 的场景(手动 `trove learn`、daemon 每轮同步后�
 └── logs/daemon.log
 ```
 
-远端布局:
+远端布局(WebDAV 与 S3 完全一致,切换后端不用搬数据):
 
 ```
 raw/<device>/index.json                            索引(含每文件块清单与哈希)
@@ -131,6 +139,18 @@ raw/<device>/chunks/<harness>/<key>.<gen>.<off>-<len>.bin  不可变块
 library/index/<device>.json                        每设备索引分片
 library/sessions/…、library/skills/…               个人资产
 ```
+
+## 远端后端
+
+| 后端 | 配置方式 | 说明 |
+|---|---|---|
+| WebDAV | `trove init --url … --username … --password …` | 默认后端,兼容自建与第三方网盘 |
+| 阿里云 OSS | `--type s3 --provider aliyun --region cn-hangzhou --bucket …` | S3 兼容,走 virtual-hosted 寻址 |
+| 腾讯云 COS | `--type s3 --provider tencent --region ap-guangzhou --bucket …` | S3 兼容;Bucket 名需带 `-<appid>` 后缀 |
+
+交互式配置(`trove init` / `trove config`)会先问远端类型,再按类型问对应字段 —— 选 S3 时依次问厂商、地域、Bucket、AccessKey,不选就沿用现有配置。
+
+**换后端与历史数据迁移**:远端布局在两种后端下完全一致,所以迁移就是把同一份 vault 推到新后端。`state.json` 里的 `remoteId` 记录了推送水位属于哪个远端;检测到后端变了,旧水位自动作废,历史数据会整份重推(不会"以为推过了"而静默丢数据)。首次切到新后端时跑一次 `trove sync --since all` 即可。
 
 ## 开发
 

@@ -90,7 +90,7 @@ describe('config(设计 §10.2)', () => {
 
   it('defaultConfig 的 remote 存明文 username/password(跨平台,不依赖钥匙串)', () => {
     const c = defaultConfig();
-    expect(c.remote).toEqual({ url: '', username: 'webdav', password: '' });
+    expect(c.remote).toEqual({ type: 'webdav', url: '', username: 'webdav', password: '' });
   });
 
   it('saveConfig 写出的配置文件权限为 600(仅属主可读写)', async () => {

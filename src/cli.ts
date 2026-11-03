@@ -3,7 +3,7 @@ import { hostname } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Command, CommanderError } from 'commander';
-import { password as clackPassword, text } from '@clack/prompts';
+import { text } from '@clack/prompts';
 import pc from 'picocolors';
 import { trovePaths } from './paths.js';
 import { loadConfig, resolveRawSync, saveConfig, type Config, type RemoteConfig } from './config.js';
@@ -611,24 +611,6 @@ export function buildS3FromFlags(opts: InitOptions, existing: RemoteConfig): Rem
   };
 }
 
-export async function resolveInitInputs(opts: InitOptions, interactive = false) {
-  const name =
-    opts.name ?? (interactive ? await text({ message: '设备名', initialValue: hostname() }) : hostname());
-  const username =
-    opts.username ??
-    (interactive ? await text({ message: 'WebDAV 用户名', initialValue: 'webdav' }) : 'webdav');
-  const url =
-    opts.url ??
-    (interactive
-      ? await text({ message: 'WebDAV 地址', placeholder: 'https://dav.example.com/trove/' })
-      : undefined);
-  const password =
-    opts.password ??
-    process.env.TROVE_PASSWORD ??
-    (interactive ? await clackPassword({ message: 'WebDAV 密码' }) : undefined);
-  return { name, url, username, password };
-}
-
 async function cmdConfig(
   paths: ReturnType<typeof trovePaths>,
   out: (l: string) => void,
@@ -689,16 +671,16 @@ async function cmdInit(
   interactive: boolean,
 ): Promise<number> {
   const existing = await loadConfig(paths.config);
-  const { name, url, username, password } = await resolveInitInputs(opts, interactive);
-  if ([name, url, username, password].some(isCancel)) {
+  const name =
+    opts.name ?? (interactive ? await text({ message: '设备名', initialValue: hostname() }) : hostname());
+  if (isCancel(name)) {
     err('已取消。');
     return 1;
   }
 
-  // 远端配置:命令行 flag 优先,其次交互引导,都没有则进入本地模式
+  // 远端配置:命令行 flag 优先,其次交互引导(先选类型),都没有则进入本地模式
   let remoteConfig: RemoteConfig;
-  let configuredThisRun = false;
-  if (opts.type === 's3' || (opts.type === undefined && !url && interactive)) {
+  if (opts.type === 's3') {
     // S3 路径:命令行给了完整参数就用参数,否则交互引导
     const fromFlags = buildS3FromFlags(opts, existing.remote);
     if (fromFlags) {
@@ -714,17 +696,24 @@ async function cmdInit(
       }
       remoteConfig = picked;
     }
-    configuredThisRun = true;
-  } else if (url) {
-    // url 可选:不填则进入本地模式(仅本地 .trove 归档);填了就必须有密码
+  } else if (opts.url) {
+    // WebDAV:命令行给了地址就走 flag 路径;填了地址就必须有密码
+    const password = opts.password ?? process.env.TROVE_PASSWORD;
     if (!password) throw new Error('未提供密码(--password 或 TROVE_PASSWORD)。');
     remoteConfig = {
       type: 'webdav',
-      url: url as string,
-      username: username as string,
-      password: password as string,
+      url: opts.url,
+      username: opts.username ?? 'webdav',
+      password,
     };
-    configuredThisRun = true;
+  } else if (interactive) {
+    // 交互且没给 flag:先选远端类型(WebDAV / S3),再按类型问字段
+    const picked = await promptRemoteConfig(existing.remote, true);
+    if (!picked) {
+      err('已取消。');
+      return 1;
+    }
+    remoteConfig = picked;
   } else {
     // 本次 init 没给远端:进入本地模式(清掉旧远端)
     remoteConfig = { type: 'webdav', url: '', username: 'webdav', password: '' };

@@ -214,6 +214,64 @@ describe('trove CLI', () => {
     expect(lines.join('\n')).toContain('daemon 未运行');
   });
 
+  it('daemon restart:按 config 重启并给出新 pid', async () => {
+    const { paths, lines, deps } = await setup();
+    const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });
+    config.daemon = { intervalSeconds: 60, since: '24h', startOnInit: true };
+    await saveConfig(paths.config, config);
+    const got: Array<{ intervalSeconds: number; since: string }> = [];
+
+    const code = await run(['daemon', 'restart'], {
+      ...deps,
+      restartDaemon: async (opts) => {
+        got.push({ intervalSeconds: opts.intervalSeconds, since: opts.since });
+        return { pid: 789, wasRunning: true };
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(got).toEqual([{ intervalSeconds: 60, since: '24h' }]);
+    const text = lines.join('\n');
+    expect(text).toContain('daemon 已重启');
+    expect(text).toContain('789');
+  });
+
+  it('daemon restart:显式 --interval/--since 覆盖配置;原进程未运行时给提示', async () => {
+    const { paths, lines, deps } = await setup();
+    const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });
+    config.daemon = { intervalSeconds: 60, since: '24h', startOnInit: true };
+    await saveConfig(paths.config, config);
+    const got: Array<{ intervalSeconds: number; since: string }> = [];
+
+    await run(['daemon', 'restart', '--interval', '30', '--since', '7d'], {
+      ...deps,
+      restartDaemon: async (opts) => {
+        got.push({ intervalSeconds: opts.intervalSeconds, since: opts.since });
+        return { pid: 321, wasRunning: false };
+      },
+    });
+
+    expect(got).toEqual([{ intervalSeconds: 30, since: '7d' }]);
+    const text = lines.join('\n');
+    expect(text).toContain('daemon 已重启');
+    expect(text).toContain('原 daemon 未在运行');
+  });
+
+  it('daemon restart:since 非法值 → 非零退出,不重启', async () => {
+    const { lines, deps } = await setup();
+    let restarted = false;
+    const code = await run(['daemon', 'restart', '--since', '7x'], {
+      ...deps,
+      restartDaemon: async () => {
+        restarted = true;
+        return { pid: 1, wasRunning: true };
+      },
+    });
+    expect(code).toBe(1);
+    expect(restarted).toBe(false);
+    expect(lines.join('\n')).toContain('时间范围');
+  });
+
   it('未配置远端时 sync 降级为本地模式,仅本地归档不报错', async () => {
     const { paths, lines, deps } = await setup();
     const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });

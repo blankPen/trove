@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
@@ -9,9 +9,11 @@ import {
   isAlive,
   readDaemonStatus,
   releaseDaemonPid,
+  restartDaemon,
   runDaemon,
+  stopDaemon,
 } from '../../src/daemon.js';
-import { trovePaths } from '../../src/paths.js';
+import { trovePaths, type TrovePaths } from '../../src/paths.js';
 import type { SyncReport } from '../../src/core/sync.js';
 
 async function base() {
@@ -35,7 +37,6 @@ describe('daemon 生命周期', () => {
     expect(existsSync(paths.daemonPid)).toBe(false);
 
     // 陈旧 pid(不存在的进程)→ 可接管
-    const { writeFile } = await import('node:fs/promises');
     await writeFile(paths.daemonPid, JSON.stringify({ pid: 999_999_999, startedAt: 0 }));
     await expect(acquireDaemonPid(paths)).resolves.toBeUndefined();
     await releaseDaemonPid(paths);
@@ -183,4 +184,52 @@ describe('daemon 生命周期', () => {
     const log = await readFile(paths.daemonLog, 'utf8');
     expect(log).toContain('经验提取 tick 2');
   });
+});
+
+describe('daemon restart', () => {
+  /** 假 daemon 入口:写 pid 文件后常驻,收到 SIGTERM 就退出。 */
+  function fakeDaemonEntry(paths: TrovePaths): string {
+    return `
+import { writeFile } from 'node:fs/promises';
+await writeFile(${JSON.stringify(paths.daemonPid)}, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+process.on('SIGTERM', () => process.exit(0));
+setInterval(() => {}, 1000);
+`;
+  }
+
+  it('停止旧进程后拉起新进程,pid 变化', async () => {
+    const paths = await base();
+    const entry = join(await mkdtemp(join(tmpdir(), 'trove-entry-')), 'daemon.mjs');
+    await writeFile(entry, fakeDaemonEntry(paths));
+
+    const first = await restartDaemon({ paths, intervalSeconds: 60, since: '7d', entry });
+    expect(first.wasRunning).toBe(false);
+
+    const second = await restartDaemon({ paths, intervalSeconds: 60, since: '7d', entry });
+    expect(second.wasRunning).toBe(true);
+    expect(second.pid).not.toBe(first.pid);
+    expect(isAlive(second.pid)).toBe(true);
+
+    await stopDaemon(paths);
+  }, 20_000);
+
+  it('旧进程未停干净时不会起第二个实例', async () => {
+    const paths = await base();
+    const entry = join(await mkdtemp(join(tmpdir(), 'trove-entry-')), 'daemon.mjs');
+    await writeFile(entry, fakeDaemonEntry(paths));
+
+    await restartDaemon({ paths, intervalSeconds: 60, since: '7d', entry });
+    // stop 谎报成功但进程仍在 → start 应因 pid 锁报错
+    await expect(
+      restartDaemon({
+        paths,
+        intervalSeconds: 60,
+        since: '7d',
+        entry,
+        stop: async () => true,
+      }),
+    ).rejects.toThrow(/已在运行/);
+
+    await stopDaemon(paths);
+  }, 20_000);
 });

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { stat, writeFile } from 'node:fs/promises';
-import { request as httpRequest, type IncomingMessage } from 'node:http';
-import { request as httpsRequest } from 'node:https';
+import { open, readFile, stat, writeFile } from 'node:fs/promises';
+import { request as httpRequest, Agent as HttpAgent, type IncomingMessage } from 'node:http';
+import { request as httpsRequest, Agent as HttpsAgent } from 'node:https';
 import type { RemoteEntry, RemoteStore } from './store.js';
 import { signRequest } from './s3-sigv4.js';
 
@@ -116,9 +116,6 @@ export class S3Store implements RemoteStore {
     this.maxSockets = opts.maxSockets ?? DEFAULT_CONCURRENCY;
     this.concurrency = opts.concurrency ?? DEFAULT_CONCURRENCY;
 
-    // 动态 import 避免在只用 WebDAV 时也加载 http agent
-    const { Agent: HttpAgent } = require('node:http') as typeof import('node:http');
-    const { Agent: HttpsAgent } = require('node:https') as typeof import('node:https');
     this.agents = {
       http: new HttpAgent({ keepAlive: true, maxSockets: this.maxSockets }),
       https: new HttpsAgent({ keepAlive: true, maxSockets: this.maxSockets }),
@@ -335,10 +332,8 @@ export class S3Store implements RemoteStore {
     range?: { offset: number; length: number },
   ): Promise<Buffer> {
     if (!range) {
-      const { readFile } = await import('node:fs/promises');
       return readFile(localPath);
     }
-    const { open } = await import('node:fs/promises');
     const fh = await open(localPath, 'r');
     try {
       const buf = Buffer.allocUnsafe(range.length);

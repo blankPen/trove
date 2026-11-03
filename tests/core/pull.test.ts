@@ -11,6 +11,7 @@ import {
   encodeKey,
   indexPath,
   itemKey,
+  objectRemotePath,
   type DeviceIndex,
   type IndexItem,
 } from '../../src/core/remote-layout.js';
@@ -27,25 +28,49 @@ async function vault() {
 async function seedRemote(
   remote: MemoryRemote,
   body: string,
-  over: { generation?: string; deviceId?: string; relPath?: string; harness?: string } = {},
+  over: {
+    generation?: string;
+    deviceId?: string;
+    relPath?: string;
+    harness?: string;
+    layout?: 'chunk' | 'object';
+  } = {},
 ) {
   const deviceId = over.deviceId ?? 'devA';
   const harness = over.harness ?? 'claude-code';
   const relPath = over.relPath ?? 'projects/a.jsonl';
   const generation = over.generation ?? 'g1';
+  const layout = over.layout ?? 'chunk';
   const key = encodeKey(relPath);
-  const chunks: ChunkRef[] = [...body.matchAll(/.{1,4}/gs)].map((m, i) => ({
+  const bytes = Buffer.from(body, 'utf8');
+  const split: ChunkRef[] = [...body.matchAll(/.{1,4}/gs)].map((m, i) => ({
     offset: i * CH,
     length: Buffer.byteLength(m[0]),
     sha256: createHash('sha256')
-      .update(Buffer.from(body, 'utf8').subarray(i * CH, i * CH + Buffer.byteLength(m[0])))
+      .update(bytes.subarray(i * CH, i * CH + Buffer.byteLength(m[0])))
       .digest('hex'),
   }));
-  for (const c of chunks) {
-    remote.files.set(
-      chunkRemotePath(deviceId, harness, key, generation, c),
-      Buffer.from(body, 'utf8').subarray(c.offset, c.offset + c.length),
-    );
+  const chunks: ChunkRef[] =
+    layout === 'object'
+      ? bytes.length > 0
+        ? [
+            {
+              offset: 0,
+              length: bytes.length,
+              sha256: createHash('sha256').update(bytes).digest('hex'),
+            },
+          ]
+        : []
+      : split;
+  if (layout === 'object') {
+    if (bytes.length > 0) remote.files.set(objectRemotePath(deviceId, harness, relPath), bytes);
+  } else {
+    for (const c of split) {
+      remote.files.set(
+        chunkRemotePath(deviceId, harness, key, generation, c),
+        bytes.subarray(c.offset, c.offset + c.length),
+      );
+    }
   }
   const item: IndexItem = {
     harness,
@@ -53,9 +78,10 @@ async function seedRemote(
     relPath,
     sessionKey: relPath,
     generation,
-    size: Buffer.byteLength(body),
+    size: bytes.length,
     chunks,
     chunksHash: chunksHash(chunks),
+    layout,
     updatedAt: 1,
   };
   const index: DeviceIndex = {
@@ -261,5 +287,45 @@ describe('pullRemote(重建 + 增量)', () => {
       items: { [itemKey(item.harness, item.key)]: { ...item, chunksHash: '0'.repeat(64) } },
     });
     await expect(pullRemote(opts(root, remote))).rejects.toThrow(/块哈希不一致/);
+  });
+
+  it('单对象布局:一个对象拉回整文件', async () => {
+    const root = await vault();
+    const remote = new MemoryRemote('object');
+    await seedRemote(remote, '0123456789', { layout: 'object' });
+
+    const r = await pullRemote(opts(root, remote));
+
+    expect(r.downloadedItems).toBe(1);
+    expect(r.downloadedChunks).toBe(1);
+    expect(r.downloadedBytes).toBe(10);
+    const local = join(root, 'raw', 'devA', 'claude-code', 'projects', 'a.jsonl');
+    expect(await readFile(local, 'utf8')).toBe('0123456789');
+  });
+
+  it('单对象布局:重复拉取不再请求对象', async () => {
+    const root = await vault();
+    const remote = new MemoryRemote('object');
+    await seedRemote(remote, '0123456789', { layout: 'object' });
+    const o = opts(root, remote);
+    await pullRemote(o);
+    remote.reads.length = 0;
+
+    const r = await pullRemote(o);
+
+    expect(r.downloadedChunks).toBe(0);
+    expect(remote.reads).toEqual([]);
+  });
+
+  it('单对象布局:空文件在本地落下空文件', async () => {
+    const root = await vault();
+    const remote = new MemoryRemote('object');
+    await seedRemote(remote, '', { layout: 'object' });
+
+    const r = await pullRemote(opts(root, remote));
+
+    expect(r.downloadedItems).toBe(1);
+    const local = join(root, 'raw', 'devA', 'claude-code', 'projects', 'a.jsonl');
+    expect((await readFile(local)).length).toBe(0);
   });
 });

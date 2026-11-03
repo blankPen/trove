@@ -13,6 +13,7 @@ async function fixture() {
     'sessions/claude-code/s1/dev1.jsonl',
     'sessions/claude-code/s2/dev1.jsonl',
     'skills/review/versions/abc/SKILL.md',
+    'lessons/preferences/style.md',
   ];
   for (const rel of rels) {
     const abs = join(vault, 'library', ...rel.split('/'));

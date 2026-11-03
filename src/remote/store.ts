@@ -37,4 +37,11 @@ export interface RemoteStore {
    * 不实现则按 1 处理。
    */
   concurrencyHint?(): number;
+
+  /**
+   * 该后端偏好的文件布局。
+   * object:一个文件一个对象(对象存储,控制台可读);chunk:应用层分块(WebDAV)。
+   * 不实现则按 chunk 处理。
+   */
+  layoutHint?(): 'chunk' | 'object';
 }

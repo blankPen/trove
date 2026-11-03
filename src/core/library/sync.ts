@@ -55,8 +55,9 @@ export interface PushLibraryResult {
 
 /**
  * 推送 library 里本设备负责的文件:
- *   sessions/**、skills/**、index/<device>.json
+ *   sessions/**、skills/**、lessons/**、index/<device>.json
  * 每台设备只写自己的分片;会话文件按大小+mtime 判断是否变化。
+ * lessons 是共享沉淀,没有设备分片,多设备会互相覆盖(最后写赢)。
  */
 /** library 里需要推送的文件(相对 library 根);status 的待同步计数复用同一口径。 */
 export async function listLibraryFiles(vaultRoot: string): Promise<string[]> {
@@ -65,6 +66,7 @@ export async function listLibraryFiles(vaultRoot: string): Promise<string[]> {
   return [
     ...(await walk(root, 'sessions')),
     ...(await walk(root, 'skills')),
+    ...(await walk(root, 'lessons')),
     ...(await walk(root, 'index')).filter((rel) => rel.endsWith('.json')),
     // index 分片是引用其他文件的提交点:必须最后传,否则中断会留下指向不存在文件的悬空引用
   ].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
@@ -134,6 +136,17 @@ async function localHash(path: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** 递归列远端目录下的文件(RemoteStore.list 只列一层)。 */
+async function walkRemote(remote: RemoteStore, dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for (const e of await remote.list(dir)) {
+    const p = `${dir}/${e.name}`;
+    if (e.type === 'directory') out.push(...(await walkRemote(remote, p)));
+    else out.push(p);
+  }
+  return out;
 }
 
 /**
@@ -244,6 +257,31 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
         }
       }
     }
+  }
+
+  // lessons:共享沉淀,没有设备分片。本地已有就不覆盖(本机内容可能是刚 learn 的新版本),
+  // 只在缺失时从远端恢复 —— 新设备能拿到经验库,又不会丢掉本机刚生成的内容。
+  const remoteLessons = await walkRemote(remote, 'library/lessons');
+  for (const remotePath of remoteLessons) {
+    throwIfAborted(opts.signal);
+    const rel = remotePath.slice('library/'.length);
+    const target = join(root, ...rel.split('/'));
+    if (await localHash(target)) {
+      skipped++;
+      continue;
+    }
+    const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      await mkdir(dirname(target), { recursive: true });
+      await remote.readFile(remotePath, tmp);
+      await rename(tmp, target);
+    } catch (err) {
+      await unlink(tmp).catch(() => {});
+      throw err;
+    }
+    downloaded++;
+    bytes += (await stat(target)).size;
+    progress.item(rel, itemNo, remoteLessons.length, bytes);
   }
 
   await rebuildUnifiedIndex(vaultRoot);

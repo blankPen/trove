@@ -1,6 +1,5 @@
 import { stat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { CHUNK_SIZE, chunkRanges, hashRange, reusableChunks, type ChunkRef } from './chunker.js';
+import { CHUNK_SIZE, chunkRanges, hashFile, hashRange, reusableChunks, type ChunkRef } from './chunker.js';
 import { mapLimit } from './concurrency.js';
 import { throwIfAborted } from './collect.js';
 import type { State } from './state.js';
@@ -10,6 +9,7 @@ import {
   encodeKey,
   indexPath,
   itemKey,
+  objectRemotePath,
   validateRelPath,
   type DeviceIndex,
   type IndexItem,
@@ -55,6 +55,8 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
   // 并发数由后端给建议:WebDAV 实测并发 PUT 会 ECONNRESET(给 1),
   // 对象存储允许并发(给更高值),这里显式传参时以传参为准。
   const concurrency = opts.concurrency ?? remote.concurrencyHint?.() ?? 1;
+  // 对象存储一个文件一个对象(可读);WebDAV 保持应用层分块(服务端无 multipart)
+  const layout = remote.layoutHint?.() ?? 'chunk';
   const progress = opts.progress ?? silentProgress;
 
   const previous = (await remote.readJson(indexPath(deviceId))) as DeviceIndex | null;
@@ -109,9 +111,14 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
     const pushed = state.pushed[harness]?.[relPath];
     const inIndex = index.items[ik];
 
-    // 索引是远端权威:世代 + 大小一致即内容一致(append-only,改写会换世代)。
-    // 即使本地 state 丢失,也能零重传地续上。
-    if (inIndex && inIndex.generation === entry.generation && inIndex.size === st.size) {
+    // 索引是远端权威:世代 + 大小 + 布局一致即内容一致(append-only,改写会换世代)。
+    // 即使本地 state 丢失,也能零重传地续上。布局变化(如 S3 改单对象)会触发重推。
+    if (
+      inIndex &&
+      inIndex.generation === entry.generation &&
+      inIndex.size === st.size &&
+      (inIndex.layout ?? 'chunk') === layout
+    ) {
       (state.pushed[harness] ??= {})[relPath] ??= {
         generation: inIndex.generation,
         size: inIndex.size,
@@ -123,46 +130,58 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
       continue;
     }
 
-    const ranges = chunkRanges(st.size, chunkSize);
-    // 可复用块的来源:
-    // - 远端索引:远端自己说有这些块(最权威)
-    // - 本地 state.pushed:只在"同一个远端"时可信(索引丢了但块还在,只补半块)
-    // 换后端后本地记录属于旧远端,不能复用 —— 否则新远端只剩索引没有数据。
-    const sameRemote = !opts.remoteId || !state.remoteId || opts.remoteId === state.remoteId;
-    const reuse =
-      inIndex && inIndex.generation === entry.generation
-        ? reusableChunks(inIndex.chunks, inIndex.size, chunkSize)
-        : pushed && sameRemote && pushed.generation === entry.generation
-          ? reusableChunks(pushed.chunks, pushed.size, chunkSize)
-          : new Map<number, ChunkRef>();
-
     const chunks: ChunkRef[] = [];
-    const toUpload: Array<{ chunk: ChunkRef; remotePath: string }> = [];
-    for (const range of ranges) {
-      const old = reuse.get(range.offset);
-      if (old) {
-        chunks.push(old);
-        continue;
+    if (layout === 'object') {
+      // 整文件一个对象;分片交给 S3 Multipart,块清单退化为单块
+      if (st.size > 0) {
+        chunks.push({ offset: 0, length: st.size, sha256: await hashFile(absPath) });
       }
-      const chunk: ChunkRef = {
-        ...range,
-        sha256: await hashRange(absPath, range.offset, range.length),
-      };
-      chunks.push(chunk);
-      toUpload.push({
-        chunk,
-        remotePath: chunkRemotePath(deviceId, harness, key, entry.generation, chunk),
+      await remote.writeFile(objectRemotePath(deviceId, harness, relPath), absPath);
+      uploadedChunks += chunks.length;
+      uploadedBytes += st.size;
+    } else {
+      const ranges = chunkRanges(st.size, chunkSize);
+      // 可复用块的来源:
+      // - 远端索引:远端自己说有这些块(最权威),且布局必须是 chunk
+      // - 本地 state.pushed:只在"同一个远端"时可信(索引丢了但块还在,只补半块)
+      // 换后端后本地记录属于旧远端,不能复用 —— 否则新远端只剩索引没有数据。
+      const sameRemote = !opts.remoteId || !state.remoteId || opts.remoteId === state.remoteId;
+      const reuse =
+        inIndex &&
+        inIndex.generation === entry.generation &&
+        (inIndex.layout ?? 'chunk') === 'chunk'
+          ? reusableChunks(inIndex.chunks, inIndex.size, chunkSize)
+          : pushed && sameRemote && pushed.generation === entry.generation
+            ? reusableChunks(pushed.chunks, pushed.size, chunkSize)
+            : new Map<number, ChunkRef>();
+
+      const toUpload: Array<{ chunk: ChunkRef; remotePath: string }> = [];
+      for (const range of ranges) {
+        const old = reuse.get(range.offset);
+        if (old) {
+          chunks.push(old);
+          continue;
+        }
+        const chunk: ChunkRef = {
+          ...range,
+          sha256: await hashRange(absPath, range.offset, range.length),
+        };
+        chunks.push(chunk);
+        toUpload.push({
+          chunk,
+          remotePath: chunkRemotePath(deviceId, harness, key, entry.generation, chunk),
+        });
+      }
+
+      await mapLimit(toUpload, concurrency, async ({ chunk, remotePath }) => {
+        await remote.writeFile(remotePath, absPath, {
+          offset: chunk.offset,
+          length: chunk.length,
+        });
+        uploadedChunks++;
+        uploadedBytes += chunk.length;
       });
     }
-
-    await mapLimit(toUpload, concurrency, async ({ chunk, remotePath }) => {
-      await remote.writeFile(remotePath, absPath, {
-        offset: chunk.offset,
-        length: chunk.length,
-      });
-      uploadedChunks++;
-      uploadedBytes += chunk.length;
-    });
 
     const hash = chunksHash(chunks);
     (state.pushed[harness] ??= {})[relPath] = {
@@ -181,6 +200,7 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
       size: st.size,
       chunks,
       chunksHash: hash,
+      layout,
       updatedAt: now(),
     } satisfies IndexItem;
     indexChanged = true;

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { hashFile } from './chunker.js';
 import { throwIfAborted } from './collect.js';
@@ -9,9 +9,9 @@ import {
   chunkRemotePath,
   indexPath,
   itemKey,
+  objectRemotePath,
   validateIndexItem,
   type DeviceIndex,
-  type IndexItem,
 } from './remote-layout.js';
 import { silentProgress, type Progress } from '../progress.js';
 import { EVENTS_PREFIX } from './events/schema.js';
@@ -144,11 +144,12 @@ export async function pullRemote(opts: PullOptions): Promise<PullResult> {
         for (const chunk of item.chunks) {
           if (chunk.offset < start) continue;
           const tmpChunk = `${tmp}.chunk-${chunk.offset}`;
+          const remotePath =
+            (item.layout ?? 'chunk') === 'object'
+              ? objectRemotePath(dev, item.harness, item.relPath)
+              : chunkRemotePath(dev, item.harness, item.key, item.generation, chunk);
           try {
-            await remote.readFile(
-              chunkRemotePath(dev, item.harness, item.key, item.generation, chunk),
-              tmpChunk,
-            );
+            await remote.readFile(remotePath, tmpChunk);
             const got = await hashFile(tmpChunk);
             if (got !== chunk.sha256) {
               throw new Error(`远端块校验失败: ${item.relPath} @${chunk.offset}`);

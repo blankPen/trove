@@ -146,6 +146,39 @@ describe('pullLibrary 技能 meta/版本拉取', () => {
   });
 });
 
+describe('pullLibrary lessons 恢复', () => {
+  const LESSON = 'library/lessons/preferences/style.md';
+
+  async function lessonsSetup(localBody: string | null) {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-lesson-'));
+    const abs = join(vault, 'library', 'lessons', 'preferences', 'style.md');
+    if (localBody !== null) {
+      await mkdir(dirname(abs), { recursive: true });
+      await writeFile(abs, localBody);
+    }
+    const remote = new MemoryRemote();
+    remote.files.set(LESSON, Buffer.from('remote-lesson'));
+    return { vault, abs, remote };
+  }
+
+  it('本地缺失时从远端恢复', async () => {
+    const { vault, abs, remote } = await lessonsSetup(null);
+
+    const r = await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
+
+    expect(await readFile(abs, 'utf8')).toBe('remote-lesson');
+    expect(r.downloaded).toBe(1);
+  });
+
+  it('本地已有内容时不覆盖(本机可能刚 learn 完)', async () => {
+    const { vault, abs, remote } = await lessonsSetup('local-newer');
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
+
+    expect(await readFile(abs, 'utf8')).toBe('local-newer');
+  });
+});
+
 describe('pullLibrary 下载校验失败清理', () => {
   it('会话文件 hash 不符时抛错且不留临时文件', async () => {
     const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-hash-'));

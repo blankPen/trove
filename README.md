@@ -76,8 +76,8 @@ trove daemon stop
 ## 同步模型(Beacon poll 骨架)
 
 - **游标**:`{size, mtimeMs, prefixHash, generation}`。size+mtime 未变直接跳过;文件增长只搬新增字节;size 回退/同尺寸改写/前缀哈希不符 → 换世代全量重建。
-- **无损**:本地 vault 是源文件的原始字节副本;OpenCode 是数据库全字段导出(新旧表并集,实测 782 会话 / 153,406 行 / 990MB)。远端块按 4MiB 切分(大请求不稳),拉取时逐块校验 sha256。
-- **增量**:远端只传新增块;清单并入设备索引(`<device>/index.json`),块路径扁平到 `<device>/chunks/<harness>/`,避免每文件多次 MKCOL。实测二次全量扫描 2450 项仅 14s、上传 2 项。
+- **无损**:本地 vault 是源文件的原始字节副本;OpenCode 是数据库全字段导出(新旧表并集,实测 782 会话 / 153,406 行 / 990MB)。WebDAV 远端按 4MiB 分块(大请求不稳),S3 一个文件一个对象,拉取时都校验 sha256。
+- **增量**:WebDAV 远端只传新增块,块路径扁平到 `<device>/chunks/<harness>/`,避免每文件多次 MKCOL;S3 按文件覆盖写,大文件走 Multipart Upload。清单并入设备索引(`<device>/index.json`)。实测二次全量扫描 2450 项仅 14s、上传 2 项。
 - **只增不删**:远端和本地 vault 都不删除;源文件被删后归档仍保留。
 - **时间窗**:`--since 7d|24h|2026-10-01|all` 按会话最近变更时间过滤,避免首次全量过大。
 - **进度**:collect / pull / push 三阶段,TTY 单行刷新,管道按秒节流。
@@ -96,20 +96,20 @@ trove daemon stop
     ├── sessions/<harness>/<session>/<device>.jsonl
     ├── skills/<name>/versions/<hash>/…     内容寻址,保留各版本
     ├── skills/<name>/meta/<device>.json    来源与版本
-    └── lessons/                            学习沉淀(占位)
+    └── lessons/                            学习沉淀(同步)
 ```
 
 - **归组**:按 `(harness, sessionId)` 归并同一会话的多份 raw——Claude 主文件 + `subagents/*.jsonl`、豆包 `.sessions` + `conversation`。
 - **冲突**:每台设备只写自己的文件和分片,远端不存在并发覆盖。同一会话内容不同时,索引选 canonical(事件超集;豆包按事件 id 求并集),其余进 `variants`,文件永远保留。
 - **索引**:`index/<device>.json` 是权威,`index.json` 由本地合并生成;索引冲突只需重建,不会丢数据。
 - **技能**:按目录内容 hash 去重,来源由 `SKILL.md` frontmatter 与 `.git/config` origin 判定(`self/github/skillsh/unknown`);最新版本按 semver → updatedAt → hash 选择,历史版本保留。
-- **lessons**:目录先留空,后续按主题沉淀经验,内容用 `(harness, session, seq)` 引用会话。
+- **lessons**:按主题沉淀经验,内容用 `(harness, session, seq)` 引用会话。与 sessions/skills 一起同步;没有设备分片,多设备各自 learn 时同路径文件按最后写入覆盖,拉取只在本地缺失时恢复,不会覆盖本机刚生成的内容。
 
 事件 schema 仍是 `session/message/reasoning/tool_call/tool_result/meta`,带 `raw:{path,line}` 回指原始文件。
 
 ## 同步模型补充
 
-- library **始终同步**(约 500 MB):推送本设备的会话文件、技能与索引分片,拉取其他设备的分片与文件。
+- library **始终同步**(约 500 MB):推送本设备的会话文件、技能、lessons 与索引分片,拉取其他设备的分片与文件。
 - raw 是否上传/拉取按 **命令行 > `config.sync.raw` > 默认 true** 决定;关闭时只同步 library,raw 只归档到本地。
 - 配置示例:`trove config set sync.raw false`;`trove sync --raw` 可临时覆盖。
 - 索引分片按设备隔离,拉取时落盘后本地重建统一索引。
@@ -134,15 +134,19 @@ trove 自己调用 LLM 的场景(手动 `trove learn`、daemon 每轮同步后�
 └── logs/daemon.log
 ```
 
-远端布局(WebDAV 与 S3 完全一致,切换后端不用搬数据):
+远端布局(索引与设备元信息一致;raw 文件按后端区分):
 
 ```
 raw/<device>/index.json                            索引(含每文件块清单与哈希)
 raw/<device>/meta.json                             设备名 / lastSeen
-raw/<device>/chunks/<harness>/<key>.<gen>.<off>-<len>.bin  不可变块
+raw/<device>/chunks/<harness>/<key>.<gen>.<off>-<len>.bin  WebDAV:不可变块
+raw/<device>/files/<harness>/<relPath>             S3:完整文件(控制台可直接浏览)
 library/index/<device>.json                        每设备索引分片
 library/sessions/…、library/skills/…               个人资产
 ```
+
+WebDAV 服务端没有原生分片上传,只能按 4 MiB 块存;对象存储一个会话文件就是一个对象,
+路径即原始相对路径,桶里能直接打开会话原文。索引项的 `layout` 字段区分两种布局,老索引缺省按分块解释。
 
 ## 远端后端
 
@@ -154,7 +158,7 @@ library/sessions/…、library/skills/…               个人资产
 
 交互式配置(`trove init` / `trove config`)会先问远端类型,再按类型问对应字段 —— 选 S3 时依次问厂商、地域、Bucket、AccessKey,不选就沿用现有配置。
 
-**换后端与历史数据迁移**:远端布局在两种后端下完全一致,所以迁移就是把同一份 vault 推到新后端。`state.json` 里的 `remoteId` 记录了推送水位属于哪个远端;检测到后端变了,旧水位自动作废,历史数据会整份重推(不会"以为推过了"而静默丢数据)。首次切到新后端时跑一次 `trove sync --since all` 即可。
+**换后端与历史数据迁移**:索引、设备元信息与 library 布局在两种后端下一致,raw 文件布局按后端区分。`state.json` 里的 `remoteId` 记录了推送水位属于哪个远端;检测到后端变了,旧水位自动作废,历史数据会整份重推(不会"以为推过了"而静默丢数据)。首次切到新后端时跑一次 `trove sync --since all` 即可。S3 切到单对象布局后,旧的 `chunks/` 对象不会自动删除,需要的话手工清理。
 
 ## 开发
 

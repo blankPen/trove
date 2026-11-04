@@ -5,7 +5,7 @@
   "type": "module",
   "license": "MIT",
   "bin": {
-    "trove": "./dist/main.js"
+    "trove": "dist/main.js"
   },
   "files": [
     "dist"
@@ -36,7 +36,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-"@vitest/coverage-v8": "^2.1.9",
+    "@vitest/coverage-v8": "^2.1.9",
     "s3rver": "^3.7.1",
     "typescript": "^5.7.0",
     "vitest": "^2.1.9",

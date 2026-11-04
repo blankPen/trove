@@ -59,8 +59,9 @@ jobs:
           if [ "$published" = 0 ]; then
             if [ -z "${NPM_TOKEN:-}" ]; then
               echo "未配置 NPM_TOKEN secret,跳过 npm publish"
-            else
-              npm publish --provenance --access public
+            elif ! npm publish --provenance --access public; then
+              echo "::error::npm publish 失败。报 2FA / bypass 2FA 相关错误时,token 需要是勾选了 Bypass 2FA 的 granular access token(Read and write)。"
+              exit 1
             fi
           fi
 

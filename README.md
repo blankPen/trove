@@ -5,11 +5,11 @@ AI 会话资产归档工具:把本机 Claude Code / Codex / OpenCode / 豆包的
 ## 安装
 
 ```bash
-npm i -g trove-cli    # 提供 trove 命令
-npx trove-cli --help  # 免安装试用
+npm i -g @pengzhen/trove    # 提供 trove 命令
+npx @pengzhen/trove --help  # 免安装试用
 ```
 
-npm 上的 `trove` 已被他人占用,本项目发布为 `trove-cli`,命令行仍叫 `trove`。
+npm 上 unscoped 的 `trove` 是别人的包(仍在发布中),所以本项目发布在 `@pengzhen` scope 下,包名仍是 `trove`,命令行也是 `trove`。
 
 ## 用法
 

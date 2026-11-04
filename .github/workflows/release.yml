@@ -78,6 +78,6 @@ jobs:
           fi
 
           if [ "$released" = 0 ]; then
-            npm pack
-            gh release create "$tag" --title "$tag" --generate-notes "./${name}-${version}.tgz"
+            tarball=$(npm pack | tail -1) # scoped 包的文件名带 scope,别自己拼
+            gh release create "$tag" --title "$tag" --generate-notes "./$tarball"
           fi

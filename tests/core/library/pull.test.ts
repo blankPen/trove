@@ -179,6 +179,49 @@ describe('pullLibrary lessons 恢复', () => {
   });
 });
 
+describe('pullLibrary 分片悬空容错', () => {
+  it('分片引用的会话文件缺失 → 跳过,其余文件正常拉取', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-missing-'));
+    const remote = new MemoryRemote();
+    const missing = 'sessions/claude-code/00dbb040-e336-4668-bf95-deacd55deb49/dev1.jsonl';
+    const shard: IndexShard = {
+      v: 1,
+      device: 'dev1',
+      mapper: 'claude-code',
+      updatedAt: '2026-10-23T00:00:00.000Z',
+      sessions: {
+        'claude-code:missing': {
+          device: 'dev1',
+          path: missing,
+          hash: 'a'.repeat(64),
+          events: 1,
+          rawSources: [],
+        },
+        'claude-code:present': {
+          device: 'dev1',
+          path: REL,
+          hash: sha('remote'),
+          events: 1,
+          rawSources: [],
+        },
+      },
+      skills: {},
+    };
+    await remote.writeJson('library/index/dev1.json', shard);
+    remote.files.set(`library/${REL}`, Buffer.from('remote'));
+
+    const r = await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state: emptyState() });
+
+    expect(r.downloaded).toBe(1);
+    expect(
+      await readFile(join(vault, 'library', ...REL.split('/')), 'utf8'),
+    ).toBe('remote');
+    await expect(
+      readFile(join(vault, 'library', ...missing.split('/'))),
+    ).rejects.toThrow();
+  });
+});
+
 describe('pullLibrary 下载校验失败清理', () => {
   it('会话文件 hash 不符时抛错且不留临时文件', async () => {
     const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-hash-'));

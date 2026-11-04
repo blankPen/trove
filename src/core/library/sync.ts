@@ -138,6 +138,12 @@ async function localHash(path: string): Promise<string | null> {
   }
 }
 
+/** 远端 404:索引引用的文件不存在(分片悬空),可跳过而不是中断整轮同步。 */
+function isNotFound(err: unknown): boolean {
+  const e = err as { status?: number; statusCode?: number; response?: { status?: number } };
+  return (e?.status ?? e?.statusCode ?? e?.response?.status) === 404;
+}
+
 /** 递归列远端目录下的文件(RemoteStore.list 只列一层)。 */
 async function walkRemote(remote: RemoteStore, dir: string): Promise<string[]> {
   const out: string[] = [];
@@ -212,6 +218,11 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
         await rename(tmp, abs);
       } catch (err) {
         await unlink(tmp).catch(() => {});
+        // 分片可能来自已离线设备或旧数据,引用了不存在的对象:跳过,不影响其他文件
+        if (isNotFound(err)) {
+          console.warn(`[trove] 远端缺少索引引用的文件,已跳过: ${entry.path}`);
+          continue;
+        }
         throw err;
       }
       pulled[entry.path] = entry.hash;
@@ -249,6 +260,10 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
               await rename(tmp, target);
             } catch (err) {
               await unlink(tmp).catch(() => {});
+              if (isNotFound(err)) {
+                console.warn(`[trove] 远端缺少技能文件,已跳过: ${rel}`);
+                continue;
+              }
               throw err;
             }
             downloaded++;

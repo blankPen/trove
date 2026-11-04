@@ -67,7 +67,7 @@ export class MemoryRemote {
 
   async readFile(path: string, localPath: string): Promise<void> {
     const b = this.files.get(path);
-    if (!b) throw new Error(`远端文件不存在: ${path}`);
+    if (!b) throw Object.assign(new Error(`远端文件不存在: ${path}`), { status: 404 });
     this.reads.push(path);
     await writeFile(localPath, b);
   }

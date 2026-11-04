@@ -194,6 +194,8 @@ pnpm build
 1. PR 里改好 `package.json` 的 `version`,合并进 `main`
 2. Actions 装依赖 → 构建 → 跑测试 → 发布到 npm → 打 tag `v<version>` 并生成 GitHub Release(附带 npm 包 tarball)
 
-一次性配置:仓库 Settings → Secrets and variables → Actions → 新建 `NPM_TOKEN`(npm automation token,勾 read & publish)。没配这个 secret 时工作流只生成 GitHub Release,跳过 npm 发布。
+一次性配置:仓库 Settings → Secrets and variables → Actions → 新建 `NPM_TOKEN`(npm granular access token:Read and write(publish and stage),并勾选 **Bypass 2FA**;账号开了 2FA 时不开这个选项会被 npm 拒掉)。没配这个 secret 时工作流只生成 GitHub Release,跳过 npm 发布。
 
 重复触发是幂等的:npm 上已有该版本就跳过发布,GitHub Release 已存在就跳过建 Release,两样都做完就整体跳过。
+
+npm 计划 2027 年 1 月起停用 bypass 2FA token 的直接发布,届时改用 trusted publishing(OIDC)即可,工作流不用动。

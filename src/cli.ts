@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { Command, CommanderError } from 'commander';
 import { confirm, text } from '@clack/prompts';
 import pc from 'picocolors';
-import { trovePaths } from './paths.js';
+import { trovePaths, type TrovePaths } from './paths.js';
 import { loadConfig, resolveRawSync, saveConfig, type Config, type RemoteConfig } from './config.js';
 import { loadState } from './core/state.js';
 import { sync } from './core/sync.js';
@@ -746,6 +746,22 @@ async function cmdConfig(
   return 0;
 }
 
+/** config 改动后,若 daemon 在跑就按新配置重启,让启动期参数(间隔/时间窗/学习批量)立即生效。 */
+async function restartDaemonForConfig(
+  paths: TrovePaths,
+  config: Config,
+  restart: (opts: RestartDaemonOptions) => Promise<{ pid: number; wasRunning: boolean }>,
+  out: (l: string) => void,
+  now: () => number,
+): Promise<void> {
+  if (!(await daemonState(paths)).running) return;
+  const since = config.daemon.since;
+  parseSince(since, now()); // 拦住被写坏的时间窗,别用非法参数拉起 daemon
+  const intervalSeconds = Math.max(5, Number(config.daemon.intervalSeconds) || 300);
+  const { pid } = await restart({ paths, intervalSeconds, since });
+  out(`  daemon: 已按新配置重启 (pid ${pid}) · 每 ${intervalSeconds}s · 时间窗 ${since}`);
+}
+
 async function cmdRename(
   name: string,
   paths: ReturnType<typeof trovePaths>,
@@ -970,7 +986,11 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   const configCmd = program.command('config').description('交互式配置(子命令:path/get/set)');
   configCmd.action(async () => {
     const code = await cmdConfig(paths, out, err, interactive);
-    if (code !== 0) process.exitCode = code;
+    if (code !== 0) {
+      process.exitCode = code;
+      return;
+    }
+    await restartDaemonForConfig(paths, await loadConfig(paths.config), restart, out, now);
   });
   configCmd
     .command('path')
@@ -991,6 +1011,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
       const config = await loadConfig(paths.config);
       setPath(config as unknown as Record<string, unknown>, key, parseValue(value));
       await saveConfig(paths.config, config);
+      await restartDaemonForConfig(paths, config, restart, out, now);
     });
 
   program

@@ -177,7 +177,7 @@ trove daemon restart
 trove daemon stop
 ```
 
-每台机器一个实例（pid 锁）、跨进程 sync 锁、`SIGTERM` 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。间隔、时间窗、`init` 是否自动启动都由 config 决定（`config.daemon.{intervalSeconds,since,startOnInit}`，默认 `300 / 7d / true`），显式参数优先于配置。learn 是独立的一圈循环，有自己的间隔（`config.daemon.learnIntervalSeconds`、`learnBatch`）。
+每台机器一个实例（pid 锁）、跨进程 sync 锁、`SIGTERM` 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。间隔、时间窗、`init` 是否自动启动都由 config 决定（`config.daemon.{intervalSeconds,since,startOnInit}`，默认 `300 / 7d / true`），显式参数优先于配置。通过 `trove config` 改动配置会自动重启运行中的 daemon，让新的启动参数生效。learn 是独立的一圈循环，有自己的间隔（`config.daemon.learnIntervalSeconds`、`learnBatch`）。
 
 ### 检索与概览
 

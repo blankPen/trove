@@ -191,6 +191,45 @@ describe('trove CLI', () => {
     expect(lines.join('')).toBe('改名后');
   });
 
+  it('config set:daemon 运行中则按新配置自动重启', async () => {
+    const { paths, lines, deps } = await setup();
+    const config = defaultConfig({ deviceId: 'd', deviceName: 'n' });
+    config.daemon = { intervalSeconds: 120, since: '24h', startOnInit: true, learnIntervalSeconds: 60, learnBatch: 3 };
+    await saveConfig(paths.config, config);
+    await writeFile(paths.daemonPid, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+    const got: Array<{ intervalSeconds: number; since: string }> = [];
+
+    const code = await run(['config', 'set', 'daemon.intervalSeconds', '60'], {
+      ...deps,
+      restartDaemon: async (opts) => {
+        got.push({ intervalSeconds: opts.intervalSeconds, since: opts.since });
+        return { pid: 999, wasRunning: true };
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(got).toEqual([{ intervalSeconds: 60, since: '24h' }]);
+    expect((await loadConfig(paths.config)).daemon.intervalSeconds).toBe(60);
+    expect(lines.join('\n')).toContain('已按新配置重启');
+    expect(lines.join('\n')).toContain('999');
+  });
+
+  it('config set:daemon 未运行则不重启,配置留待下次启动生效', async () => {
+    const { deps } = await setup();
+    let restarted = false;
+
+    const code = await run(['config', 'set', 'daemon.intervalSeconds', '60'], {
+      ...deps,
+      restartDaemon: async () => {
+        restarted = true;
+        return { pid: 1, wasRunning: false };
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(restarted).toBe(false);
+  });
+
   it('rename:改显示名不改设备 id,空名报错', async () => {
     const { paths, lines, deps } = await setup();
 

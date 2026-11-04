@@ -177,7 +177,7 @@ trove daemon restart
 trove daemon stop
 ```
 
-One instance per machine (pid lock), a cross-process sync lock, cooperative shutdown on `SIGTERM`, status written to `~/.trove/daemon.status.json`, rotated logs. The interval, the time window and whether `init` starts it are all config (`config.daemon.{intervalSeconds,since,startOnInit}`, defaulting to `300 / 7d / true`); explicit flags win over config. A separate learn loop runs on its own interval (`config.daemon.learnIntervalSeconds`, `learnBatch`).
+One instance per machine (pid lock), a cross-process sync lock, cooperative shutdown on `SIGTERM`, status written to `~/.trove/daemon.status.json`, rotated logs. The interval, the time window and whether `init` starts it are all config (`config.daemon.{intervalSeconds,since,startOnInit}`, defaulting to `300 / 7d / true`); explicit flags win over config. Any `trove config` write restarts a running daemon so new startup settings take effect. A separate learn loop runs on its own interval (`config.daemon.learnIntervalSeconds`, `learnBatch`).
 
 ### Search and overview
 

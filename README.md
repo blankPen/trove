@@ -39,6 +39,17 @@ trove sessions --harness opencode --json
 trove skills                    # 汇总后的技能(最新版本)
 trove skills show review        # 某技能的全部版本与来源
 trove library reindex           # 从设备分片重建统一索引
+
+# 知识库消费层(skill + CLI/MCP 查询)
+trove whoami                    # 用户画像 / 偏好 / 近期方向
+trove lessons search "飞书 编辑" # 检索经验/实体/偏好/决策
+trove lessons show <path>       # 读单条 lesson
+trove sessions search "COS 签名" # FTS5 会话检索(1–6ms)
+trove sessions search "SignatureDoesNotMatch" --exact  # 精确 grep(2–5s)
+trove sessions show <id> --around "SignatureDoesNotMatch"
+trove index build               # 构建/更新会话检索索引
+trove mcp                       # 启动 stdio MCP(7 个只读工具)
+trove skill install             # 安装 skill 到 ~/.claude/skills 与 ~/.agents/skills
 trove usage                     # trove 自身 LLM 消耗的 token 用量
 trove usage --since 7d --json   # 限定时间窗,机器可读
 
@@ -61,6 +72,29 @@ trove daemon stop
 - **待同步**:raw 层按工具分会话/文件数;library 按「会话 / 技能 / 索引」分类计数(只给计数,不逐条列)。
   会话数按 `sessionKey` 去重,同一会话的多个文件算 1 个;Claude 子代理文件没有会话归并规则,会被算作独立会话。
   `config.sync.raw=false` 时只显示「raw 同步已关闭」与 library 待同步。
+
+## 知识库消费层(skill + MCP)
+
+`trove mcp` 暴露 7 个只读工具，`trove skill install` 安装配套 skill；CLI 与 MCP 一一对应：
+
+| MCP 工具 | CLI | 用途 |
+|---|---|---|
+| `trove_whoami` | `trove whoami` | 用户画像/偏好/近期方向 |
+| `trove_lessons_search` | `trove lessons search` | 经验/实体/偏好/决策 |
+| `trove_lesson_get` | `trove lessons show` | 读单条 lesson |
+| `trove_lessons_list` | `trove lessons list` | 浏览目录 |
+| `trove_sessions_search` | `trove sessions search` | 历史会话 |
+| `trove_session_get` | `trove sessions show` | 读会话片段 |
+| `trove_status` | `trove status --json` | 索引/数据状态 |
+
+检索底层：Node 22 内置 `node:sqlite` 的 **FTS5 + BM25**，中文按 2-gram 预处理。lessons 用进程内索引（约 280ms 冷构建）；sessions 用持久化增量索引 `~/.trove/cache/search.sqlite`（本机缓存，可删除重建，不参与同步）。报错码/函数名/路径等精确标识符用 `--exact` 线性 grep 兜底。
+
+接入：
+
+```bash
+claude mcp add trove -- trove mcp
+trove skill install --target both
+```
 
 ## 支持的数据源
 

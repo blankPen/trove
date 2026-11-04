@@ -12,6 +12,8 @@ export interface TrovePaths {
   usageLog: string;
   logs: string;
   tmp: string;
+  /** 检索索引缓存(本地、可重建、不参与同步) */
+  cache: string;
   daemonPid: string;
   daemonStatus: string;
   daemonLog: string;
@@ -31,6 +33,7 @@ export function trovePaths(
     usageLog: join(base, 'usage.jsonl'),
     logs: join(base, 'logs'),
     tmp: join(base, 'tmp'),
+    cache: join(base, 'cache'),
     daemonPid: join(base, 'daemon.pid'),
     daemonStatus: join(base, 'daemon.status.json'),
     daemonLog: join(base, 'logs', 'daemon.log'),

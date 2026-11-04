@@ -34,6 +34,8 @@ import { promptRemoteConfig } from './remote/prompt.js';
 import type { RemoteStore } from './remote/store.js';
 import type { Adapter } from './adapters/index.js';
 import { createAdapters } from './adapters/index.js';
+import { defaultResolveAdapters, loadRuntime } from './runtime.js';
+import { startServer } from './server/index.js';
 import { createConsoleProgress } from './progress-console.js';
 import { silentProgress } from './progress.js';
 import { formatDiff, readLatestDiff, readSessionDiff } from './core/lessons/audit.js';
@@ -80,10 +82,6 @@ export interface CliDeps {
 
 function defaultCreateRemote(config: RemoteConfig): RemoteStore {
   return createRemoteFromConfig(config);
-}
-
-function defaultResolveAdapters(config: Config): Adapter[] {
-  return createAdapters().filter((a) => config.sources[a.id]?.enabled !== false);
 }
 
 function getPath(obj: unknown, key: string): unknown {
@@ -244,21 +242,6 @@ function formatPending(
 
 function looksLikeDateWindow(since: string): string {
   return since === 'all' ? 'all' : since;
-}
-
-async function loadRuntime(
-  paths: ReturnType<typeof trovePaths>,
-  createRemote: (config: RemoteConfig) => RemoteStore,
-  resolveAdapters: (config: Config) => Adapter[],
-): Promise<{
-  config: Config;
-  remote: RemoteStore | null;
-  adapters: Adapter[];
-}> {
-  const config = await loadConfig(paths.config);
-  // 未配置远端时降级为本地模式,不报错
-  const remote = isRemoteConfigured(config.remote) ? createRemote(config.remote) : null;
-  return { config, remote, adapters: resolveAdapters(config) };
 }
 
 const ORPHAN_LABELS: Record<OrphanCategory, string> = {
@@ -918,6 +901,33 @@ function daemonRuntime(
 }
 
 /** 主入口:用 commander 定义命令并分发。返回进程退出码。 */
+async function cmdWeb(
+  opts: { port?: string },
+  paths: ReturnType<typeof trovePaths>,
+  createRemote: (config: RemoteConfig) => RemoteStore,
+  resolveAdapters: (config: Config) => Adapter[],
+  out: (l: string) => void,
+): Promise<void> {
+  const port = Number(opts.port ?? 8787);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    out(pc.red(`非法端口:${opts.port}`));
+    process.exitCode = 1;
+    return;
+  }
+  const { config, remote, adapters } = await loadRuntime(paths, createRemote, resolveAdapters);
+  const server = await startServer({ paths, config, remote, adapters, port });
+  out(pc.green(`trove web 已启动:${server.url}`));
+  out(pc.dim('  只监听 127.0.0.1,没有鉴权。vault 里有全部会话正文,不要用端口转发暴露出去。'));
+  out(pc.dim('  Ctrl-C 停止。'));
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      void server.close().then(resolve);
+    };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  });
+}
+
 export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   const out = deps.out ?? ((l: string) => console.log(l));
   const err = deps.err ?? ((l: string) => console.error(l));
@@ -1166,6 +1176,14 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('概览(本地归档、远端、daemon、待同步)')
     .action(async () => {
       await cmdStatus(paths, createRemote, resolveAdapters, out, now);
+    });
+
+  program
+    .command('web')
+    .description('启动本地 web 界面(只读本地 vault,可触发同步与 daemon 运维)')
+    .option('--port <n>', '监听端口(默认 8787)', '8787')
+    .action(async (opts: { port?: string }) => {
+      await cmdWeb(opts, paths, createRemote, resolveAdapters, out);
     });
 
   const daemonCmd = program.command('daemon').description('常驻后台同步服务');

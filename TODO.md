@@ -2,6 +2,7 @@
 
 ## 待办
 
+- [ ] **web 界面**（设计已定，见 [规格](docs/superpowers/specs/2026-11-04-trove-web-ui.md)）：`trove web` 起本地服务 + `web/` 独立 React 前端，五个页签（总览 / 会话 / 沉淀 / 技能 / 用量），v1 内容只读，只提供同步与 daemon 运维操作
 - [x] 参考 [分层架构方案](https://feishu.doubao.com/docx/WoxKd0aeroqotexUoLgctahHnxI) 完成分层架构改造与验证
 - [x] 优化 sync 策略：远端模式改为可配置（可选），不配置时仅做本地 `.trove` 目录同步（需相应改动 `init` / `sync` 等逻辑流程）
 - [x] `config` 配置改为与 `init` 一致的交互式（现有 `config set` 可保留）

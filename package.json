@@ -1,14 +1,19 @@
 {
-  "name": "trove",
-  "version": "0.2.0",
+  "name": "trove-cli",
+  "version": "0.3.2",
   "description": "AI 资产归档工具 —— 可靠、增量地把本地 AI agent 资产归档到 WebDAV",
   "type": "module",
+  "license": "MIT",
   "bin": {
-    "trove": "./dist/main.js"
+    "trove": "dist/main.js"
   },
   "files": [
     "dist"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blankPen/trove.git"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "postbuild": "chmod +x dist/main.js",
@@ -31,7 +36,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-"@vitest/coverage-v8": "^2.1.9",
+    "@vitest/coverage-v8": "^2.1.9",
     "s3rver": "^3.7.1",
     "typescript": "^5.7.0",
     "vitest": "^2.1.9",

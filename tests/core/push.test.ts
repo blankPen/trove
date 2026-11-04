@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { pushLocal } from '../../src/core/push.js';
 import { emptyState, type State } from '../../src/core/state.js';
-import { chunkRemotePath, indexPath, type DeviceIndex } from '../../src/core/remote-layout.js';
+import { chunkRemotePath, indexPath, objectRemotePath, type DeviceIndex } from '../../src/core/remote-layout.js';
 import { MemoryRemote } from '../helpers/memory-remote.js';
 
 async function vault() {
@@ -181,5 +181,96 @@ describe('pushLocal(块级增量推送,索引即清单)', () => {
     expect(r.uploadedChunks).toBe(1); // 0-4/4-4 完整块复用,8-10 半块重传
     const item = Object.values((await indexOf(remote)).items)[0]!;
     expect(item.size).toBe(10);
+  });
+});
+
+describe('pushLocal(单对象布局,对象存储)', () => {
+  it('首次推送:一个文件一个对象,索引标 object', async () => {
+    const root = await vault();
+    const state = await seed(root, 'projects/a.jsonl', '0123456789');
+    const remote = new MemoryRemote('object');
+
+    const r = await pushLocal(opts(root, state, remote));
+
+    expect(r.uploadedItems).toBe(1);
+    expect(r.uploadedChunks).toBe(1);
+    expect(r.uploadedBytes).toBe(10);
+    const obj = objectRemotePath('dev1', 'claude-code', 'projects/a.jsonl');
+    expect(remote.files.get(obj)!.toString()).toBe('0123456789');
+    const item = Object.values((await indexOf(remote)).items)[0]!;
+    expect(item.layout).toBe('object');
+    expect(item.chunks).toHaveLength(1);
+    expect(item.chunks[0]).toMatchObject({ offset: 0, length: 10 });
+  });
+
+  it('重复推送 → 零重传', async () => {
+    const root = await vault();
+    const state = await seed(root, 'projects/a.jsonl', '0123456789');
+    const remote = new MemoryRemote('object');
+    await pushLocal(opts(root, state, remote));
+    const before = remote.writes.length;
+
+    const r = await pushLocal(opts(root, state, remote));
+
+    expect(r.uploadedItems).toBe(0);
+    expect(r.skippedItems).toBe(1);
+    expect(remote.writes.length).toBe(before);
+  });
+
+  it('文件增长 → 整文件重传并覆盖同一路径', async () => {
+    const root = await vault();
+    const state = await seed(root, 'projects/a.jsonl', '0123456789');
+    const remote = new MemoryRemote('object');
+    await pushLocal(opts(root, state, remote));
+
+    const p = join(root, 'raw', 'dev1', 'claude-code', 'projects', 'a.jsonl');
+    await writeFile(p, '0123456789WXYZ');
+    state.sources['claude-code']!['projects/a.jsonl']!.size = 14;
+
+    const r = await pushLocal(opts(root, state, remote));
+
+    expect(r.uploadedItems).toBe(1);
+    expect(remote.files.get(objectRemotePath('dev1', 'claude-code', 'projects/a.jsonl'))!.toString()).toBe(
+      '0123456789WXYZ',
+    );
+    const item = Object.values((await indexOf(remote)).items)[0]!;
+    expect(item.size).toBe(14);
+    expect(item.chunks).toHaveLength(1);
+  });
+
+  it('空文件 → 远端一个空对象,索引零块', async () => {
+    const root = await vault();
+    const state = await seed(root, 'projects/empty.jsonl', '');
+    const remote = new MemoryRemote('object');
+
+    const r = await pushLocal(opts(root, state, remote));
+
+    expect(r.uploadedItems).toBe(1);
+    expect(
+      remote.files.get(objectRemotePath('dev1', 'claude-code', 'projects/empty.jsonl'))!.length,
+    ).toBe(0);
+    const item = Object.values((await indexOf(remote)).items)[0]!;
+    expect(item.layout).toBe('object');
+    expect(item.chunks).toEqual([]);
+  });
+
+  it('远端已有 chunk 布局索引 → 迁移为单对象并重推', async () => {
+    const root = await vault();
+    const state = await seed(root, 'projects/a.jsonl', '0123456789');
+    // 先在 chunk 布局下推一遍
+    const chunkRemote = new MemoryRemote();
+    await pushLocal(opts(root, state, chunkRemote));
+
+    // 同一份远端数据换成对象存储(布局不同、索引是 chunk 的)
+    const objectRemote = new MemoryRemote('object');
+    for (const [k, v] of chunkRemote.files) objectRemote.files.set(k, v);
+
+    const r = await pushLocal(opts(root, state, objectRemote));
+
+    expect(r.uploadedItems).toBe(1);
+    expect(
+      objectRemote.files.get(objectRemotePath('dev1', 'claude-code', 'projects/a.jsonl'))!.toString(),
+    ).toBe('0123456789');
+    expect(Object.values((await indexOf(objectRemote)).items)[0]!.layout).toBe('object');
   });
 });

@@ -124,9 +124,10 @@ describe('S3Store(真实 S3 服务端端到端)', () => {
     await expect(store.readJson('raw/dev1/atomic.json')).resolves.toEqual({ v: 2 });
   });
 
-  // 回归:key 里带空格与中文时,SigV4 的 canonical URI 不能二次编码(否则签名对不上 → 403)
-  it('key 含空格与中文仍能签名成功', async () => {
-    const key = 'raw/dev1/我的 归档.json';
+  // 回归:key 里带空格、中文、括号、加号、井号、百分号时,
+  // SigV4 的 canonical URI 必须与实际发送路径一致(否则签名对不上 → 403)
+  it('key 含特殊字符仍能签名成功', async () => {
+    const key = 'raw/dev1/我的 归档 (1)+#%.json';
     await store.writeJson(key, { ok: true });
     await expect(store.readJson(key)).resolves.toEqual({ ok: true });
   });

@@ -38,6 +38,8 @@ export interface SyncReport {
   pulled: PullResult;
   pushed: PushResult;
   library: { pulled: PullLibraryResult; pushed: PushLibraryResult };
+  /** 本轮开始时检测到远端身份变化(切换后端/换桶)。 */
+  remoteChanged: boolean;
   durationMs: number;
 }
 
@@ -83,6 +85,10 @@ async function syncUnlocked(opts: SyncOptions): Promise<SyncReport> {
   const started = now();
   const progress = opts.progress ?? silentProgress;
   const state = await loadState(opts.statePath);
+  // 本轮开始时判断是否换了远端;push 阶段会更新 state.remoteId,所以必须提前算
+  const remoteChanged = Boolean(
+    opts.remoteId && state.remoteId && opts.remoteId !== state.remoteId,
+  );
 
   let collected = emptyCollect;
   if (!opts.pullOnly) {
@@ -148,6 +154,7 @@ async function syncUnlocked(opts: SyncOptions): Promise<SyncReport> {
         vaultRoot: opts.vaultRoot,
         deviceId: opts.deviceId,
         state,
+        remoteId: opts.remoteId,
         statePath: opts.statePath,
         progress,
         signal: opts.signal,
@@ -168,6 +175,7 @@ async function syncUnlocked(opts: SyncOptions): Promise<SyncReport> {
     pulled,
     pushed,
     library: { pulled: libraryPulled, pushed: libraryPushed },
+    remoteChanged,
     durationMs: now() - started,
   };
 }

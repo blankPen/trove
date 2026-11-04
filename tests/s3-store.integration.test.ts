@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,7 +32,9 @@ function parseXmlList(body: string): { keys: string[]; prefixes: string[]; sizes
 class FakeS3 {
   objects = new Map<string, Obj>();
   requests: Array<{ method: string; url: string; auth: string | undefined }> = [];
+  uploads = new Map<string, Map<number, Buffer>>();
   failNext = 0;
+  private uploadSeq = 0;
 
   handler = (req: IncomingMessage, res: ServerResponse): void => {
     const url = req.url ?? '/';
@@ -43,6 +46,8 @@ class FakeS3 {
     const u = new URL(url, 'http://localhost');
     const prefix = u.searchParams.get('prefix') ?? '';
     const delimiter = u.searchParams.get('delimiter') ?? '';
+    const uploadId = u.searchParams.get('uploadId');
+    const partNumber = u.searchParams.get('partNumber');
 
     if (this.failNext > 0) {
       this.failNext--;
@@ -77,6 +82,55 @@ class FakeS3 {
 
     // path-style 时路径含 /<bucket>/ 前缀,去掉它再当作对象 key
     const key = decodeURIComponent(u.pathname.replace(/^\//, '')).replace(/^[^/]+\//, '');
+
+    // ---- Multipart Upload ----
+    if (req.method === 'POST' && u.searchParams.has('uploads')) {
+      const id = `upload-${++this.uploadSeq}`;
+      this.uploads.set(id, new Map());
+      res
+        .writeHead(200, { 'content-type': 'application/xml' })
+        .end(`<InitiateMultipartUploadResult><UploadId>${id}</UploadId></InitiateMultipartUploadResult>`);
+      return;
+    }
+    if (req.method === 'PUT' && uploadId && partNumber) {
+      const chunks: Buffer[] = [];
+      req.on('data', (c: Buffer) => chunks.push(c));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        this.uploads.get(uploadId)!.set(Number(partNumber), body);
+        res.writeHead(200, { etag: `"${createHash('md5').update(body).digest('hex')}"` }).end();
+      });
+      return;
+    }
+    if (req.method === 'POST' && uploadId) {
+      req.on('data', () => {});
+      req.on('end', () => {
+        const parts = [...this.uploads.get(uploadId)!.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, body]) => body);
+        this.objects.set(key, { body: Buffer.concat(parts) });
+        this.uploads.delete(uploadId);
+        res
+          .writeHead(200, { 'content-type': 'application/xml' })
+          .end('<CompleteMultipartUploadResult><ETag>"done"</ETag></CompleteMultipartUploadResult>');
+      });
+      return;
+    }
+    if (req.method === 'DELETE' && uploadId) {
+      this.uploads.delete(uploadId);
+      res.writeHead(204).end();
+      return;
+    }
+
+    if (req.method === 'HEAD') {
+      const o = this.objects.get(key);
+      if (!o) {
+        res.writeHead(404).end();
+        return;
+      }
+      res.writeHead(200, { 'content-length': String(o.body.length) }).end();
+      return;
+    }
     if (req.method === 'PUT') {
       const chunks: Buffer[] = [];
       req.on('data', (c: Buffer) => chunks.push(c));
@@ -90,6 +144,19 @@ class FakeS3 {
       const o = this.objects.get(key);
       if (!o) {
         res.writeHead(404).end('<Error><Code>NoSuchKey</Code></Error>');
+        return;
+      }
+      const range = /bytes=(\d+)-(\d+)/.exec(req.headers.range ?? '');
+      if (range) {
+        const start = Number(range[1]);
+        const end = Math.min(Number(range[2]), o.body.length - 1);
+        const slice = o.body.subarray(start, end + 1);
+        res
+          .writeHead(206, {
+            'content-length': String(slice.length),
+            'content-range': `bytes ${start}-${end}/${o.body.length}`,
+          })
+          .end(slice);
         return;
       }
       res.writeHead(200, { 'content-length': String(o.body.length) }).end(o.body);
@@ -197,6 +264,44 @@ describe('S3Store(假 S3 服务端集成)', () => {
     await store.writeJson('dev1/atomic.json', { v: 2 });
     await expect(store.readJson('dev1/atomic.json')).resolves.toEqual({ v: 2 });
     expect([...fake.objects.keys()].filter((k) => k.includes('.tmp'))).toEqual([]);
+  });
+
+  it('大文件走 Multipart Upload,读回字节一致', async () => {
+    const local = join(dir, 'big.bin');
+    const body = Buffer.alloc(17 * 1024 * 1024, 7);
+    await writeFile(local, body);
+    fake.requests.length = 0;
+
+    await store.writeFile('dev1/big.bin', local);
+
+    expect(fake.requests.some((r) => r.url.includes('uploads'))).toBe(true);
+    expect(fake.requests.filter((r) => r.url.includes('partNumber')).length).toBe(3); // 8+8+1 MiB
+    const got = join(dir, 'big.got');
+    await store.readFile('dev1/big.bin', got);
+    expect((await readFile(got)).equals(body)).toBe(true);
+  });
+
+  it('小文件仍单 PUT,不走 Multipart', async () => {
+    const local = join(dir, 'small.bin');
+    await writeFile(local, 'hello');
+    fake.requests.length = 0;
+
+    await store.writeFile('dev1/small.bin', local);
+
+    expect(fake.requests.some((r) => r.url.includes('uploads'))).toBe(false);
+    expect(fake.requests.filter((r) => r.method === 'PUT').length).toBe(1);
+  });
+
+  it('对象路径含括号/加号/井号/百分号等特殊字符仍可读写', async () => {
+    const local = join(dir, 'special.bin');
+    await writeFile(local, 'special');
+    const key = 'raw/dev1/files/claude-code/plans/a (1)+b#c%.md';
+
+    await store.writeFile(key, local);
+    const got = join(dir, 'special.got');
+    await store.readFile(key, got);
+
+    expect((await readFile(got)).toString()).toBe('special');
   });
 });
 

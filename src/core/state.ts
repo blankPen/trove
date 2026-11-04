@@ -65,6 +65,11 @@ export interface LibraryState {
   pushed: Record<string, { size: number; mtimeMs?: number; hash?: string }>;
   /** 已拉取的 library 文件: device → path → hash */
   pulled: Record<string, Record<string, string>>;
+  /**
+   * library.pushed 记录所属的远端身份。
+   * 换后端后旧记录对新远端无效,否则会整体跳过上传,只剩索引分片指向不存在的文件。
+   */
+  remoteId?: string;
 }
 
 export interface State {

@@ -6,3 +6,6 @@ dist/
 draft_*_folder/
 coverage/
 tmp/
+test-results/
+.taste-skill/
+.agents/

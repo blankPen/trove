@@ -91,4 +91,123 @@ describe('pushLibrary 断点续传', () => {
 
     expect(remote.writes.at(-1)).toMatch(/^library\/index\//);
   });
+
+  it('换后端(remoteId 变了) → 忽略旧水位,整份重推', async () => {
+    const { vault, rels, statePath } = await fixture();
+    const state = emptyState();
+    const oldRemote = new MemoryRemote();
+    await pushLibrary({
+      remote: oldRemote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state,
+      remoteId: 'webdav:http://old.example/',
+      statePath,
+    });
+    expect(state.library.remoteId).toBe('webdav:http://old.example/');
+
+    // 新后端是空桶:旧的 pushed 记账不能让它跳过上传
+    const newRemote = new MemoryRemote();
+    const r = await pushLibrary({
+      remote: newRemote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state,
+      remoteId: 's3:https://cos.example/bucket',
+      statePath,
+    });
+
+    expect(r.uploaded).toBe(rels.length);
+    expect(r.skipped).toBe(0);
+    expect(newRemote.writes.length).toBe(rels.length);
+    expect(state.library.remoteId).toBe('s3:https://cos.example/bucket');
+  });
+
+  it('同一后端重复推送 → 零上传', async () => {
+    const { vault, statePath } = await fixture();
+    const state = emptyState();
+    const remote = new MemoryRemote();
+    const opts = {
+      remote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state,
+      remoteId: 's3:https://cos.example/bucket',
+      statePath,
+    };
+    await pushLibrary(opts);
+    const before = remote.writes.length;
+
+    const r = await pushLibrary(opts);
+
+    expect(r.uploaded).toBe(0);
+    expect(remote.writes.length).toBe(before);
+  });
+
+  it('老 state 有 pushed 记录但没有 library.remoteId → 整份重推', async () => {
+    const { vault, rels, statePath } = await fixture();
+    const state = emptyState();
+    // 模拟升级前的 state:文件都记过账,但没有远端身份
+    for (const rel of rels) {
+      state.library.pushed[rel] = { size: 1, mtimeMs: 1 };
+    }
+    const remote = new MemoryRemote();
+
+    const r = await pushLibrary({
+      remote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state,
+      remoteId: 's3:https://cos.example/bucket',
+      statePath,
+    });
+
+    expect(r.uploaded).toBe(rels.length);
+    expect(r.skipped).toBe(0);
+  });
+
+  it('换后端中途中断 → 新远端身份已落盘,重启只补剩余', async () => {
+    const { vault, rels, statePath } = await fixture();
+    const state = emptyState();
+    // 旧后端留下的记账
+    for (const rel of rels) state.library.pushed[rel] = { size: 1, mtimeMs: 1 };
+    state.library.remoteId = 'webdav:http://old.example/';
+
+    const remote = new MemoryRemote();
+    const original = remote.writeFile.bind(remote);
+    let writes = 0;
+    remote.writeFile = async (path, localPath, range) => {
+      await original(path, localPath, range);
+      if (++writes === 2) throw new Error('interrupted'); // 第二个文件后进程被打断
+    };
+
+    await expect(
+      pushLibrary({
+        remote,
+        vaultRoot: vault,
+        deviceId: 'dev1',
+        state,
+        remoteId: 's3:https://cos.example/bucket',
+        statePath,
+      }),
+    ).rejects.toThrow('interrupted');
+
+    // 关键:新远端身份与已完成记录必须已经落盘
+    const saved = await loadState(statePath);
+    expect(saved.library.remoteId).toBe('s3:https://cos.example/bucket');
+    expect(Object.keys(saved.library.pushed)).toHaveLength(1);
+
+    // 重启(同一个远端):跳过已推的 1 个,只补剩余
+    const r = await pushLibrary({
+      remote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state: saved,
+      remoteId: 's3:https://cos.example/bucket',
+      statePath,
+    });
+
+    expect(r.uploaded).toBe(rels.length - 1);
+    expect(r.skipped).toBe(1);
+  });
 });

@@ -38,6 +38,8 @@ export interface PushLibraryOptions {
   vaultRoot: string;
   deviceId: string;
   state: State;
+  /** 当前远端身份;变了说明推送水位属于旧后端,必须整份重推。 */
+  remoteId?: string;
   /** 用于周期性落盘进度:中断后已完成文件不会被重推 */
   statePath: string;
   progress?: Progress;
@@ -84,6 +86,15 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
   let n = 0;
   let lastCheckpoint = Date.now();
 
+  // 换后端时旧后端的推送记账对新远端无效:就地清空并立刻落盘。
+  // 这样即使进程中途被杀,下次也只会补传未完成的文件,而不是把整份 library 重推。
+  if (opts.remoteId && state.library.remoteId !== opts.remoteId) {
+    state.library.pushed = {};
+    state.library.remoteId = opts.remoteId;
+    await saveState(opts.statePath, state);
+  }
+  const sameRemote = !opts.remoteId || state.library.remoteId === opts.remoteId;
+
   // 中断(abort/报错)时保住已完成文件的记账:重启后按 state 跳过,不整轮重推
   const checkpoint = async () => {
     await saveState(opts.statePath, state);
@@ -97,7 +108,7 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
       const abs = join(root, ...rel.split('/'));
       const st = await stat(abs);
       const prev = state.library.pushed[rel];
-      if (prev && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs)) {
+      if (sameRemote && prev && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs)) {
         skipped++;
         continue;
       }

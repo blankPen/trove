@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { hostname } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -57,7 +58,8 @@ import {
   type StartDaemonOptions,
 } from './daemon.js';
 
-export const VERSION = '0.2.0';
+// 版本号跟 package.json 走:发版只改 package.json,不用再手动同步这里
+export const VERSION = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 
 export interface CliDeps {
   base?: string;

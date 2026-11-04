@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
@@ -60,6 +60,23 @@ describe('trove config 交互式', () => {
     await run(['config'], deps);
 
     expect((await loadConfig(paths.config)).remote.password).toBe('oldpass');
+  });
+
+  it('保存后 daemon 在跑则自动重启', async () => {
+    const { paths, deps } = await setup();
+    await writeFile(paths.daemonPid, JSON.stringify({ pid: process.pid, startedAt: Date.now() }));
+    const got: number[] = [];
+
+    const code = await run(['config'], {
+      ...deps,
+      restartDaemon: async (opts) => {
+        got.push(opts.intervalSeconds);
+        return { pid: 42, wasRunning: true };
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(got).toEqual([300]);
   });
 
   it('非交互环境给出提示并退出 1', async () => {

@@ -78,7 +78,7 @@ trove daemon stop
 - **游标**:`{size, mtimeMs, prefixHash, generation}`。size+mtime 未变直接跳过;文件增长只搬新增字节;size 回退/同尺寸改写/前缀哈希不符 → 换世代全量重建。
 - **无损**:本地 vault 是源文件的原始字节副本;OpenCode 是数据库全字段导出(新旧表并集,实测 782 会话 / 153,406 行 / 990MB)。WebDAV 远端按 4MiB 分块(大请求不稳),S3 一个文件一个对象,拉取时都校验 sha256。
 - **增量**:WebDAV 远端只传新增块,块路径扁平到 `<device>/chunks/<harness>/`,避免每文件多次 MKCOL;S3 按文件覆盖写,大文件走 Multipart Upload。清单并入设备索引(`<device>/index.json`)。实测二次全量扫描 2450 项仅 14s、上传 2 项。
-- **只增不删**:远端和本地 vault 都不删除;源文件被删后归档仍保留。
+- **只增不删**:远端和本地 vault 默认不删除;源文件被删后归档仍保留。唯一的删除入口是 `trove clean`(显式确认,只删索引不再引用且超过 24 小时的旧对象)。
 - **时间窗**:`--since 7d|24h|2026-10-01|all` 按会话最近变更时间过滤,避免首次全量过大。
 - **进度**:collect / pull / push 三阶段,TTY 单行刷新,管道按秒节流。
 - **daemon**:单实例 pid 锁、跨进程 sync 锁、SIGTERM 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。间隔/时间窗/init 是否自动启动由 `config.daemon.{intervalSeconds,since,startOnInit}` 决定(默认 `300 / 7d / true`),`daemon start --interval/--since` 显式参数优先于配置。`daemon restart` 先优雅停止再按同样参数拉起;旧进程没停干净时不会起第二个实例。
@@ -158,7 +158,17 @@ WebDAV 服务端没有原生分片上传,只能按 4 MiB 块存;对象存储一�
 
 交互式配置(`trove init` / `trove config`)会先问远端类型,再按类型问对应字段 —— 选 S3 时依次问厂商、地域、Bucket、AccessKey,不选就沿用现有配置。
 
-**换后端与历史数据迁移**:索引、设备元信息与 library 布局在两种后端下一致,raw 文件布局按后端区分。`state.json` 里的 `remoteId` 记录了推送水位属于哪个远端;检测到后端变了,旧水位自动作废,历史数据会整份重推(不会"以为推过了"而静默丢数据)。首次切到新后端时跑一次 `trove sync --since all` 即可。S3 切到单对象布局后,旧的 `chunks/` 对象不会自动删除,需要的话手工清理。
+**换后端与历史数据迁移**:索引、设备元信息与 library 布局在两种后端下一致,raw 文件布局按后端区分。`state.json` 里的 `remoteId` 记录了推送水位属于哪个远端;检测到后端变了,旧水位自动作废,历史数据会整份重推(不会"以为推过了"而静默丢数据)。首次切到新后端时跑一次 `trove sync --since all` 即可。S3 切到单对象布局后,旧的 `chunks/` 对象不会自动删除,需要时手工清理。
+
+**清理远端旧对象**:`trove clean` 扫描当前远端,删除不再被任何设备索引引用、且最后修改时间早于 24 小时的对象(旧布局分块、已无引用的会话/技能文件)。
+
+```bash
+trove clean --dry-run   # 只列出
+trove clean             # 列出后交互确认,默认否
+trove clean --yes       # 直接删除
+```
+
+安全边界:设备索引缺失时整个设备跳过;library 任一分片读取失败则整个 library 跳过;`lessons/**`、`merged.*.jsonl`、技能 `meta/*.json` 一律保留;24 小时内上传的对象、时间缺失的对象不删。切换远端后的第一次 `trove sync` 结束时(TTY 环境)会询问一次是否清理,默认不清理;daemon 永不触发清理。
 
 ## 开发
 

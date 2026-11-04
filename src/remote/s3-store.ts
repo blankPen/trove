@@ -238,18 +238,19 @@ export class S3Store implements RemoteStore {
     throw lastErr;
   }
 
-  /** 列一层:prefix 下的直接子项;delimiter='/' 时把子目录折叠成目录项。 */
+  /** 列一层:prefix 下的直接子项;delimiter='/' 时把子目录折叠成目录项,空串表示递归。 */
   private async listPage(
     prefix: string,
-  ): Promise<Array<{ key: string; size: number; isDir: boolean }>> {
-    const out: Array<{ key: string; size: number; isDir: boolean }> = [];
+    delimiter = '/',
+  ): Promise<Array<{ key: string; size: number; isDir: boolean; mtime?: number }>> {
+    const out: Array<{ key: string; size: number; isDir: boolean; mtime?: number }> = [];
     let token: string | undefined;
     do {
       const query: Record<string, string> = {
         'list-type': '2',
         prefix,
-        'delimiter': '/',
       };
+      if (delimiter) query['delimiter'] = delimiter;
       if (token) query['continuation-token'] = token;
       const res = await this.call('GET', '', { query });
       const xml = res!.body.toString('utf8');
@@ -260,7 +261,9 @@ export class S3Store implements RemoteStore {
         const key = /<Key>([\s\S]*?)<\/Key>/.exec(m[1]!)?.[1];
         if (!key) continue;
         const size = Number(/<Size>(\d+)<\/Size>/.exec(m[1]!)?.[1] ?? '0');
-        out.push({ key, size, isDir: false });
+        const modified = /<LastModified>([\s\S]*?)<\/LastModified>/.exec(m[1]!)?.[1];
+        const mtime = modified ? Date.parse(modified) : NaN;
+        out.push({ key, size, isDir: false, ...(Number.isFinite(mtime) ? { mtime } : {}) });
       }
 
       const prefixRe = /<CommonPrefixes>([\s\S]*?)<\/CommonPrefixes>/g;
@@ -289,9 +292,28 @@ export class S3Store implements RemoteStore {
         ? strip(it.key).split('/').pop() ?? ''
         : it.key.slice(fullPrefix.length);
       if (!name) continue;
-      out.push({ name, type: it.isDir ? 'directory' : 'file', size: it.size });
+      out.push({
+        name,
+        type: it.isDir ? 'directory' : 'file',
+        size: it.size,
+        ...(it.mtime !== undefined ? { mtime: it.mtime } : {}),
+      });
     }
     return out;
+  }
+
+  /** 递归列前缀下所有文件(不带 delimiter,一次分页拉完)。 */
+  async listAll(prefix: string, signal?: AbortSignal): Promise<RemoteEntry[]> {
+    if (signal?.aborted) return [];
+    const items = await this.listPage(strip(prefix), '');
+    return items
+      .filter((it) => !it.isDir)
+      .map((it) => ({
+        name: it.key,
+        type: 'file' as const,
+        size: it.size,
+        ...(it.mtime !== undefined ? { mtime: it.mtime } : {}),
+      }));
   }
 
   async listDevices(): Promise<string[]> {

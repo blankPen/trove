@@ -6,6 +6,8 @@ import { readFile, stat, writeFile } from 'node:fs/promises';
  */
 export class MemoryRemote {
   readonly files = new Map<string, Buffer>();
+  /** 可注入的对象修改时间;未设置时按当前时间(即"刚上传")。 */
+  readonly mtimes = new Map<string, number>();
   readonly writes: string[] = [];
   readonly reads: string[] = [];
 
@@ -37,14 +39,31 @@ export class MemoryRemote {
         name,
         type: tail.length ? 'directory' : 'file',
         size: tail.length ? 0 : b.length,
+        ...(tail.length ? {} : { mtime: this.mtimes.get(p) ?? Date.now() }),
       });
     }
     return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  async listAll(prefix: string): Promise<Array<{ name: string; type: 'file'; size: number; mtime: number }>> {
+    const p = prefix.replace(/^\/+|\/+$/g, '');
+    const out: Array<{ name: string; type: 'file'; size: number; mtime: number }> = [];
+    for (const [k, b] of this.files) {
+      if (!k.startsWith(`${p}/`)) continue;
+      out.push({ name: k, type: 'file', size: b.length, mtime: this.mtimes.get(k) ?? Date.now() });
+    }
+    return out;
+  }
+
   async readJson(path: string): Promise<unknown | null> {
     const b = this.files.get(path);
-    return b ? (JSON.parse(b.toString('utf8')) as unknown) : null;
+    if (!b) return null;
+    try {
+      return JSON.parse(b.toString('utf8')) as unknown;
+    } catch {
+      // 与 S3Store 一致:损坏的 JSON 视为不可用
+      return null;
+    }
   }
 
   async writeJson(path: string, value: unknown): Promise<void> {

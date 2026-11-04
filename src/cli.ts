@@ -3,12 +3,13 @@ import { hostname } from 'node:os';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Command, CommanderError } from 'commander';
-import { password as clackPassword, text } from '@clack/prompts';
+import { confirm, password as clackPassword, text } from '@clack/prompts';
 import pc from 'picocolors';
 import { trovePaths } from './paths.js';
 import { loadConfig, resolveRawSync, saveConfig, type Config, type RemoteConfig } from './config.js';
 import { loadState } from './core/state.js';
 import { sync } from './core/sync.js';
+import { deleteOrphans, scanOrphans, type OrphanCategory, type OrphanScan } from './core/clean.js';
 import { listSessions } from './core/sessions.js';
 import { ensureLibraryLayout, cleanupLegacyEvents, migrateLegacyLayout, librarySkillsDir, libraryLessonsDir, safeSessionName } from './core/layout.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from './core/library/index-file.js';
@@ -260,6 +261,80 @@ async function loadRuntime(
   return { config, remote, adapters: resolveAdapters(config) };
 }
 
+const ORPHAN_LABELS: Record<OrphanCategory, string> = {
+  'raw-chunk': 'raw 旧分块',
+  'raw-file': 'raw 整文件',
+  'library-session': 'library 会话',
+  'library-skill': 'library 技能',
+};
+
+function printOrphanScan(scan: OrphanScan, out: (l: string) => void): void {
+  out(pc.cyan('待清理对象(只含 24 小时前的对象):'));
+  const counts = new Map<OrphanCategory, { n: number; bytes: number }>();
+  for (const o of scan.objects) {
+    const c = counts.get(o.category) ?? { n: 0, bytes: 0 };
+    c.n++;
+    c.bytes += o.size;
+    counts.set(o.category, c);
+  }
+  for (const cat of Object.keys(ORPHAN_LABELS) as OrphanCategory[]) {
+    const c = counts.get(cat);
+    if (c) out(`  ${ORPHAN_LABELS[cat]}  ${c.n} 个 (${humanSize(c.bytes)})`);
+  }
+  out(
+    scan.objects.length
+      ? `  合计 ${scan.objects.length} 个 (${humanSize(scan.bytes)})`
+      : '  无',
+  );
+  if (scan.skippedDevices.length) {
+    out(pc.yellow(`  跳过设备(索引缺失,一个都不删): ${scan.skippedDevices.join(', ')}`));
+  }
+  if (scan.librarySkipped) {
+    out(pc.yellow('  library 分片不完整,本次跳过 library 清理'));
+  }
+  if (scan.skippedSkills.length) {
+    out(pc.yellow(`  保留整个技能目录(meta 缺失): ${[...new Set(scan.skippedSkills)].join(', ')}`));
+  }
+}
+
+async function cmdClean(
+  opts: { dryRun?: boolean; yes?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  createRemote: (config: RemoteConfig) => RemoteStore,
+  out: (l: string) => void,
+  interactive: boolean,
+): Promise<number> {
+  const { remote } = await loadRuntime(paths, createRemote, () => []);
+  if (!remote) {
+    out('本地模式(未配置远端),没有可清理的对象');
+    return 1;
+  }
+  const scan = await scanOrphans(remote);
+  printOrphanScan(scan, out);
+  if (scan.objects.length === 0) return 0;
+  if (opts.dryRun) {
+    out('dry-run:未删除任何对象');
+    return 0;
+  }
+
+  let go = opts.yes === true;
+  if (!go && interactive) {
+    const ans = await confirm({
+      message: `确认删除这 ${scan.objects.length} 个对象?`,
+      initialValue: false,
+    });
+    go = ans === true;
+  }
+  if (!go) {
+    out('未删除。确认无误后运行 `trove clean --yes`。');
+    return 0;
+  }
+
+  const r = await deleteOrphans(remote, scan);
+  out(`已删除 ${r.deleted} 个对象 (${humanSize(r.bytes)})${r.failed ? `, ${r.failed} 个失败` : ''}`);
+  return 0;
+}
+
 async function cmdSync(
   opts: {
     since?: string;
@@ -274,6 +349,7 @@ async function cmdSync(
   out: (l: string) => void,
   rawOut: (s: string) => void,
   tty: boolean,
+  interactive: boolean,
   now: () => number,
 ): Promise<void> {
   const { config, remote, adapters } = await loadRuntime(paths, createRemote, resolveAdapters);
@@ -322,6 +398,27 @@ async function cmdSync(
         `${(report.durationMs / 1000).toFixed(1)}s`,
     ),
   );
+
+  // 切换远端后首次同步:询问是否清理旧对象,默认不清理
+  if (report.remoteChanged && remote && interactive) {
+    out(pc.yellow('检测到远端已切换。清理前建议其他设备停止同步。'));
+    const yes = await confirm({
+      message: '是否清理 24 小时前、且不再被索引引用的旧对象?',
+      initialValue: false,
+    });
+    if (yes === true) {
+      const scan = await scanOrphans(remote);
+      printOrphanScan(scan, out);
+      if (scan.objects.length > 0) {
+        const r = await deleteOrphans(remote, scan);
+        out(
+          `已删除 ${r.deleted} 个对象 (${humanSize(r.bytes)})${r.failed ? `, ${r.failed} 个失败` : ''}`,
+        );
+      }
+    } else {
+      out('未清理。之后可运行 `trove clean` 查看。');
+    }
+  }
 }
 
 async function cmdSessions(
@@ -935,10 +1032,21 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           out,
           rawOut,
           tty,
+          interactive,
           now,
         );
       },
     );
+
+  program
+    .command('clean')
+    .description('清理远端中不再被索引引用的旧对象 (默认只列出)')
+    .option('--dry-run', '只列出,不删除')
+    .option('--yes', '不再确认,直接删除')
+    .action(async (opts: { dryRun?: boolean; yes?: boolean }) => {
+      const code = await cmdClean(opts, paths, createRemote, out, interactive);
+      if (code !== 0) process.exitCode = code;
+    });
 
   program
     .command('sessions')

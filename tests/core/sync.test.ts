@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { sync } from '../../src/core/sync.js';
-import { loadState } from '../../src/core/state.js';
+import { loadState, saveState } from '../../src/core/state.js';
 import { indexPath, metaPath, type DeviceIndex } from '../../src/core/remote-layout.js';
 import type { Adapter } from '../../src/adapters/index.js';
 import type { Progress } from '../../src/progress.js';
@@ -140,5 +140,24 @@ describe('sync(collect → pull → push)', () => {
     expect(report.library.pushed.uploaded).toBe(0);
     expect(remote.files.size).toBe(0);
     await expect(loadState(join(vault, 'state.json'))).resolves.toBeDefined();
+  });
+
+  it('远端身份变化 → remoteChanged=true;身份一致 → false', async () => {
+    const { opts, vault } = await setup();
+
+    const first = await sync({ ...opts, remoteId: 's3:new' });
+    const second = await sync({ ...opts, remoteId: 's3:new' });
+
+    expect(first.remoteChanged).toBe(false); // state 里还没有身份
+    expect(second.remoteChanged).toBe(false); // 已一致
+    expect((await loadState(join(vault, 'state.json'))).remoteId).toBe('s3:new');
+
+    // 人为把 state 改成旧后端身份,模拟切换
+    const state = await loadState(join(vault, 'state.json'));
+    state.remoteId = 'webdav:old';
+    await saveState(join(vault, 'state.json'), state);
+
+    const changed = await sync({ ...opts, remoteId: 's3:new' });
+    expect(changed.remoteChanged).toBe(true);
   });
 });

@@ -4,7 +4,7 @@ import { stat, writeFile } from 'node:fs/promises';
 import { Agent as HttpAgent } from 'node:http';
 import { Agent as HttpsAgent } from 'node:https';
 import { createClient, type WebDAVClient } from 'webdav';
-import type { RemoteStore } from './store.js';
+import type { RemoteEntry, RemoteStore } from './store.js';
 
 export interface WebDavOptions {
   url: string;
@@ -117,7 +117,7 @@ export class WebDavStore implements RemoteStore {
     }, 3, signal);
   }
 
-  async list(path: string, signal?: AbortSignal): Promise<Array<{ name: string; type: 'file' | 'directory'; size: number }>> {
+  async list(path: string, signal?: AbortSignal): Promise<Array<{ name: string; type: 'file' | 'directory'; size: number; mtime?: number }>> {
     await this.throttle();
     const scoped = this.scope(signal);
     const dir = strip(path);
@@ -132,11 +132,42 @@ export class WebDavStore implements RemoteStore {
         if (statusOf(err) === 404) return [];
         throw err;
       }
-      return entries.map((e) => ({
-        name: strip(e.filename).split('/').pop() ?? '',
-        type: e.type === 'directory' ? ('directory' as const) : ('file' as const),
-        size: typeof e.size === 'number' ? e.size : 0,
-      }));
+      return entries.map((e) => {
+        const mtime = Date.parse(e.lastmod);
+        return {
+          name: strip(e.filename).split('/').pop() ?? '',
+          type: e.type === 'directory' ? ('directory' as const) : ('file' as const),
+          size: typeof e.size === 'number' ? e.size : 0,
+          ...(Number.isFinite(mtime) ? { mtime } : {}),
+        };
+      });
+    }, 3, scoped);
+  }
+
+  /** 递归列前缀下所有文件(WebDAV 的 deep 列举一次返回)。 */
+  async listAll(prefix: string, signal?: AbortSignal): Promise<RemoteEntry[]> {
+    await this.throttle();
+    const scoped = this.scope(signal);
+    const dir = strip(prefix);
+    return withRetry(async () => {
+      let entries;
+      try {
+        entries = await this.client.getDirectoryContents(`/${dir}`, { deep: true, signal: scoped });
+      } catch (err) {
+        if (statusOf(err) === 404) return [];
+        throw err;
+      }
+      return entries
+        .filter((e) => e.type !== 'directory')
+        .map((e) => {
+          const mtime = Date.parse(e.lastmod);
+          return {
+            name: strip(e.filename),
+            type: 'file' as const,
+            size: typeof e.size === 'number' ? e.size : 0,
+            ...(Number.isFinite(mtime) ? { mtime } : {}),
+          };
+        });
     }, 3, scoped);
   }
 

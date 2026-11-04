@@ -1,203 +1,285 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/logo/logo-dark.png">
+  <img src="docs/logo/logo-light.png" width="112" alt="trove">
+</picture>
+
 # trove
 
-AI 会话资产归档工具:把本机 Claude Code / Codex / OpenCode / 豆包的会话**无损**归档到 WebDAV 或 S3 兼容对象存储,并支持多设备增量同步。
+### Every conversation is a treasure trove.
 
-## 安装
+**Claude Code, Codex, OpenCode and Doubao sessions — archived losslessly to your own WebDAV or S3 bucket,**<br>
+then merged into a personal library that follows you across every device you own.
 
-```bash
-npm i -g trove-cli    # 提供 trove 命令
-npx trove-cli --help  # 免安装试用
+[![Release](https://img.shields.io/npm/v/trove-cli?label=release&color=111111)](https://www.npmjs.com/package/trove-cli) [![Stars](https://img.shields.io/github/stars/blankPen/trove?style=flat&color=111111)](https://github.com/blankPen/trove/stargazers) [![License](https://img.shields.io/badge/license-MIT-111111)](LICENSE)<br>
+![Node.js](https://img.shields.io/badge/Node.js-22%2B-000000?logo=node.js&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black) ![Windows](https://img.shields.io/badge/Windows-0078D4?logo=windows&logoColor=white)
+
+**English** · [简体中文](README.zh-CN.md)
+
+<br>
+
+</div>
+
+<br>
+
+## Is trove for you?
+
+Every AI coding agent keeps its history somewhere you don't control. Claude Code writes JSONL under `~/.claude/projects`, Codex under `~/.codex/sessions`, OpenCode in a SQLite database, Doubao in a workspace folder. Delete your laptop, reinstall an agent, or switch machines, and it's gone. The raw bytes are there; the *meaning* — what you were working on, what you decided, what you learned — isn't anywhere at all.
+
+trove takes that raw material and turns it into something you keep:
+
+- **Lossless archiving.** The local vault is a byte-for-byte copy of every source file. Nothing is summarised, nothing is dropped, nothing is rewritten on the way in.
+- **Your own storage, not someone else's.** WebDAV (Nextcloud, Nutstore, a self-hosted davfs) or any S3-compatible bucket (Aliyun OSS, Tencent COS, MinIO). No account required, no telemetry, no server in the middle.
+- **Incremental, and it stays incremental.** A cursor of `{size, mtime, prefix hash}` means an unchanged file is skipped, a grown file transfers only its new bytes, and anything rewritten in place is rebuilt from scratch.
+- **Multi-device.** Each device writes only its own files and its own index shard, so two machines can sync without stepping on each other. Pull the other laptop's sessions on your desktop; push the desktop's skills to the laptop.
+- **A library, not a dump.** Sessions are merged by `(tool, session id)`, skills are de-duplicated by content hash with every version kept, and the extracted lessons — preferences, projects, debugging patterns — become Markdown you can actually read and grep.
+- **Learn from your own history.** An LLM reads the sessions you never got around to reviewing and distills them into 17 kinds of memory: your coding style, the projects you work on, the gotchas you hit, the decisions you made.
+
+It's for you if you've ever lost a conversation, wanted a session on a machine that wasn't there, or wished you could ask "what did I decide about this last month?" If you have a dozen sessions and never look back, you don't need it.
+
+## Quick start
+
+**1 · Install.**
+
+```sh
+npm i -g trove-cli      # provides the `trove` command
+npx trove-cli --help    # or try it without installing
 ```
 
-npm 上 unscoped 的 `trove` 是别人的包(仍在发布中),所以本项目发布为 `trove-cli`,命令行还是 `trove`。
+The unscoped `trove` name on npm belongs to another package, so this one publishes as **`trove-cli`**; the command itself is still `trove`. Node.js 22 or newer.
 
-## 用法
+**2 · Point it at a remote.** Run the interactive setup and it will ask what kind of remote you have, then the fields that kind needs:
 
-```bash
-# 首次配置(设备名、远端后端、凭证)
-# 默认会拉起 daemon 并立即跑首轮同步;只写配置用 --no-daemon
-# 交互式:trove init 会先问远端类型(WebDAV / S3),再按类型问对应字段
+```sh
 trove init
-trove init --url https://dav.example.com/ --username u --password p
-trove init --url https://dav.example.com/ --username u --password p --no-daemon
+```
 
-# S3 兼容对象存储(阿里云 OSS / 腾讯云 COS)
+Or skip the questions:
+
+```sh
+trove init --url https://dav.example.com/ --username u --password p
 trove init --type s3 --provider aliyun --region cn-hangzhou \
   --bucket my-bucket --access-key-id AKID --secret-access-key SK --no-daemon
-trove init --type s3 --provider tencent --region ap-guangzhou \
-  --bucket my-bucket-1250000000 --access-key-id AKID --secret-access-key SK --no-daemon
-# 私有 S3 兼容部署(MinIO 等):自定义 endpoint + path-style 寻址
-trove init --type s3 --endpoint http://127.0.0.1:9000 --force-path-style \
-  --region us-east-1 --bucket my-bucket --access-key-id AKID --secret-access-key SK --no-daemon
-
-# 同步:默认全量;日常建议限定时间窗
-trove sync --since 7d
-trove sync --since all          # 首次全量归档
-trove sync --pull-only          # 只拉取其他设备
-trove sync --push-only          # 只推送本机
-trove sync --no-raw             # 只同步 library(raw 只归档到本地)
-trove sync --raw                # 强制同步 raw(覆盖配置)
-trove config set sync.raw false # 默认只同步 library,可被 --raw 覆盖
-trove sync --quiet              # 不显示逐项进度
-
-# 概览与检索
-trove status                    # 本地 / 远端 / daemon / 待同步
-trove sessions                  # 列出 library 会话(最近 50 个)
-trove sessions --grep PATH      # 在标题/摘要/目录/模型/正文里搜
-trove sessions --harness opencode --json
-trove skills                    # 汇总后的技能(最新版本)
-trove skills show review        # 某技能的全部版本与来源
-trove library reindex           # 从设备分片重建统一索引
-trove usage                     # trove 自身 LLM 消耗的 token 用量
-trove usage --since 7d --json   # 限定时间窗,机器可读
-
-# 常驻服务:间隔/时间窗默认取 config.daemon,显式参数优先
-trove config set daemon.intervalSeconds 300
-trove config set daemon.since 7d
-trove config set daemon.startOnInit false   # init 不再自动启动
-trove daemon start                          # 等价于每 300s、时间窗 7d
-trove daemon start --interval 60 --since 24h
-trove daemon restart                        # 停止后按同样参数重新拉起
-trove daemon status
-trove daemon stop
 ```
 
-`trove status` 输出四段:
+**3 · Sync.**
 
-- **本地**:各工具已归档的会话数与体积
-- **远端**:5 秒超时探测,显示可达性、设备数与各设备上次在线时间
-- **daemon**:运行状态、间隔、时间窗、上次/下次同步与最近一轮结果
-- **待同步**:raw 层按工具分会话/文件数;library 按「会话 / 技能 / 索引」分类计数(只给计数,不逐条列)。
-  会话数按 `sessionKey` 去重,同一会话的多个文件算 1 个;Claude 子代理文件没有会话归并规则,会被算作独立会话。
-  `config.sync.raw=false` 时只显示「raw 同步已关闭」与 library 待同步。
+```sh
+trove sync --since 7d
+```
 
-## 支持的数据源
+That's the whole setup. A daemon starts by default and keeps the archive current in the background.
 
-| 工具 | 位置 | 归档内容 |
+## Supported tools
+
+| Tool | Where it keeps sessions | What gets archived |
 |---|---|---|
-| Claude Code | `~/.claude/projects/**/*.jsonl`、`~/.claude/transcripts/**/*.jsonl` | 两套互不重叠的会话原始 JSONL + skills/plans 等小资产 |
-| Codex | `~/.codex/sessions/**/*.jsonl`、`archived_sessions/**` | rollout 原始 JSONL + skills |
-| OpenCode | `~/.local/share/opencode/opencode.db` | `session_v2`/`session_message` 与旧表 `session`/`message`/`part` 的并集,逐会话导出确定性 JSONL(两套序列化都保留,保留全部列) |
-| 豆包(办公版) | `~/Library/Application Support/DoubaoWork/.../agent_mode/workspace` | `.sessions/<id>` 的 board/memory/agents 轨迹 + `conversation/<id>` |
+| **Claude Code** | `~/.claude/projects/**/*.jsonl`, `~/.claude/transcripts/**/*.jsonl` | Both session stores (they don't overlap), plus skills, plans, tasks and `CLAUDE.md` |
+| **Codex** | `~/.codex/sessions/**/*.jsonl`, `~/.codex/archived_sessions/**/*.jsonl` | Rollout JSONL plus skills |
+| **OpenCode** | `~/.local/share/opencode/opencode.db` | `session_v2`/`session_message` plus the legacy `session`/`message`/`part` tables, exported per session as deterministic JSONL with every column kept |
+| **Doubao** (office build) | `~/Library/Application Support/DoubaoWork/.../agent_mode/workspace` | `.sessions/<id>` board/memory/agent traces and `conversation/<id>` |
 
-凭证类文件(`settings.json`、`auth.json`、`config.toml`、`*.key` 等)在适配器层硬排除。
+Credential files (`settings.json`, `auth.json`, `config.toml`, `*.key` and friends) are excluded at the adapter layer and never leave your machine. Any tool can be turned off individually with `trove config set sources.<id>.enabled false`.
 
-## 同步模型(Beacon poll 骨架)
+## How it fits together
 
-- **游标**:`{size, mtimeMs, prefixHash, generation}`。size+mtime 未变直接跳过;文件增长只搬新增字节;size 回退/同尺寸改写/前缀哈希不符 → 换世代全量重建。
-- **无损**:本地 vault 是源文件的原始字节副本;OpenCode 是数据库全字段导出(新旧表并集,实测 782 会话 / 153,406 行 / 990MB)。WebDAV 远端按 4MiB 分块(大请求不稳),S3 一个文件一个对象,拉取时都校验 sha256。
-- **增量**:WebDAV 远端只传新增块,块路径扁平到 `<device>/chunks/<harness>/`,避免每文件多次 MKCOL;S3 按文件覆盖写,大文件走 Multipart Upload。清单并入设备索引(`<device>/index.json`)。实测二次全量扫描 2450 项仅 14s、上传 2 项。
-- **只增不删**:远端和本地 vault 默认不删除;源文件被删后归档仍保留。唯一的删除入口是 `trove clean`(显式确认,只删索引不再引用且超过 24 小时的旧对象)。
-- **时间窗**:`--since 7d|24h|2026-10-01|all` 按会话最近变更时间过滤,避免首次全量过大。
-- **进度**:collect / pull / push 三阶段,TTY 单行刷新,管道按秒节流。
-- **daemon**:单实例 pid 锁、跨进程 sync 锁、SIGTERM 协作中止、状态写 `~/.trove/daemon.status.json`、日志轮转。间隔/时间窗/init 是否自动启动由 `config.daemon.{intervalSeconds,since,startOnInit}` 决定(默认 `300 / 7d / true`),`daemon start --interval/--since` 显式参数优先于配置。`daemon restart` 先优雅停止再按同样参数拉起;旧进程没停干净时不会起第二个实例。
+```
+your agents                your machine                    your storage
+─────────────              ────────────                    ───────────
+Claude Code  ─┐
+Codex        ─┤        ┌──────────────────┐        ┌──────────────────┐
+OpenCode     ─┼──────▶ │  ~/.trove/vault   │ ─────▶ │  WebDAV / S3     │
+Doubao       ─┘        │                  │        │                  │
+                      │  raw/   devices   │        │  raw/    devices │
+                      │  library/ merged  │        │  library/ merged │
+                      └──────────────────┘        └──────────────────┘
+                                  ▲
+                                  │ one cursor, one sync, many devices
+```
 
-## library(个人资产层)
+**raw/ is what the machine saw.** The exact bytes of every source file, laid out per device. It's a fact, not an opinion.
 
-`raw/` 是设备事实,`library/` 是合并后的个人资产,随同步一起走:
+**library/ is what it meant.** Sessions merged across tools and devices into one normalised JSONL stream, skills collected by content hash, a unified index, and the lessons extracted from all of it.
+
+Both travel together. `raw` is the bigger half and you can keep it local if you like — `trove config set sync.raw false` syncs the library only, and `--raw` / `--no-raw` on the command line override that per run.
+
+## What it does
+
+### Lossless, incremental sync
+
+- **A cursor per file** — `{size, mtime, prefix hash, generation}`. Unchanged means skipped; grown means only the new bytes travel; shrunk, rewritten in place, or a mismatched prefix hash means a full rebuild under a new generation.
+- **Byte-for-byte on the way in.** The vault holds the original bytes, not a rendering of them. OpenCode is exported from the database with every column of both the current and the legacy schema intact (measured: 782 sessions / 153,406 rows / 990 MB).
+- **Blocks on WebDAV, objects on S3.** WebDAV has no multipart upload, so remote files are stored as immutable 4 MiB chunks; S3 gets one object per file, so you can open a session in your bucket console and read the original. Both verify sha256 on pull.
+- **Flat chunk paths.** Chunks live at `<device>/chunks/<tool>/`, so a sync doesn't perform a `MKCOL` per file. On S3, large files go through Multipart Upload.
+- **Measured**: a second full scan of 2,450 items took 14 s and uploaded 2.
+
+### Multi-device without conflicts
+
+Each device writes only its own files and its own index shard, so nothing is ever overwritten concurrently. When the same session differs between devices, the index picks a canonical version (the event superset) and keeps the others as `variants` — every version is kept, never dropped.
+
+The index itself is a derived artefact: `index/<device>.json` is authoritative, `index.json` is merged locally, and a rebuildable index never means lost data.
+
+### The library layer
 
 ```
 ~/.trove/vault/
-├── raw/<device>/<harness>/…                原始字节(设备 × 工具)
-└── library/                                个人资产(同步)
-    ├── index.json                          统一索引(派生物,可重建)
-    ├── index/<device>.json                 每设备索引分片(只由本设备写)
-    ├── sessions/<harness>/<session>/<device>.jsonl
-    ├── skills/<name>/versions/<hash>/…     内容寻址,保留各版本
-    ├── skills/<name>/meta/<device>.json    来源与版本
-    └── lessons/                            学习沉淀(同步)
+├── raw/<device>/<tool>/…            original bytes (device × tool)
+└── library/                          your personal assets (synced)
+    ├── index.json                    unified index (derived, rebuildable)
+    ├── index/<device>.json           per-device index shard (written only by that device)
+    ├── sessions/<tool>/<session>/<device>.jsonl
+    ├── skills/<name>/versions/<hash>/…   content-addressed, every version kept
+    ├── skills/<name>/meta/<device>.json
+    └── lessons/                      extracted knowledge (synced)
 ```
 
-- **归组**:按 `(harness, sessionId)` 归并同一会话的多份 raw——Claude 主文件 + `subagents/*.jsonl`、豆包 `.sessions` + `conversation`。
-- **冲突**:每台设备只写自己的文件和分片,远端不存在并发覆盖。同一会话内容不同时,索引选 canonical(事件超集;豆包按事件 id 求并集),其余进 `variants`,文件永远保留。
-- **索引**:`index/<device>.json` 是权威,`index.json` 由本地合并生成;索引冲突只需重建,不会丢数据。
-- **技能**:按目录内容 hash 去重,来源由 `SKILL.md` frontmatter 与 `.git/config` origin 判定(`self/github/skillsh/unknown`);最新版本按 semver → updatedAt → hash 选择,历史版本保留。
-- **lessons**:按主题沉淀经验,内容用 `(harness, session, seq)` 引用会话。与 sessions/skills 一起同步;没有设备分片,多设备各自 learn 时同路径文件按最后写入覆盖,拉取只在本地缺失时恢复,不会覆盖本机刚生成的内容。
+The event schema stays `session / message / reasoning / tool_call / tool_result / meta`, with `raw: {path, line}` pointing back at the original file.
 
-事件 schema 仍是 `session/message/reasoning/tool_call/tool_result/meta`,带 `raw:{path,line}` 回指原始文件。
+### Lessons — what the sessions actually taught you
 
-## 同步模型补充
+This is the part that isn't just backup. trove runs an LLM over sessions you never reviewed and writes the result as Markdown, organised into 17 memory types across 5 categories:
 
-- library **始终同步**(约 500 MB):推送本设备的会话文件、技能、lessons 与索引分片,拉取其他设备的分片与文件。
-- raw 是否上传/拉取按 **命令行 > `config.sync.raw` > 默认 true** 决定;关闭时只同步 library,raw 只归档到本地。
-- 配置示例:`trove config set sync.raw false`;`trove sync --raw` 可临时覆盖。
-- 索引分片按设备隔离,拉取时落盘后本地重建统一索引。
+| Category | Types |
+|---|---|
+| **Preferences** | user profile, coding style, writing style, dialogue style, recent matters |
+| **Entities** | projects, people, organizations, tools, tech stack |
+| **Experiences** | debug patterns, workflows, gotchas, corrections |
+| **Events** | decisions |
+| **Resources** | docs, repositories, links |
 
-## LLM 用量统计
+Each type has its own merge rule, so a re-run updates what it should and appends what it should. Every entry cites the sessions it came from, and `trove learn --list` shows the exact diff of what the extractor added or changed.
 
-trove 自己调用 LLM 的场景(手动 `trove learn`、daemon 每轮同步后的经验提取)会把每次调用的 token 用量追加到 `~/.trove/usage.jsonl`:时间、任务(如 `learn:summarize`)、模型、输入/输出/合计 tokens。`trove usage` 按任务与模型汇总,`--since` 限定时间窗,`--json` 输出机器可读结果。
+```sh
+trove learn -n 10              # extract from the 10 most recent unlearned sessions
+trove learn --list             # audit the last extraction
+trove learn-memo               # pull in Claude Code's own memory files
+trove learn-recent             # aggregate your recent direction of work
+trove refresh                  # rebuild the layered overview
+```
 
-该台账只统计 trove 自身调用 LLM 的消耗,不包含被归档会话里的 usage 字段;Jev 打分走 TypeSafe API,响应不含 token 用量,因此不计入。台账只留本机,不参与同步。
+Extraction needs an OpenAI-compatible endpoint, configured once:
 
-## 本地布局
+```sh
+trove config set llm.baseUrl https://api.deepseek.com/v1
+trove config set llm.model deepseek-chat
+trove config set llm.apiKey sk-…
+```
+
+`trove usage` then reports what that costs you, broken down by task and model.
+
+### A daemon that stays out of the way
+
+```sh
+trove daemon start --interval 300 --since 7d
+trove daemon status
+trove daemon restart
+trove daemon stop
+```
+
+One instance per machine (pid lock), a cross-process sync lock, cooperative shutdown on `SIGTERM`, status written to `~/.trove/daemon.status.json`, rotated logs. The interval, the time window and whether `init` starts it are all config (`config.daemon.{intervalSeconds,since,startOnInit}`, defaulting to `300 / 7d / true`); explicit flags win over config. A separate learn loop runs on its own interval (`config.daemon.learnIntervalSeconds`, `learnBatch`).
+
+### Search and overview
+
+```sh
+trove status                    # local, remote, daemon, pending
+trove sessions --grep refactor  # search titles, summaries, paths, models
+trove sessions --harness codex --json
+trove skills show review        # every version and origin of one skill
+trove library reindex           # rebuild the unified index from device shards
+trove usage --since 7d --json
+```
+
+`trove status` reports four things: what each tool has archived locally (count and size), whether the remote is reachable (5 s probe, device count, last seen), the daemon's state and last result, and what is still pending — sessions, files and skills by category.
+
+### Deletion is explicit
+
+Nothing is deleted by default, on either side. A source file you delete stays archived; the only removal path is `trove clean`, which deletes remote objects that no index references and that are older than 24 hours.
+
+```sh
+trove clean --dry-run   # list
+trove clean             # list, then confirm interactively (default: no)
+trove clean --yes       # just do it
+```
+
+Safety rules: a missing device index skips that whole device; a single unreadable library shard skips the whole library; `lessons/**`, merged session files and skill metadata are always kept; anything uploaded in the last 24 hours or with no timestamp is never deleted. The daemon never triggers a cleanup on its own.
+
+## Command reference
+
+| Command | What it does |
+|---|---|
+| `trove init` | First-time setup: device name, remote type, credentials |
+| `trove rename <name>` | Rename this device (the id and archived paths stay the same) |
+| `trove sync` | Collect local sessions and sync (collect → pull → push) |
+| `trove clean` | Remove unreferenced remote objects older than 24 h |
+| `trove status` | Overview: local, remote, daemon, pending |
+| `trove sessions` | List and search library sessions |
+| `trove skills` | List merged skills, or `show <name>` for every version |
+| `trove library reindex` | Rebuild the unified index from device shards |
+| `trove learn` | Extract lessons, or `--list` to audit the last run |
+| `trove learn-memo` | Learn from Claude Code's built-in memory files |
+| `trove learn-recent` | Aggregate your recent direction of work |
+| `trove refresh` | Rebuild the layered lessons overview |
+| `trove usage` | Token usage of trove's own LLM calls |
+| `trove config` | Interactive config, or `get`/`set`/`path` |
+| `trove daemon` | `start`, `restart`, `stop`, `status` |
+
+Useful flags on `trove sync`: `--since 7d|24h|2026-10-01|all` (only sessions changed since then), `--pull-only`, `--push-only`, `--raw` / `--no-raw`, `--quiet`.
+
+## Remote backends
+
+| Backend | How to configure | Notes |
+|---|---|---|
+| **WebDAV** | `trove init --url … --username … --password …` | The default; works with self-hosted and third-party services |
+| **Aliyun OSS** | `--type s3 --provider aliyun --region cn-hangzhou --bucket …` | S3-compatible, virtual-hosted addressing |
+| **Tencent COS** | `--type s3 --provider tencent --region ap-guangzhou --bucket …` | S3-compatible; the bucket name needs the `-<appid>` suffix |
+| **Any S3-compatible** | `--type s3 --endpoint … --force-path-style --region … --bucket …` | MinIO and other private deployments |
+
+Interactive setup asks for the remote type first, then the fields that type needs.
+
+**Switching backends doesn't lose anything.** Indexes, device metadata and the library layout are identical across backends; only the raw file layout differs. The `remoteId` in `state.json` records which remote the push watermark belongs to — when the backend changes, the old watermark is voided and the history is re-pushed in full, rather than being silently skipped. Run one `trove sync --since all` after switching. Old `chunks/` objects from the previous layout are not removed automatically.
+
+## Local layout
 
 ```
 ~/.trove/
-├── config.json              设备身份与远端凭证(600)
-├── state.json               游标 + 推送/拉取水位 + library 记录(原子写)
-├── usage.jsonl              trove 自身 LLM 调用的 token 用量(只追加,不同步)
+├── config.json              device identity and remote credentials (mode 600)
+├── state.json               cursors, push/pull watermarks, library records
+├── usage.jsonl              trove's own LLM token usage (append-only, never synced)
 ├── daemon.pid / daemon.status.json
-├── vault/raw/<device>/<harness>/...       原始字节归档
-├── vault/library/                         个人资产(会话/技能/索引/lessons)
-├── tmp/                     OpenCode 导出与 library 重建临时文件
+├── vault/raw/<device>/<tool>/…   archived original bytes
+├── vault/library/                personal assets (sessions / skills / index / lessons)
+├── tmp/                    temporary files for exports and rebuilds
 └── logs/daemon.log
 ```
 
-远端布局(索引与设备元信息一致;raw 文件按后端区分):
+Remote layout:
 
 ```
-raw/<device>/index.json                            索引(含每文件块清单与哈希)
-raw/<device>/meta.json                             设备名 / lastSeen
-raw/<device>/chunks/<harness>/<key>.<gen>.<off>-<len>.bin  WebDAV:不可变块
-raw/<device>/files/<harness>/<relPath>             S3:完整文件(控制台可直接浏览)
-library/index/<device>.json                        每设备索引分片
-library/sessions/…、library/skills/…               个人资产
+raw/<device>/index.json                            index (chunk list and hashes)
+raw/<device>/meta.json                             device name / last seen
+raw/<device>/chunks/<tool>/<key>.<gen>.<off>-<len>.bin   WebDAV: immutable chunks
+raw/<device>/files/<tool>/<relPath>                     S3: whole files
+library/index/<device>.json                        per-device index shards
+library/sessions/…, library/skills/…               personal assets
 ```
 
-WebDAV 服务端没有原生分片上传,只能按 4 MiB 块存;对象存储一个会话文件就是一个对象,
-路径即原始相对路径,桶里能直接打开会话原文。索引项的 `layout` 字段区分两种布局,老索引缺省按分块解释。
+## Development
 
-## 远端后端
-
-| 后端 | 配置方式 | 说明 |
-|---|---|---|
-| WebDAV | `trove init --url … --username … --password …` | 默认后端,兼容自建与第三方网盘 |
-| 阿里云 OSS | `--type s3 --provider aliyun --region cn-hangzhou --bucket …` | S3 兼容,走 virtual-hosted 寻址 |
-| 腾讯云 COS | `--type s3 --provider tencent --region ap-guangzhou --bucket …` | S3 兼容;Bucket 名需带 `-<appid>` 后缀 |
-
-交互式配置(`trove init` / `trove config`)会先问远端类型,再按类型问对应字段 —— 选 S3 时依次问厂商、地域、Bucket、AccessKey,不选就沿用现有配置。
-
-**换后端与历史数据迁移**:索引、设备元信息与 library 布局在两种后端下一致,raw 文件布局按后端区分。`state.json` 里的 `remoteId` 记录了推送水位属于哪个远端;检测到后端变了,旧水位自动作废,历史数据会整份重推(不会"以为推过了"而静默丢数据)。首次切到新后端时跑一次 `trove sync --since all` 即可。S3 切到单对象布局后,旧的 `chunks/` 对象不会自动删除,需要时手工清理。
-
-**清理远端旧对象**:`trove clean` 扫描当前远端,删除不再被任何设备索引引用、且最后修改时间早于 24 小时的对象(旧布局分块、已无引用的会话/技能文件)。
-
-```bash
-trove clean --dry-run   # 只列出
-trove clean             # 列出后交互确认,默认否
-trove clean --yes       # 直接删除
-```
-
-安全边界:设备索引缺失时整个设备跳过;library 任一分片读取失败则整个 library 跳过;`lessons/**`、`merged.*.jsonl`、技能 `meta/*.json` 一律保留;24 小时内上传的对象、时间缺失的对象不删。切换远端后的第一次 `trove sync` 结束时(TTY 环境)会询问一次是否清理,默认不清理;daemon 永不触发清理。
-
-## 开发
-
-```bash
-pnpm test          # 单元 + 真实 WebDAV 服务集成 + 真实本机会话扫描
+```sh
+pnpm test          # unit tests + a real WebDAV server + real local session scans
 pnpm typecheck
 pnpm build
 ```
 
-## 发版
+## Release
 
-合并到 `main` 即自动发版(`.github/workflows/release.yml`):
+Merging to `main` publishes automatically (`.github/workflows/release.yml`): bump `version` in `package.json` in the PR, and CI installs, builds, tests, publishes to npm, tags `v<version>` and creates the GitHub Release with the npm tarball attached.
 
-1. PR 里改好 `package.json` 的 `version`,合并进 `main`
-2. Actions 装依赖 → 构建 → 跑测试 → 发布到 npm → 打 tag `v<version>` 并生成 GitHub Release(附带 npm 包 tarball)
+One-time npm setup: npmjs.com → your package → Trusted Publisher → GitHub Actions, with `blankPen` / `trove-cli` / `release.yml`, and allow `npm publish`. CI then publishes with OIDC and no long-lived token. With a token instead, add an `NPM_TOKEN` Actions secret (granular, with Read and write (publish and stage) and Bypass 2FA) — a stage-only token only stages the release and needs `npm stage approve <stage-id> --otp <code>` to go live.
 
-一次性配置(npm 侧):npmjs.com → 包的设置 → Trusted Publisher → GitHub Actions,填 `blankPen` / `trove` / `release.yml`,并允许 `npm publish`。之后 CI 用 OIDC 直接发布,不需要长期 token。
+Re-running is idempotent: if the version is already on npm, publishing is skipped; if the release already exists, creating it is skipped; if both are done, the whole job is skipped.
 
-仍用 token 的话:仓库 Settings → Secrets and variables → Actions → 新建 `NPM_TOKEN`(granular access token,Read and write(publish and stage)+ 勾选 Bypass 2FA)。只用 stage only 的 token 只会把版本暂存,需要人工 `npm stage approve <stage-id> --otp <code>` 才会真正上线。
+## License
 
-重复触发是幂等的:npm 上已有该版本就跳过发布,GitHub Release 已存在就跳过建 Release,两样都做完就整体跳过。
-
-npm 计划 2027 年 1 月起停用 bypass 2FA token 的直接发布,届时改走 trusted publishing(OIDC)即可,工作流不用动。
+[MIT](LICENSE)

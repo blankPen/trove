@@ -10,6 +10,17 @@
 - [x] 优化 `trove status` 展示：让输出更美观清晰，分层展示 Devices（设备）/ Sessions（本地、远端）/ Skills / Lessons / Daemon 状态 / 待同步、待学习等
 - [x] 设备支持重命名（当前设备名在同步/索引中作为标识，重命名需连带处理远端设备 meta 与已归档路径）
 
+## 已完成（2026-11-04 知识库消费层 v1）
+
+- [x] lessons 检索：进程内 FTS5 + CJK bigram + BM25 字段加权；`trove lessons search/show/list`
+- [x] sessions 检索：持久化 `~/.trove/cache/search.sqlite`，按 canonical hash 增量；`trove sessions search/show`
+- [x] 精确兜底：`sessions search --exact` 复用线性 grep（2–5s，覆盖工具输出）
+- [x] `trove whoami`：画像/偏好/近期方向；默认不含年龄/人际关系
+- [x] `trove mcp`：官方 SDK stdio server，7 个只读工具
+- [x] `trove skill install/uninstall`：安装到 `~/.claude/skills` 与 `~/.agents/skills`
+- [x] 脱敏、路径校验、提示注入防护、索引 schema 版本与降级
+- [x] 实测：2413 会话 / 268MB 索引 / 全量约 20s / FTS 查询约 0.5s（含启动）；543 项测试全绿
+
 ## 已完成（2026-10-29 status 展示与设备重命名）
 
 - [x] `trove status` 分层展示：设备 / 本地会话(按 harness) / 技能 / 学习沉淀(五类记忆 + 待学习) / 远端设备 / daemon / 待同步

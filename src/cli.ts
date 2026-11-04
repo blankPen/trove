@@ -12,6 +12,23 @@ import { loadState } from './core/state.js';
 import { sync } from './core/sync.js';
 import { deleteOrphans, scanOrphans, type OrphanCategory, type OrphanScan } from './core/clean.js';
 import { listSessions } from './core/sessions.js';
+import { formatWhoami, readWhoami, type WhoamiSection } from './core/whoami.js';
+import {
+  buildSearchIndex,
+  getLesson,
+  getSearchStatus,
+  getSession,
+  listLessons,
+  searchLessons,
+  searchSessions,
+} from './core/search/service.js';
+import {
+  formatLesson,
+  formatLessonHits,
+  formatSession,
+  formatSessionHits,
+} from './core/search/format.js';
+import { installSkill, uninstallSkill, type SkillTarget } from './skill/install.js';
 import { ensureLibraryLayout, cleanupLegacyEvents, migrateLegacyLayout, librarySkillsDir, libraryLessonsDir, safeSessionName } from './core/layout.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from './core/library/index-file.js';
 import { parseSince, formatSince } from './core/time-window.js';
@@ -441,6 +458,171 @@ async function cmdSessions(
     pc.dim(
       `${all.length} 个会话` +
         (all.length > list.length ? `(显示前 ${list.length} 个,用 --limit 调整)` : ''),
+    ),
+  );
+}
+
+async function cmdWhoami(
+  opts: { sections?: string; full?: boolean; json?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const sections = (opts.sections ?? 'profile,styles,recent')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean) as WhoamiSection[];
+  const result = await readWhoami(paths.vault, { sections, full: opts.full === true });
+  out(opts.json ? JSON.stringify(result, null, 2) : formatWhoami(result));
+}
+
+async function cmdLessonsSearch(
+  query: string,
+  opts: { category?: string; type?: string; since?: string; limit?: string; json?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  nowMs: number,
+): Promise<void> {
+  const since = opts.since ? (parseSince(opts.since, nowMs) ?? undefined) : undefined;
+  const limit = Math.max(1, Math.min(50, Number(opts.limit) || 10));
+  const hits = await searchLessons(paths.vault, {
+    query,
+    ...(opts.category ? { category: opts.category } : {}),
+    ...(opts.type ? { type: opts.type } : {}),
+    ...(since ? { since } : {}),
+    limit,
+    cwd: process.cwd(),
+  });
+  out(
+    opts.json
+      ? JSON.stringify({ query, total: hits.length, results: hits }, null, 2)
+      : formatLessonHits(hits),
+  );
+}
+
+async function cmdLessonShow(
+  rel: string,
+  opts: { section?: string; lines?: string; full?: boolean; json?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const doc = await getLesson(paths.vault, rel, {
+    ...(opts.section ? { section: opts.section } : {}),
+    ...(opts.lines ? { lines: opts.lines } : {}),
+    ...(opts.full !== undefined ? { full: opts.full } : {}),
+  });
+  if (!doc) {
+    out(`没有找到 lesson: ${rel}`);
+    return;
+  }
+  out(opts.json ? JSON.stringify(doc, null, 2) : formatLesson(doc));
+}
+
+async function cmdLessonsList(
+  opts: { category?: string; since?: string; limit?: string; json?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  nowMs: number,
+): Promise<void> {
+  const since = opts.since ? (parseSince(opts.since, nowMs) ?? undefined) : undefined;
+  const hits = await listLessons(paths.vault, {
+    ...(opts.category ? { category: opts.category } : {}),
+    ...(since ? { since } : {}),
+    limit: Math.max(1, Math.min(100, Number(opts.limit) || 50)),
+  });
+  out(opts.json ? JSON.stringify({ total: hits.length, results: hits }, null, 2) : formatLessonHits(hits));
+}
+
+async function cmdSessionsSearch(
+  query: string,
+  opts: { harness?: string; device?: string; since?: string; limit?: string; exact?: boolean; json?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  nowMs: number,
+): Promise<void> {
+  const since = opts.since ? (parseSince(opts.since, nowMs) ?? undefined) : undefined;
+  const res = await searchSessions(paths.vault, paths.cache, {
+    query,
+    ...(opts.harness ? { harness: opts.harness } : {}),
+    ...(opts.device ? { device: opts.device } : {}),
+    ...(since ? { since } : {}),
+    limit: Math.max(1, Math.min(50, Number(opts.limit) || 10)),
+    ...(opts.exact !== undefined ? { exact: opts.exact } : {}),
+    cwd: process.cwd(),
+  });
+  out(
+    opts.json
+      ? JSON.stringify({ query, ...res }, null, 2)
+      : formatSessionHits(res.results, {
+          ...(res.stale ? { stale: true } : {}),
+          ...(res.degraded ? { degraded: res.degraded } : {}),
+        }),
+  );
+}
+
+async function cmdSessionShow(
+  id: string,
+  opts: { harness?: string; around?: string; limit?: string; json?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const detail = await getSession(paths.vault, paths.cache, id, {
+    ...(opts.harness ? { harness: opts.harness } : {}),
+    ...(opts.around ? { around: opts.around } : {}),
+    limit: Math.max(1, Math.min(50, Number(opts.limit) || 20)),
+  });
+  if (!detail) {
+    out(`没有找到会话: ${id}`);
+    return;
+  }
+  out(opts.json ? JSON.stringify(detail, null, 2) : formatSession(detail));
+}
+
+async function cmdIndexBuild(
+  opts: { force?: boolean; since?: string; quiet?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  nowMs: number,
+): Promise<void> {
+  const since = opts.since ? (parseSince(opts.since, nowMs) ?? undefined) : undefined;
+  const stats = await buildSearchIndex(paths.vault, paths.cache, {
+    ...(opts.force ? { force: true } : {}),
+    ...(since ? { since } : {}),
+  });
+  if (!opts.quiet) {
+    out(
+      pc.green(
+        `索引完成: 扫描 ${stats.scanned} · 更新 ${stats.changed} · 删除 ${stats.removed} · ` +
+          `耗时 ${stats.tookMs}ms · ${humanSize(stats.sizeBytes)}`,
+      ),
+    );
+  }
+}
+
+async function cmdStatusJson(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const config = await loadConfig(paths.config);
+  const [index, daemon, search] = await Promise.all([
+    loadLibraryIndex(paths.vault),
+    daemonState(paths),
+    getSearchStatus(paths.vault, paths.cache),
+  ]);
+  out(
+    JSON.stringify(
+      {
+        device: { id: config.device.id, name: config.device.name },
+        sessions: { total: index ? Object.keys(index.sessions).length : 0 },
+        skills: { total: index ? Object.keys(index.skills).length : 0 },
+        daemon: {
+          running: daemon.running,
+          lastRunAt: daemon.status?.lastRunAt ?? null,
+          lastError: daemon.status?.lastError ?? null,
+        },
+        search,
+      },
+      null,
+      2,
     ),
   );
 }
@@ -1071,22 +1253,105 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     });
 
   program
-    .command('sessions')
-    .description('列出/检索 library 会话')
+    .command('whoami')
+    .description('查看用户画像、偏好与近期方向')
+    .option('--sections <list>', 'profile,styles,recent,all', 'profile,styles,recent')
+    .option('--full', '包含年龄/人际关系等敏感分区')
+    .option('--json', '输出 JSON')
+    .action(async (opts: { sections?: string; full?: boolean; json?: boolean }) => {
+      await cmdWhoami(opts, paths, out);
+    });
+
+  program
+    .command('lessons [action] [value]')
+    .description('检索经验/实体/偏好/决策/资源 (action: search / show / list)')
+    .option('--category <name>', 'preferences / entities / experiences / events / resources')
+    .option('--type <name>', '记忆类型,如 experiences/gotcha')
+    .option('--since <range>', '时间窗,如 7d / 90d / 2026-10-01')
+    .option('--limit <n>', '最多显示多少条 (search 默认 10,list 默认 50)')
+    .option('--section <heading>', 'show: 只读某个标题小节')
+    .option('--lines <range>', 'show: 只读行范围,如 1-80')
+    .option('--full', 'show: 读取完整正文(上限 64KB)')
+    .option('--json', '输出 JSON')
+    .action(
+      async (
+        action: string | undefined,
+        value: string | undefined,
+        opts: {
+          category?: string;
+          type?: string;
+          since?: string;
+          limit?: string;
+          section?: string;
+          lines?: string;
+          full?: boolean;
+          json?: boolean;
+        },
+      ) => {
+        const a = action ?? 'list';
+        if (a === 'search') {
+          if (!value) {
+            err('用法: trove lessons search <query>');
+            return;
+          }
+          await cmdLessonsSearch(value, opts, paths, out, now());
+        } else if (a === 'show') {
+          if (!value) {
+            err('用法: trove lessons show <path>');
+            return;
+          }
+          await cmdLessonShow(value, opts, paths, out);
+        } else if (a === 'list') {
+          await cmdLessonsList(opts, paths, out, now());
+        } else {
+          err(`未知的 lessons 子命令: ${a}`);
+        }
+      },
+    );
+
+  program
+    .command('sessions [action] [value]')
+    .description('列出/检索 library 会话 (action: search / show)')
     .option('--harness <id>', '只看某个工具:claude-code / codex / opencode / doubao')
     .option('--device <id>', '只看某台设备')
     .option('--grep <text>', '按标题/摘要/目录/模型搜索')
-    .option('--limit <n>', '最多显示多少条(0 = 全部)', '50')
+    .option('--since <range>', '时间窗,如 7d / 90d / 2026-10-01')
+    .option('--limit <n>', '最多显示多少条 (list 默认 50,search 默认 10)')
+    .option('--exact', 'search: 线性精确检索(覆盖全部工具输出,较慢)')
+    .option('--around <text>', 'show: 定位到包含该文字的片段附近')
     .option('--json', '输出 JSON')
     .action(
-      async (opts: {
-        harness?: string;
-        device?: string;
-        grep?: string;
-        limit?: string;
-        json?: boolean;
-      }) => {
-        await cmdSessions(opts, paths, out);
+      async (
+        action: string | undefined,
+        value: string | undefined,
+        opts: {
+          harness?: string;
+          device?: string;
+          grep?: string;
+          since?: string;
+          limit?: string;
+          exact?: boolean;
+          around?: string;
+          json?: boolean;
+        },
+      ) => {
+        if (action === 'search') {
+          if (!value) {
+            err('用法: trove sessions search <query>');
+            return;
+          }
+          await cmdSessionsSearch(value, opts, paths, out, now());
+        } else if (action === 'show') {
+          if (!value) {
+            err('用法: trove sessions show <id>');
+            return;
+          }
+          await cmdSessionShow(value, opts, paths, out);
+        } else if (action === undefined) {
+          await cmdSessions(opts, paths, out);
+        } else {
+          err(`未知的 sessions 子命令: ${action}`);
+        }
       },
     );
 
@@ -1118,6 +1383,56 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('从设备分片重建统一索引')
     .action(async () => {
       await cmdLibraryReindex(paths, out);
+    });
+
+  const indexCmd = program.command('index').description('检索索引管理');
+  indexCmd
+    .command('build')
+    .description('构建/更新会话检索索引 (~/.trove/cache/search.sqlite)')
+    .option('--force', '忽略 hash,全量重建')
+    .option('--since <range>', '只索引时间窗内的会话,如 365d')
+    .option('--quiet', '不输出统计')
+    .action(async (opts: { force?: boolean; since?: string; quiet?: boolean }) => {
+      await cmdIndexBuild(opts, paths, out, now());
+    });
+
+  program
+    .command('mcp')
+    .description('启动 stdio MCP 服务(供 Claude Code / Codex / OpenCode 接入)')
+    .action(async () => {
+      const { runMcpServer } = await import('./mcp/server.js');
+      await runMcpServer({ vault: paths.vault, cacheDir: paths.cache, version: VERSION, now });
+    });
+
+  const skillCmd = program.command('skill').description('安装/卸载 trove skill');
+  skillCmd
+    .command('install')
+    .description('安装到 ~/.claude/skills 与/或 ~/.agents/skills')
+    .option('--target <target>', 'claude / agents / both', 'both')
+    .option('--force', '覆盖已存在且被修改过的目标')
+    .action(async (opts: { target?: string; force?: boolean }) => {
+      const result = await installSkill({
+        target: (opts.target ?? 'both') as SkillTarget,
+        force: opts.force === true,
+        version: VERSION,
+      });
+      for (const p of result.installed) out(pc.green(`已安装: ${p}`));
+      for (const p of result.skipped) out(pc.yellow(`跳过: ${p}`));
+      if (!result.installed.length && !result.skipped.length) out('没有可安装的目标。');
+    });
+  skillCmd
+    .command('uninstall')
+    .description('从 ~/.claude/skills 与/或 ~/.agents/skills 卸载')
+    .option('--target <target>', 'claude / agents / both', 'both')
+    .option('--force', '删除没有 trove 安装标记的目录')
+    .action(async (opts: { target?: string; force?: boolean }) => {
+      const result = await uninstallSkill({
+        target: (opts.target ?? 'both') as SkillTarget,
+        force: opts.force === true,
+      });
+      for (const p of result.installed) out(pc.green(`已卸载: ${p}`));
+      for (const p of result.skipped) out(pc.yellow(`跳过: ${p}`));
+      if (!result.installed.length && !result.skipped.length) out('没有找到已安装的 skill。');
     });
 
   program
@@ -1197,7 +1512,12 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   program
     .command('status')
     .description('概览(本地归档、远端、daemon、待同步)')
-    .action(async () => {
+    .option('--json', '输出机器可读 JSON')
+    .action(async (opts: { json?: boolean }) => {
+      if (opts.json) {
+        await cmdStatusJson(paths, out);
+        return;
+      }
       await cmdStatus(paths, createRemote, resolveAdapters, out, now);
     });
 

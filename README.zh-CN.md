@@ -188,9 +188,38 @@ trove sessions --harness codex --json
 trove skills show review        # 某技能的全部版本与来源
 trove library reindex           # 从设备分片重建统一索引
 trove usage --since 7d --json
+trove whoami                    # 用户画像、偏好、近期方向
+trove lessons search "飞书 编辑" # FTS5 检索经验
+trove lessons show <path>       # 读单条 lesson
+trove sessions search "COS 签名" # FTS5 会话检索
+trove sessions search "SignatureDoesNotMatch" --exact  # 线性精确检索
+trove sessions show <id> --around "SignatureDoesNotMatch"
+trove index build               # 构建/更新会话检索索引
+trove status --json             # 机器可读概览
 ```
 
 `trove status` 报四件事：每个工具在本地归档了多少（数量和体积）、远端是否可达（5 秒探测、设备数、最后在线时间）、daemon 的状态和最近一轮结果、还剩什么没同步（按会话 / 文件 / 技能分类计数）。
+
+### 给 agent 的知识库（skill + MCP）
+
+`trove mcp` 通过 stdio 暴露 7 个只读工具；`trove skill install` 把配套 skill 安装到 `~/.claude/skills` 与/或 `~/.agents/skills`。CLI 与 MCP 一一对应：
+
+| MCP 工具 | CLI | 返回 |
+|---|---|---|
+| `trove_whoami` | `trove whoami` | 用户画像、偏好、近期方向 |
+| `trove_lessons_search` | `trove lessons search` | 经验：偏好、实体、经验、决策 |
+| `trove_lesson_get` | `trove lessons show` | 单条 lesson，可按小节或行范围读取 |
+| `trove_lessons_list` | `trove lessons list` | 浏览某个类目 |
+| `trove_sessions_search` | `trove sessions search` | 历史会话；精确标识符加 `--exact` |
+| `trove_session_get` | `trove sessions show` | 命中位置附近的事件 |
+| `trove_status` | `trove status --json` | 索引与数据新鲜度 |
+
+检索底层是 Node 22 内置 `node:sqlite` 的 **SQLite FTS5 + BM25**，中文按 2-gram 预处理。lessons 用进程内索引（约 280ms 冷构建）；sessions 用持久化增量索引 `~/.trove/cache/search.sqlite`（本机缓存，可删除重建，不参与同步）。报错码、函数名、路径等精确标识符用 `--exact` 线性 grep 兜底——它会覆盖索引只保留前 1KB 的工具输出。
+
+```bash
+claude mcp add trove -- trove mcp
+trove skill install --target both
+```
 
 ### 删除必须显式
 
@@ -214,6 +243,13 @@ trove clean --yes       # 直接删
 | `trove clean` | 清理不再被索引引用的远端旧对象（超过 24 小时） |
 | `trove status` | 概览：本地、远端、daemon、待同步 |
 | `trove sessions` | 列出和检索 library 会话 |
+| `trove whoami` | 用户画像、偏好、近期方向 |
+| `trove lessons` | 对经验做 `search` / `show` / `list` |
+| `trove sessions search` | FTS5 会话检索；精确标识符加 `--exact` |
+| `trove sessions show` | 读取命中位置附近的事件 |
+| `trove index build` | 构建/更新会话检索索引 |
+| `trove mcp` | 启动 stdio MCP 服务 |
+| `trove skill` | 安装/卸载 trove skill |
 | `trove skills` | 列出汇总后的技能，或 `show <name>` 看全部版本 |
 | `trove library reindex` | 从设备分片重建统一索引 |
 | `trove learn` | 提取经验，或 `--list` 审计上一轮 |

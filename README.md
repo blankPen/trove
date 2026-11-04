@@ -188,9 +188,38 @@ trove sessions --harness codex --json
 trove skills show review        # every version and origin of one skill
 trove library reindex           # rebuild the unified index from device shards
 trove usage --since 7d --json
+trove whoami                    # profile, preferences, recent direction
+trove lessons search "edit button"   # FTS5 over lessons
+trove lessons show <path>       # read one lesson
+trove sessions search "COS signature" # FTS5 over sessions
+trove sessions search "SignatureDoesNotMatch" --exact  # linear grep
+trove sessions show <id> --around "SignatureDoesNotMatch"
+trove index build               # build/update the session search index
+trove status --json             # machine-readable overview
 ```
 
 `trove status` reports four things: what each tool has archived locally (count and size), whether the remote is reachable (5 s probe, device count, last seen), the daemon's state and last result, and what is still pending — sessions, files and skills by category.
+
+### Knowledge base for agents (skill + MCP)
+
+`trove mcp` exposes seven read-only tools over stdio; `trove skill install` puts the matching skill in `~/.claude/skills` and/or `~/.agents/skills`. The CLI and MCP surfaces are one-to-one:
+
+| MCP tool | CLI | What it returns |
+|---|---|---|
+| `trove_whoami` | `trove whoami` | Profile, preferences and recent direction |
+| `trove_lessons_search` | `trove lessons search` | Lessons: preferences, entities, experiences, decisions |
+| `trove_lesson_get` | `trove lessons show` | One lesson, optionally a section or line range |
+| `trove_lessons_list` | `trove lessons list` | Browse a lessons category |
+| `trove_sessions_search` | `trove sessions search` | Historical sessions; `--exact` for identifiers |
+| `trove_session_get` | `trove sessions show` | Events around a match |
+| `trove_status` | `trove status --json` | Index and data freshness |
+
+Search is **SQLite FTS5 + BM25** through Node's built-in `node:sqlite`, with CJK 2-gram preprocessing. Lessons use an in-process index (~280 ms cold); sessions use a persistent incremental index at `~/.trove/cache/search.sqlite` (local cache, rebuildable, never synced). Exact identifiers — error codes, function names, paths — fall back to `--exact` linear grep, which covers the tool output the index truncates to 1 KB.
+
+```sh
+claude mcp add trove -- trove mcp
+trove skill install --target both
+```
 
 ### Deletion is explicit
 
@@ -214,6 +243,13 @@ Safety rules: a missing device index skips that whole device; a single unreadabl
 | `trove clean` | Remove unreferenced remote objects older than 24 h |
 | `trove status` | Overview: local, remote, daemon, pending |
 | `trove sessions` | List and search library sessions |
+| `trove whoami` | Profile, preferences and recent direction |
+| `trove lessons` | `search` / `show` / `list` over extracted lessons |
+| `trove sessions search` | FTS5 session search; `--exact` for identifiers |
+| `trove sessions show` | Read events around a match |
+| `trove index build` | Build/update the session search index |
+| `trove mcp` | Start the stdio MCP server |
+| `trove skill` | `install` / `uninstall` the trove skill |
 | `trove skills` | List merged skills, or `show <name>` for every version |
 | `trove library reindex` | Rebuild the unified index from device shards |
 | `trove learn` | Extract lessons, or `--list` to audit the last run |

@@ -38,6 +38,8 @@ export interface PushLibraryOptions {
   vaultRoot: string;
   deviceId: string;
   state: State;
+  /** 当前远端身份;变了说明推送水位属于旧后端,必须整份重推。 */
+  remoteId?: string;
   /** 用于周期性落盘进度:中断后已完成文件不会被重推 */
   statePath: string;
   progress?: Progress;
@@ -84,6 +86,15 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
   let n = 0;
   let lastCheckpoint = Date.now();
 
+  // 换后端时旧后端的推送记账对新远端无效:就地清空并立刻落盘。
+  // 这样即使进程中途被杀,下次也只会补传未完成的文件,而不是把整份 library 重推。
+  if (opts.remoteId && state.library.remoteId !== opts.remoteId) {
+    state.library.pushed = {};
+    state.library.remoteId = opts.remoteId;
+    await saveState(opts.statePath, state);
+  }
+  const sameRemote = !opts.remoteId || state.library.remoteId === opts.remoteId;
+
   // 中断(abort/报错)时保住已完成文件的记账:重启后按 state 跳过,不整轮重推
   const checkpoint = async () => {
     await saveState(opts.statePath, state);
@@ -97,7 +108,7 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
       const abs = join(root, ...rel.split('/'));
       const st = await stat(abs);
       const prev = state.library.pushed[rel];
-      if (prev && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs)) {
+      if (sameRemote && prev && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs)) {
         skipped++;
         continue;
       }
@@ -136,6 +147,12 @@ async function localHash(path: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** 远端 404:索引引用的文件不存在(分片悬空),可跳过而不是中断整轮同步。 */
+function isNotFound(err: unknown): boolean {
+  const e = err as { status?: number; statusCode?: number; response?: { status?: number } };
+  return (e?.status ?? e?.statusCode ?? e?.response?.status) === 404;
 }
 
 /** 递归列远端目录下的文件(RemoteStore.list 只列一层)。 */
@@ -212,6 +229,11 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
         await rename(tmp, abs);
       } catch (err) {
         await unlink(tmp).catch(() => {});
+        // 分片可能来自已离线设备或旧数据,引用了不存在的对象:跳过,不影响其他文件
+        if (isNotFound(err)) {
+          console.warn(`[trove] 远端缺少索引引用的文件,已跳过: ${entry.path}`);
+          continue;
+        }
         throw err;
       }
       pulled[entry.path] = entry.hash;
@@ -249,6 +271,10 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
               await rename(tmp, target);
             } catch (err) {
               await unlink(tmp).catch(() => {});
+              if (isNotFound(err)) {
+                console.warn(`[trove] 远端缺少技能文件,已跳过: ${rel}`);
+                continue;
+              }
               throw err;
             }
             downloaded++;

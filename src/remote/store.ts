@@ -2,12 +2,20 @@ export interface RemoteEntry {
   name: string;
   type: 'file' | 'directory';
   size: number;
+  /** 最后修改时间(ms);后端不提供时缺省,清理逻辑对缺失值一律不删。 */
+  mtime?: number;
 }
 
 /** 远端只要求 7 个原语;WebDAV/内存实现同一接口,编排逻辑可单测。 */
 export interface RemoteStore {
   /** 列出某个目录的直接子项(不递归);目录不存在返回空数组。signal 用于短超时探测。 */
   list(path: string, signal?: AbortSignal): Promise<RemoteEntry[]>;
+
+  /**
+   * 递归列出前缀下所有文件,name 为完整路径。对象存储一次 ListObjectsV2 即可,
+   * 避免逐目录几千次往返。不实现时调用方回退为逐层 list。
+   */
+  listAll?(prefix: string, signal?: AbortSignal): Promise<RemoteEntry[]>;
 
   /** 远端根下的设备目录名(无嵌套)。 */
   listDevices(): Promise<string[]>;

@@ -2,6 +2,15 @@
 
 AI 会话资产归档工具:把本机 Claude Code / Codex / OpenCode / 豆包的会话**无损**归档到 WebDAV 或 S3 兼容对象存储,并支持多设备增量同步。
 
+## 安装
+
+```bash
+npm i -g trove-cli    # 提供 trove 命令
+npx trove-cli --help  # 免安装试用
+```
+
+npm 上的 `trove` 已被他人占用,本项目发布为 `trove-cli`,命令行仍叫 `trove`。
+
 ## 用法
 
 ```bash
@@ -177,3 +186,14 @@ pnpm test          # 单元 + 真实 WebDAV 服务集成 + 真实本机会话扫
 pnpm typecheck
 pnpm build
 ```
+
+## 发版
+
+合并到 `main` 即自动发版(`.github/workflows/release.yml`):
+
+1. PR 里改好 `package.json` 的 `version`,合并进 `main`
+2. Actions 装依赖 → 构建 → 跑测试 → 发布到 npm → 打 tag `v<version>` 并生成 GitHub Release(附带 npm 包 tarball)
+
+一次性配置:仓库 Settings → Secrets and variables → Actions → 新建 `NPM_TOKEN`(npm automation token,勾 read & publish)。没配这个 secret 时工作流只生成 GitHub Release,跳过 npm 发布。
+
+重复触发是幂等的:npm 上已有该版本就跳过发布,GitHub Release 已存在就跳过建 Release,两样都做完就整体跳过。

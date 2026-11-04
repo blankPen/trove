@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: write # 建 tag + GitHub Release
-  id-token: write # npm publish --provenance
+  id-token: write # npm trusted publishing(OIDC)+ provenance
 
 concurrency:
   group: release-${{ github.ref }}
@@ -36,10 +36,14 @@ jobs:
       - run: pnpm build
       - run: pnpm test
 
+      - name: Upgrade npm CLI
+        run: npm install -g npm@12 # trusted publishing 需要 npm ≥ 11.5.1
+
       - name: Publish to npm and create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           name=$(node -p "require('./package.json').name")
@@ -57,10 +61,18 @@ jobs:
           fi
 
           if [ "$published" = 0 ]; then
-            if [ -z "${NPM_TOKEN:-}" ]; then
-              echo "未配置 NPM_TOKEN secret,跳过 npm publish"
-            elif ! npm publish --provenance --access public; then
-              echo "::error::npm publish 失败。报 2FA / bypass 2FA 相关错误时,token 需要是勾选了 Bypass 2FA 的 granular access token(Read and write)。"
+            if ! npm publish --provenance --access public; then
+              echo "::error::npm publish 失败。token 需勾选 Bypass 2FA;若报 trusted publishing 相关错误,需在 npmjs.com 给 $name 配置 Trusted Publisher(GitHub Actions:$REPO,工作流 release.yml)。"
+              exit 1
+            fi
+            # 新版本在 registry 上线要一会儿;stage-only token 只会暂存,不会真正上线
+            for i in $(seq 1 10); do
+              if npm view "$name@$version" version >/dev/null 2>&1; then break; fi
+              echo "等待 $name@$version 在 npm 上线($i/10)"
+              sleep 20
+            done
+            if ! npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "::error::$name@$version 没有真正上线。stage-only token 只会暂存版本,需要维护者执行 npm stage approve <stage-id> --otp <code>;或改用 trusted publishing。"
               exit 1
             fi
           fi

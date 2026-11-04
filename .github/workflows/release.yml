@@ -65,11 +65,11 @@ jobs:
               echo "::error::npm publish 失败。token 需勾选 Bypass 2FA;若报 trusted publishing 相关错误,需在 npmjs.com 给 $name 配置 Trusted Publisher(GitHub Actions:$REPO,工作流 release.yml)。"
               exit 1
             fi
-            # 新版本在 registry 上线要一会儿;stage-only token 只会暂存,不会真正上线
-            for i in $(seq 1 10); do
+            # 新版本在 registry 上线要等一会儿(实测最长 4 分钟);stage-only token 只会暂存,不会真正上线
+            for i in $(seq 1 20); do
               if npm view "$name@$version" version >/dev/null 2>&1; then break; fi
-              echo "等待 $name@$version 在 npm 上线($i/10)"
-              sleep 20
+              echo "等待 $name@$version 在 npm 上线($i/20)"
+              sleep 30
             done
             if ! npm view "$name@$version" version >/dev/null 2>&1; then
               echo "::error::$name@$version 没有真正上线。stage-only token 只会暂存版本,需要维护者执行 npm stage approve <stage-id> --otp <code>;或改用 trusted publishing。"

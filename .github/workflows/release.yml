@@ -1,0 +1,70 @@
+name: Release
+
+# 合并到 main 即发版:版本号取自 package.json,PR 里改好版本再合并。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 建 tag + GitHub Release
+  id-token: write # npm publish --provenance
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+      - name: Publish to npm and create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ env.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          tag="v$version"
+
+          published=0
+          if npm view "$name@$version" version >/dev/null 2>&1; then published=1; fi
+          released=0
+          if gh release view "$tag" >/dev/null 2>&1; then released=1; fi
+
+          if [ "$published" = 1 ] && [ "$released" = 1 ]; then
+            echo "$tag 已发布(npm + GitHub Release),跳过"
+            exit 0
+          fi
+
+          if [ "$published" = 0 ]; then
+            if [ -z "${NPM_TOKEN:-}" ]; then
+              echo "未配置 NPM_TOKEN secret,跳过 npm publish"
+            else
+              npm publish --provenance --access public
+            fi
+          fi
+
+          if [ "$released" = 0 ]; then
+            npm pack
+            gh release create "$tag" --title "$tag" --generate-notes "./${name}-${version}.tgz"
+          fi

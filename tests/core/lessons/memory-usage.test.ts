@@ -3,9 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
+import type { StorageAdapter } from '../../../src/core/lessons/storage.js';
 import {
   readMemoryUsage,
   recordMemoryUsage,
+  recordMemoryUsageBatch,
   summarizeMemoryUsage,
 } from '../../../src/core/lessons/memory-usage.js';
 
@@ -81,4 +83,51 @@ describe('记忆使用事件(.trove/usage.jsonl)', () => {
     expect(map.get('exp_2')!.harmful).toBe(1);
     expect(map.get('exp_2')!.lastUsedAt).toBe('2026-01-04T00:00:00.000Z');
   });
+
+  it('批量追加:一次读+一次写,顺序追加,无 memory_id 的事件被过滤', async () => {
+    const s = new CountingStorage();
+    await recordMemoryUsageBatch(s, [
+      { at: '2026-01-01T00:00:00.000Z', memory_id: 'exp_1', action: 'retrieved' },
+      { at: '2026-01-01T00:00:00.000Z', memory_id: '', action: 'retrieved' },
+      { at: '2026-01-02T00:00:00.000Z', memory_id: 'exp_2', action: 'viewed' },
+    ]);
+
+    expect(s.reads).toBe(1);
+    expect(s.writes).toBe(1);
+    expect((await readMemoryUsage(s)).map((e) => e.memory_id)).toEqual(['exp_1', 'exp_2']);
+  });
+
+  it('批量追加空数组不读写', async () => {
+    const s = new CountingStorage();
+    await recordMemoryUsageBatch(s, []);
+    expect(s.reads).toBe(0);
+    expect(s.writes).toBe(0);
+  });
 });
+
+/** 计数 read/write 次数的内存 storage,验证批量写只碰一次盘。 */
+class CountingStorage implements StorageAdapter {
+  reads = 0;
+  writes = 0;
+  private store = new Map<string, string>();
+
+  async read(path: string): Promise<string | null> {
+    this.reads++;
+    return this.store.get(path) ?? null;
+  }
+
+  async write(path: string, text: string): Promise<void> {
+    this.writes++;
+    this.store.set(path, text);
+  }
+
+  async exists(): Promise<boolean> {
+    return false;
+  }
+
+  async delete(): Promise<void> {}
+
+  async list(): Promise<string[]> {
+    return [];
+  }
+}

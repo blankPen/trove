@@ -4,7 +4,7 @@ import type { SessionSummary } from './analyze.js';
 import type { DecisionReason, DecisionRecord, DecisionSource } from './decisions.js';
 import type { JevProvider } from './jev.js';
 import type { LlmProvider } from './llm.js';
-import type { EvidenceRef } from './memory.js';
+import type { EvidenceRef, QualityScore } from './memory.js';
 
 export interface GateResult {
   decision: 'accept' | 'reject' | 'escalate';
@@ -46,6 +46,10 @@ export interface ExistingForGate {
   title: string;
   content: string;
   type: string;
+  scope?: string;
+  /** 容量淘汰建议用;parseMemory 读回,旧文件缺省。 */
+  quality?: QualityScore;
+  useCount?: number;
 }
 
 export interface DecisionGateway {

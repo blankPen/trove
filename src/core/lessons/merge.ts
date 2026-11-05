@@ -26,6 +26,7 @@ export interface MemoryMeta {
   supersedes?: string;
   promptVersion?: string;
   confidence?: number;
+  scope?: string;
 }
 
 export type MemoryOp =
@@ -143,7 +144,7 @@ export async function mergeMemoriesV2(
 
 async function resolveV2(c: MemoryCandidateV2, existing: ExistingForGate[], deps: V2MergeDeps): Promise<MemoryOp | null> {
   const gate: CandidateForGate = { type: c.type, title: c.title, content: c.content, evidence: c.evidence };
-  const top = topSimilar(gate, existing);
+  const top = topSimilar(gate, c.scope, existing);
   let identity = await deps.gateway.resolveIdentity(gate, top);
   if (identity.decision === 'escalate') {
     // 边界带交 LLM 身份裁决;失败回退 add(非破坏性)
@@ -163,6 +164,7 @@ async function resolveV2(c: MemoryCandidateV2, existing: ExistingForGate[], deps
     sourceTrajectories: c.sourceTrajectories,
     promptVersion: 'exp-v3',
     confidence: c.confidence ?? identity.confidence,
+    ...(c.scope ? { scope: c.scope } : {}),
   };
 
   // 同路径已存在时不新增覆盖:append 追加 / patch 合并 / add 幂等跳过(v1 口径)。
@@ -222,14 +224,21 @@ async function mergeContentV2(c: MemoryCandidateV2, existing: ExistingForGate | 
   return typeof raw?.content === 'string' ? raw.content : c.content;
 }
 
-/** 同 type 旧记忆按标题字符 2-gram 交集(Dice)打分取前 5。 */
-function topSimilar(c: CandidateForGate, existing: ExistingForGate[]): ExistingForGate[] {
+/** 同 type 且 scope 兼容(相同或任一方 global)的旧记忆按标题字符 2-gram 交集(Dice)打分取前 5。 */
+function topSimilar(c: CandidateForGate, scope: string | undefined, existing: ExistingForGate[]): ExistingForGate[] {
   return existing
-    .filter((e) => e.type === c.type)
+    .filter((e) => e.type === c.type && scopeCompatible(scope, e.scope))
     .map((e) => ({ e, score: titleScore(c.title, e.title) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 5)
     .map((x) => x.e);
+}
+
+/** scope 兼容:相同,或任一方缺失/global(旧 global 可被任意项目合并)。 */
+function scopeCompatible(a: string | undefined, b: string | undefined): boolean {
+  const A = a ?? 'global';
+  const B = b ?? 'global';
+  return A === B || A === 'global' || B === 'global';
 }
 
 function titleScore(a: string, b: string): number {

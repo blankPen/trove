@@ -39,6 +39,15 @@ export async function recordMemoryUsage(storage: StorageAdapter, e: MemoryUsageE
   await storage.write(USAGE_PATH, existing + JSON.stringify(record) + '\n');
 }
 
+/** 批量追加:过滤掉无 memory_id 的事件,一次读+一次写;空数组不落盘。 */
+export async function recordMemoryUsageBatch(storage: StorageAdapter, events: MemoryUsageEvent[]): Promise<void> {
+  const valid = events.filter((e) => e.memory_id);
+  if (valid.length === 0) return;
+  const existing = (await storage.read(USAGE_PATH)) ?? '';
+  const lines = valid.map((e) => JSON.stringify({ ...e, at: e.at || new Date().toISOString() }));
+  await storage.write(USAGE_PATH, existing + lines.join('\n') + '\n');
+}
+
 /** 读取使用事件;损坏行与非法记录跳过,不抛错。 */
 export async function readMemoryUsage(
   storage: StorageAdapter,

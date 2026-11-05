@@ -153,6 +153,26 @@ describe('applyOperations · v2 meta', () => {
     expect(parseMemory((await storage.read('experiences/g.md'))!)!.supersedes).toBe('exp_OLD');
   });
 
+  it('add 用 meta.scope 渲染 scope,缺省 global', async () => {
+    await applyOperations(
+      [{ op: 'add', type: 'experiences/gotcha', path: 'experiences/g.md', title: '标题', content: '正文', evidence: [], meta: meta({ scope: 'project:a' }) }],
+      { storage, now: () => t0 },
+    );
+    expect(parseMemory((await storage.read('experiences/g.md'))!)!.scope).toBe('project:a');
+  });
+
+  it('patch 旧 global 被项目 meta.scope 升级', async () => {
+    await applyOperations(
+      [{ op: 'add', type: 'experiences/gotcha', path: 'experiences/g.md', title: '旧标题', content: '旧正文', evidence: [], meta: meta() }],
+      { storage, now: () => t0 },
+    );
+    await applyOperations(
+      [{ op: 'patch', type: 'experiences/gotcha', path: 'experiences/g.md', title: '新标题', content: '新正文', before: '旧正文', meta: meta({ scope: 'project:a' }) }],
+      { storage, now: () => t0 },
+    );
+    expect(parseMemory((await storage.read('experiences/g.md'))!)!.scope).toBe('project:a');
+  });
+
   it('归档只改 frontmatter 的 status,正文 status: 行不动', async () => {
     await applyOperations(
       [{ op: 'add', type: 'events/decision', path: 'events/2026-01-01-decided-a.md', title: '旧决策标题', content: '正文含\nstatus: 这是正文内容', evidence: [] }],

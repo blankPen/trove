@@ -142,6 +142,7 @@ describe('runLessonPipelineV2(端到端)', () => {
     expect(mem!.kind).toBe('experience');
     expect(mem!.evidence).toHaveLength(1);
     expect(mem!.sourceTrajectories).toHaveLength(1);
+    expect(mem!.scope).toBe('project:trove');
     expect(mem!.body).toContain('## 证据');
     expect(await storage.read(memPath!)).toContain('## 证据');
 
@@ -317,6 +318,22 @@ describe('runLessonPipelineV2(端到端)', () => {
     expect(r.skipReason).toBeUndefined();
     expect(r.diff?.summary.adds).toBe(1);
   });
+
+  it('容量满时经验 add 转 skip:audit skips 可见 + capacity_exceeded 决策', async () => {
+    // 预置一条同 scope(project:trove)的其它经验,使本会话新增 experiences 超 experiencesPerProject=1
+    await storage.write(
+      'experiences/workflow-existing.md',
+      '---\ntype: experiences/workflow\ntitle: "旧经验"\ntags: ["experiences"]\nscope: project:trove\n---\n\n旧正文\n',
+    );
+    const capacityLearn = { ...learn('auto'), capacity: { experiencesPerProject: 1, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 } };
+    const r = await runLessonPipelineV2('sess-1', { llm: llmFor([EXPERIENCE]), jev: jevAllHigh(), storage, learn: capacityLearn, loadEvents: async () => events, now: () => now });
+
+    expect(r.shadow).toBe(false);
+    expect(r.diff?.summary.adds).toBe(0);
+    expect(r.diff?.operations.skips.some((s) => s.reason === 'capacity_exceeded:experiences_project')).toBe(true);
+    const decisions = await readDecisions(storage);
+    expect(decisions.some((d) => d.decision === 'capacity_exceeded')).toBe(true);
+  });
 });
 
 describe('runLessonPipelineV2(review/auto 路由)', () => {
@@ -371,6 +388,8 @@ describe('runLessonPipelineV2(review/auto 路由)', () => {
     expect(r.pending).toBe(0);
     expect(r.diff?.summary.adds).toBe(1);
     const files = await storage.list();
-    expect(files.some((f) => f.startsWith('preferences/') && f.endsWith('.md') && !f.includes('/.'))).toBe(true);
+    const prefPath = files.find((f) => f.startsWith('preferences/') && f.endsWith('.md') && !f.includes('/.'));
+    expect(prefPath).toBeTruthy();
+    expect(parseMemory((await storage.read(prefPath!))!)!.scope).toBe('global');
   });
 });

@@ -8,6 +8,7 @@ import { newMemoryId } from './memory.js';
 import type { MemoryCandidateV2 } from './extract.js';
 import { mergeMemoriesV2 } from './merge.js';
 import { loadExistingForGate } from './existing.js';
+import { applyCapacity, DEFAULT_CAPACITY } from './capacity.js';
 import { applyOperations } from './write.js';
 import { appendDecision } from './decisions.js';
 import { recordReview } from './trust.js';
@@ -19,6 +20,7 @@ export interface InboxItem {
   title: string;
   content: string; // 五段式(证据段由写盘补)
   evidence: EvidenceRef[];
+  scope?: string;
   quality?: QualityScore;
   confidence?: number;
   trajectoryId?: string;
@@ -93,12 +95,12 @@ export async function updateInboxItem(
   return next;
 }
 
-/** 读 item → 转候选 → Gate C 合并 → 写盘;ops 为空(重复)也删除并记录。 */
+/** 读 item → 转候选 → Gate C 合并 → 容量检查 → 写盘;ops 为空(重复)也删除并记录。容量拒绝时保留 item。 */
 export async function acceptInboxItem(
   storage: StorageAdapter,
   id: string,
   deps: { gateway: DecisionGateway; llm: LlmProvider; learn: LearnConfig; now?: () => Date },
-): Promise<{ paths: string[]; removed: boolean }> {
+): Promise<{ paths: string[]; removed: boolean; reason?: string }> {
   const it = await readInboxItem(storage, id);
   if (!it) return { paths: [], removed: false };
   const now = deps.now ?? (() => new Date());
@@ -110,10 +112,15 @@ export async function acceptInboxItem(
     quality: it.quality,
     confidence: it.confidence,
     sourceTrajectories: it.trajectoryId ? [it.trajectoryId] : undefined,
+    ...(it.scope ? { scope: it.scope } : {}),
   };
   const existing = await loadExistingForGate(storage);
   const ops = await mergeMemoriesV2([candidate], existing, { gateway: deps.gateway, llm: deps.llm, learn: deps.learn });
-  const res = await applyOperations(ops, { storage, now: deps.now, source: it.session });
+  const capacityResult = applyCapacity(ops, existing, deps.learn.capacity ?? DEFAULT_CAPACITY);
+  if (capacityResult.rejected.length > 0) {
+    return { paths: [], removed: false, reason: capacityResult.rejected[0]!.decision.reason };
+  }
+  const res = await applyOperations(capacityResult.ops, { storage, now: deps.now, source: it.session });
   await appendDecision(storage, {
     at: now().toISOString(),
     session: it.session,

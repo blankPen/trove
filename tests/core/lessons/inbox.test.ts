@@ -145,4 +145,16 @@ describe('accept / reject', () => {
     expect(await readInboxItem(storage, 'inbox_aaa')).toBeNull();
     expect((await storage.list()).filter((f) => f.startsWith('experiences/') && f.endsWith('.md') && !f.includes('/.')).length).toBe(1);
   });
+
+  it('容量满时 accept 保留 inbox item 并返回 reason', async () => {
+    const capacityLearn = { ...learn, capacity: { experiencesPerProject: 1, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 } };
+    await storage.write('experiences/workflow-existing.md', '---\ntype: experiences/workflow\ntitle: "旧经验"\ntags: ["experiences"]\nscope: project:trove\n---\n\n旧正文\n');
+    await writeInboxItem(storage, item({ scope: 'project:trove' }));
+    const r = await acceptInboxItem(storage, 'inbox_aaa', { gateway: new HeuristicGateway(), llm: new MockLlm(() => ({ content: 'x' })), learn: capacityLearn, now: () => now });
+
+    expect(r.removed).toBe(false);
+    expect(r.paths).toEqual([]);
+    expect(r.reason).toBe('capacity_exceeded:experiences_project');
+    expect(await readInboxItem(storage, 'inbox_aaa')).not.toBeNull();
+  });
 });

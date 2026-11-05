@@ -72,6 +72,12 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
       trajectoryDays: nonNeg(l.lifecycle?.trajectoryDays, d.lifecycle.trajectoryDays),
       trajectoryMax: clampInt(l.lifecycle?.trajectoryMax, d.lifecycle.trajectoryMax, 0, 100000),
     },
+    capacity: {
+      experiencesPerProject: nonNeg(l.capacity?.experiencesPerProject, d.capacity.experiencesPerProject),
+      experiencesGlobal: nonNeg(l.capacity?.experiencesGlobal, d.capacity.experiencesGlobal),
+      profileBytes: nonNeg(l.capacity?.profileBytes, d.capacity.profileBytes),
+      entitiesPerType: nonNeg(l.capacity?.entitiesPerType, d.capacity.entitiesPerType),
+    },
   };
 }
 

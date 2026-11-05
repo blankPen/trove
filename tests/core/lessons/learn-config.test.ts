@@ -63,4 +63,17 @@ describe('readLearnConfig(v2 单轨学习配置)', () => {
     expect(got.lifecycle.archiveDays).toBe(30);
     expect(got.lifecycle.trajectoryMax).toBe(500);
   });
+
+  it('capacity 缺省补默认,部分覆盖保留,负值钳 0', () => {
+    expect(readLearnConfig().capacity).toEqual({
+      experiencesPerProject: 120,
+      experiencesGlobal: 600,
+      profileBytes: 8192,
+      entitiesPerType: 200,
+    });
+    const got = readLearnConfig(learn({ capacity: { experiencesPerProject: 5, experiencesGlobal: -1 } } as never));
+    expect(got.capacity.experiencesPerProject).toBe(5);
+    expect(got.capacity.experiencesGlobal).toBe(0);
+    expect(got.capacity.entitiesPerType).toBe(200);
+  });
 });

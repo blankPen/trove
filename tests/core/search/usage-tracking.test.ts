@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getLesson, searchLessons } from '../../../src/core/search/service.js';
-import { readMemoryUsage } from '../../../src/core/lessons/memory-usage.js';
+import { readMemoryUsage, recordMemoryUsage } from '../../../src/core/lessons/memory-usage.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 
 let vault: string;
@@ -78,5 +78,39 @@ describe('检索埋点(使用事件)', () => {
     await searchLessons(vault, { query: '旧记忆' });
 
     expect(await readMemoryUsage(storage)).toEqual([]);
+  });
+
+  it('searchLessons 读 usage 后按反馈重排(有帮助/检索的记忆排前)', async () => {
+    // 第二条与第一条 bm25 相同(同标题词、同正文),仅靠 usage 提升排到最前。
+    const abs = join(vault, 'library/lessons/experiences');
+    await writeFile(
+      join(abs, 'b.md'),
+      [
+        '---',
+        'id: "exp_track_2"',
+        'kind: experience',
+        'type: experiences/debug_pattern',
+        'title: "COS 签名 403 补充"',
+        'tags: ["experiences"]',
+        'scope: global',
+        'status: active',
+        'version: 1',
+        'evidence: []',
+        'created_at: "2026-01-01T00:00:00.000Z"',
+        'updated_at: "2026-01-01T00:00:00.000Z"',
+        'use_count: 0',
+        'helpful_count: 0',
+        '---',
+        '',
+        'S3 推送时报 SignatureDoesNotMatch。',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await recordMemoryUsage(storage, { at: '2026-01-02T00:00:00.000Z', memory_id: 'exp_track_2', action: 'retrieved' });
+    await recordMemoryUsage(storage, { at: '2026-01-02T00:00:00.000Z', memory_id: 'exp_track_2', action: 'helpful' });
+
+    const hits = await searchLessons(vault, { query: 'COS 签名' });
+    expect(hits[0]?.path).toBe('experiences/b.md');
   });
 });

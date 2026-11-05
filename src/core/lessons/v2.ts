@@ -7,6 +7,7 @@ import { summarizeSession, classifySession, renderEvents, anyCategory } from './
 import { extractTrajectoryFacts, writeTrajectory } from './trajectory.js';
 import { extractMemoriesV2, hasSensitiveSecret } from './extract.js';
 import type { MemoryCandidateV2 } from './extract.js';
+import { inferScope } from './scope.js';
 import { lintExperience, decideQuality } from './contract.js';
 import { verifyEvidence } from './evidence.js';
 import { newMemoryId, qualityTotal } from './memory.js';
@@ -15,6 +16,7 @@ import { JevDecisionGateway } from './gateway.js';
 import type { SessionDigest, GateResult } from './gateway.js';
 import { mergeMemoriesV2 } from './merge.js';
 import type { MemoryOp } from './merge.js';
+import { applyCapacity, DEFAULT_CAPACITY } from './capacity.js';
 import { loadExistingForGate } from './existing.js';
 import { applyOperations } from './write.js';
 import { buildMemoryDiff, writeMemoryDiff } from './audit.js';
@@ -159,6 +161,7 @@ export async function runLessonPipelineV2(
 
   // 6. 提取(与证据校验共用同一份 compacted 事件)
   const candidates = await extractMemoriesV2(summary, classification, compacted, { llm: deps.llm });
+  for (const c of candidates) c.scope = inferScope(c.type, project);
 
   // 7. 逐候选:contract → 证据 → Gate B → 质量/LLM 裁决
   const gateBResults = await gateway.screenCandidates(candidates.map((c) => ({ type: c.type, title: c.title, content: c.content, evidence: c.evidence })));
@@ -237,6 +240,7 @@ export async function runLessonPipelineV2(
       title: ic.c.title,
       content: ic.c.content,
       evidence: ic.c.evidence,
+      ...(ic.c.scope ? { scope: ic.c.scope } : {}),
       ...(ic.q ? { quality: ic.q } : {}),
       ...(ic.c.confidence !== undefined ? { confidence: ic.c.confidence } : {}),
       trajectoryId: trajId,
@@ -249,8 +253,12 @@ export async function runLessonPipelineV2(
 
   const existing = await loadExistingForGate(deps.storage);
   const ops = await mergeMemoriesV2(accepted, existing, { gateway, llm: deps.llm, learn: deps.learn });
+  const capacityResult = applyCapacity(ops, existing, deps.learn.capacity ?? DEFAULT_CAPACITY);
+  for (const { op } of capacityResult.rejected) {
+    emit({ stage: 'quality', decision: 'capacity_exceeded', source: 'heuristic', candidate: { type: op.type, title: op.title } });
+  }
   const inboxOps: MemoryOp[] = inboxCandidates.map(({ c }) => ({ op: 'skip', type: c.type, title: c.title, reason: 'inbox' }));
-  const allOps = [...ops, ...inboxOps];
+  const allOps = [...capacityResult.ops, ...inboxOps];
 
   const evidenceCoverage = candidates.length ? evidencePassed / candidates.length : 1;
   const v2 = { shadow, candidates: candidates.map((c) => ({ type: c.type, title: c.title })), evidenceCoverage };

@@ -38,7 +38,16 @@ export async function loadExistingForGate(storage: StorageAdapter): Promise<Exis
     if (text === null) continue;
     const mem = parseMemory(text);
     if (!mem) continue;
-    out.push({ id: mem.id || undefined, path, title: mem.title, content: mem.body.trim(), type: mem.type });
+    out.push({
+      id: mem.id || undefined,
+      path,
+      title: mem.title,
+      content: mem.body.trim(),
+      type: mem.type,
+      scope: mem.scope,
+      ...(mem.quality ? { quality: mem.quality } : {}),
+      useCount: mem.useCount,
+    });
   }
   return out;
 }

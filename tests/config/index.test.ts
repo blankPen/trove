@@ -98,6 +98,7 @@ describe('config(设计 §10.2)', () => {
       quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
       lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
+      capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
     });
 
     // 老配置没有 learn 字段 → 补默认
@@ -120,6 +121,7 @@ describe('config(设计 §10.2)', () => {
       quality: { autoAccept: 0.9, reviewFloor: 0.6, evidenceMin: 0.8 },
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
       lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
+      capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
     });
   });
 

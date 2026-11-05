@@ -73,4 +73,18 @@ describe('LessonsIndex', () => {
     expect(index.search({ query: '书' }).some((h) => h.path.includes('feishu'))).toBe(true);
     expect(index.get('../../etc/passwd')).toBeNull();
   });
+
+  it('解析 frontmatter scope 到 doc 与 hit', async () => {
+    const vault = await fixture();
+    await seed(
+      vault,
+      'experiences/proj-note.md',
+      { type: 'experiences/gotcha', title: '项目内经验', tags: ['experiences'], scope: 'project:trove' },
+      '这是项目内经验正文。',
+    );
+    index = await LessonsIndex.build(vault);
+    expect(index.get('experiences/proj-note.md')?.scope).toBe('project:trove');
+    const hit = index.search({ query: '项目内' }).find((h) => h.path === 'experiences/proj-note.md');
+    expect(hit?.scope).toBe('project:trove');
+  });
 });

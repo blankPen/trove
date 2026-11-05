@@ -13,8 +13,8 @@ function cand(over: Partial<MemoryCandidateV2> = {}): MemoryCandidateV2 {
   return { type: 'experiences/gotcha', title: 'ECONNRESET 时指数退避重试', content: '正文', evidence, ...over };
 }
 
-function ex(path: string, type = 'experiences/gotcha'): ExistingForGate {
-  return { id: 'exp_OLD', path, title: '旧标题', content: '旧正文', type };
+function ex(path: string, type = 'experiences/gotcha', scope?: string): ExistingForGate {
+  return { id: 'exp_OLD', path, title: '旧标题', content: '旧正文', type, ...(scope ? { scope } : {}) };
 }
 
 function gateway(resolve: (c: unknown, e: ExistingForGate[]) => IdentityResult | Promise<IdentityResult>, captured?: { existing: ExistingForGate[][] }): DecisionGateway {
@@ -90,6 +90,29 @@ describe('mergeMemoriesV2(Gate C → ops + meta)', () => {
     await mergeMemoriesV2([cand()], existing, { gateway: g, llm: new MockLlm(() => ({})), learn });
     expect(captured.existing[0]!.length).toBe(5);
     expect(captured.existing[0]!.every((e) => e.type === 'experiences/gotcha')).toBe(true);
+  });
+
+  it('topSimilar 过滤 scope 不兼容:不同项目不参与 Gate C', async () => {
+    const captured: { existing: ExistingForGate[][] } = { existing: [] };
+    const existing = [ex('experiences/g-1.md', 'experiences/gotcha', 'project:a')];
+    const g = gateway(() => ({ decision: 'add', confidence: 1, reasons: [], source: 'jev' }), captured);
+    await mergeMemoriesV2([cand({ scope: 'project:b' })], existing, { gateway: g, llm: new MockLlm(() => ({})), learn });
+    expect(captured.existing[0]!.length).toBe(0);
+  });
+
+  it('旧 global 记忆可被项目候选合并(scope 兼容)', async () => {
+    const captured: { existing: ExistingForGate[][] } = { existing: [] };
+    const existing = [ex('experiences/g-1.md', 'experiences/gotcha', 'global')];
+    const g = gateway(() => ({ decision: 'add', confidence: 1, reasons: [], source: 'jev' }), captured);
+    await mergeMemoriesV2([cand({ scope: 'project:a' })], existing, { gateway: g, llm: new MockLlm(() => ({})), learn });
+    expect(captured.existing[0]!.length).toBe(1);
+  });
+
+  it('add op meta.scope 继承候选 scope', async () => {
+    const g = gateway(() => ({ decision: 'add', confidence: 0.9, reasons: [], source: 'jev' }));
+    const ops = await mergeMemoriesV2([cand({ scope: 'project:a' })], [], { gateway: g, llm: new MockLlm(() => ({})), learn });
+    expect(ops[0]!.op).toBe('add');
+    if (ops[0]!.op === 'add') expect(ops[0]!.meta!.scope).toBe('project:a');
   });
 
   it('add op 的 evidence 保留 seq(旧 audit 口径)', async () => {

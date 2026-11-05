@@ -5,10 +5,11 @@ import { join } from 'node:path';
 import { computeLessonsSummary, type LessonsSummary } from '../../status.js';
 import { libraryLessonsDir } from '../layout.js';
 import { LocalStorageAdapter } from '../lessons/storage.js';
-import { recordMemoryUsage } from '../lessons/memory-usage.js';
+import { readMemoryUsage, recordMemoryUsageBatch, summarizeMemoryUsage } from '../lessons/memory-usage.js';
 import type { MemoryAction } from '../lessons/memory-usage.js';
 import { loadLibraryIndex } from '../library/index-file.js';
 import { LessonsIndex, resolveLessonPath, type LessonDoc, type LessonHit, type LessonQuery } from './lessons-index.js';
+import { applyUsageRanking } from './rank.js';
 import {
   SessionsIndex,
   type BuildStats,
@@ -70,34 +71,42 @@ export function closeSearchCache(): void {
 
 export async function searchLessons(vaultRoot: string, opts: LessonQuery): Promise<LessonHit[]> {
   const index = await getLessonsIndex(vaultRoot);
-  const hits = index.search(opts);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  let hits = index.search(opts);
+  try {
+    // 使用反馈排序;usage 读取失败不阻断检索,保留原排序。
+    hits = applyUsageRanking(hits, summarizeMemoryUsage(await readMemoryUsage(storage)), { cwd: opts.cwd });
+  } catch {
+    // 埋点/排序不影响检索结果
+  }
   const events = hits
     .map((hit, i) => ({ id: index.get(hit.path)?.id, action: 'retrieved' as MemoryAction, rank: i + 1 }))
     .filter((e): e is { id: string; action: MemoryAction; rank: number } => !!e.id);
-  await trackUsage(vaultRoot, events, opts.query);
+  await trackUsage(storage, events, opts.query);
   return hits;
 }
 
 /** 记录使用事件;写失败静默忽略,绝不拖垮检索。 */
 async function trackUsage(
-  vaultRoot: string,
+  storage: LocalStorageAdapter,
   events: { id: string; action: MemoryAction; rank?: number }[],
   query?: string,
 ): Promise<void> {
   if (events.length === 0) return;
-  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
-  for (const e of events) {
-    try {
-      await recordMemoryUsage(storage, {
-        at: new Date().toISOString(),
+  const now = new Date().toISOString();
+  try {
+    await recordMemoryUsageBatch(
+      storage,
+      events.map((e) => ({
+        at: now,
         memory_id: e.id,
         action: e.action,
         ...(query ? { query } : {}),
         ...(e.rank !== undefined ? { rank: e.rank } : {}),
-      });
-    } catch {
-      // 埋点失败不阻断检索
-    }
+      })),
+    );
+  } catch {
+    // 埋点失败不阻断检索
   }
 }
 
@@ -122,7 +131,7 @@ export async function getLesson(
   const index = await getLessonsIndex(vaultRoot);
   const doc = index.get(rel);
   if (!doc) return null;
-  if (doc.id) await trackUsage(vaultRoot, [{ id: doc.id, action: 'viewed' }]);
+  if (doc.id) await trackUsage(new LocalStorageAdapter(libraryLessonsDir(vaultRoot)), [{ id: doc.id, action: 'viewed' }]);
   let body = doc.body;
   if (opts.section) body = sliceSection(body, opts.section) ?? '';
   if (opts.lines) body = sliceLines(body, opts.lines);

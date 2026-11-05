@@ -7,6 +7,7 @@ import type { LlmProvider } from './llm.js';
 import type { EvidenceRef, MemoryV2 } from './memory.js';
 import { renderMemory } from './memory.js';
 import { slugify } from './schema.js';
+import { projectSlug } from './scope.js';
 import type { StorageAdapter } from './storage.js';
 
 export type TrajectoryOutcome = 'success' | 'failure' | 'partial' | 'unfinished' | 'unknown';
@@ -162,7 +163,7 @@ export function renderTrajectory(input: TrajectoryInput): { path: string; text: 
     type: 'trajectories/capture',
     title: facts.task || '未命名轨迹',
     tags: ['trajectory'],
-    scope: `project:${scopeSafe(project)}`,
+    scope: `project:${projectSlug(project) || 'unknown'}`,
     status: 'active',
     version: 1,
     evidence,
@@ -181,13 +182,6 @@ export async function writeTrajectory(storage: StorageAdapter, input: Trajectory
   const { path, text } = renderTrajectory(input);
   await storage.write(path, text);
   return { id: input.id, path };
-}
-
-/** scope 只允许 project:[A-Za-z0-9][A-Za-z0-9._-]*;取 cwd 最后一段,不可用字符折成 `_`。 */
-function scopeSafe(project: string): string {
-  const last = project.split('/').filter(Boolean).pop() ?? project;
-  const clean = last.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^[^A-Za-z0-9]+/, '');
-  return clean || 'unknown';
 }
 
 function buildPath(date: string, session: string, task: string): string {

@@ -22,6 +22,8 @@ export interface LessonDoc {
   /** v2 记忆 id;旧文件没有。 */
   id?: string;
   updatedAt?: string;
+  /** 项目作用域 global 或 project:<slug>;无 frontmatter 的文件没有。 */
+  scope?: string;
   body: string;
 }
 
@@ -31,6 +33,8 @@ export interface LessonHit {
   type: string;
   tags: string[];
   updatedAt?: string;
+  id?: string;
+  scope?: string;
   snippet: string;
   score: number;
   scoreParts: ScoreParts;
@@ -126,6 +130,7 @@ export class LessonsIndex {
           tags: fm?.tags ?? [],
           ...(fm?.id ? { id: fm.id } : {}),
           ...(fm?.updatedAt ? { updatedAt: fm.updatedAt } : {}),
+          ...(fm?.scope ? { scope: fm.scope } : {}),
           body,
         };
         docs.set(rel, doc);
@@ -202,6 +207,8 @@ export class LessonsIndex {
         type: row.type,
         tags,
         ...(row.updated_at ? { updatedAt: row.updated_at } : {}),
+        ...(doc?.id ? { id: doc.id } : {}),
+        ...(doc?.scope ? { scope: doc.scope } : {}),
         snippet: snippetAround(body, query) || clip(body, 160),
         score: parts.bm25 + parts.recency + parts.exact + parts.project,
         scoreParts: parts,
@@ -226,6 +233,8 @@ export class LessonsIndex {
         type: d.type,
         tags: d.tags,
         ...(d.updatedAt ? { updatedAt: d.updatedAt } : {}),
+        ...(d.id ? { id: d.id } : {}),
+        ...(d.scope ? { scope: d.scope } : {}),
         snippet: clip(d.body, 160),
         score: 0,
         scoreParts: { bm25: 0, recency: 0, exact: 0, project: 0 },

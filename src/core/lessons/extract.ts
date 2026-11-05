@@ -132,6 +132,8 @@ export interface MemoryCandidateV2 {
   content: string;
   slug?: string;
   evidence: EvidenceRef[];
+  /** 项目 scope(global 或 project:<slug>);提取阶段不填,由流水线 inferScope 回填。 */
+  scope?: string;
   /** 流水线回填,供 merge 写进 meta(提取阶段不填)。 */
   quality?: QualityScore;
   confidence?: number;

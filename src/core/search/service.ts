@@ -10,6 +10,10 @@ import type { MemoryAction } from '../lessons/memory-usage.js';
 import { loadLibraryIndex } from '../library/index-file.js';
 import { LessonsIndex, resolveLessonPath, type LessonDoc, type LessonHit, type LessonQuery } from './lessons-index.js';
 import { applyUsageRanking } from './rank.js';
+import { searchLessonsHybrid } from './hybrid.js';
+import { getEmbedder } from '../lessons/embedding.js';
+import type { EmbeddingConfig } from '../lessons/embedding.js';
+import { VectorIndex } from '../lessons/vector-index.js';
 import {
   SessionsIndex,
   type BuildStats,
@@ -20,6 +24,15 @@ import {
 
 export interface LessonResult extends LessonDoc {
   truncated: boolean;
+}
+
+/** 混合召回配置：由 CLI/MCP 从 learn.embedding 映射；缺省走纯 FTS。 */
+export interface SearchHybridConfig {
+  embedding: EmbeddingConfig;
+  vectorDb: string;
+  modelCache?: string;
+  recallTopK?: number;
+  rrfK?: number;
 }
 
 export interface SessionSearchResult {
@@ -69,10 +82,14 @@ export function closeSearchCache(): void {
   lessonsCache.clear();
 }
 
-export async function searchLessons(vaultRoot: string, opts: LessonQuery): Promise<LessonHit[]> {
+export async function searchLessons(
+  vaultRoot: string,
+  opts: LessonQuery,
+  hybrid?: SearchHybridConfig,
+): Promise<LessonHit[]> {
   const index = await getLessonsIndex(vaultRoot);
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
-  let hits = index.search(opts);
+  let hits = hybrid ? await hybridSearch(index, vaultRoot, opts, hybrid) : index.search(opts);
   try {
     // 使用反馈排序;usage 读取失败不阻断检索,保留原排序。
     hits = applyUsageRanking(hits, summarizeMemoryUsage(await readMemoryUsage(storage)), { cwd: opts.cwd });
@@ -84,6 +101,35 @@ export async function searchLessons(vaultRoot: string, opts: LessonQuery): Promi
     .filter((e): e is { id: string; action: MemoryAction; rank: number } => !!e.id);
   await trackUsage(storage, events, opts.query);
   return hits;
+}
+
+/** 打开向量索引做混合召回；向量库不存在/为空/损坏/无模型 → 一律回退纯 FTS，不报错。 */
+async function hybridSearch(
+  index: LessonsIndex,
+  vaultRoot: string,
+  opts: LessonQuery,
+  hybrid: SearchHybridConfig,
+): Promise<LessonHit[]> {
+  if (!existsSync(hybrid.vectorDb)) return index.search(opts);
+  let vectors: VectorIndex;
+  try {
+    vectors = VectorIndex.open(hybrid.vectorDb);
+  } catch {
+    return index.search(opts);
+  }
+  try {
+    if (vectors.count() === 0) return index.search(opts);
+    const embedder = await getEmbedder(hybrid.embedding, { cacheDir: hybrid.modelCache });
+    return await searchLessonsHybrid(vaultRoot, opts.query ?? '', opts, {
+      index,
+      embedder,
+      vectors,
+      recallTopK: hybrid.recallTopK,
+      rrfK: hybrid.rrfK,
+    });
+  } finally {
+    vectors.close();
+  }
 }
 
 /** 记录使用事件;写失败静默忽略,绝不拖垮检索。 */

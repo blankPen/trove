@@ -39,6 +39,8 @@ export interface V2RunDeps {
   now?: () => Date;
   /** 记忆已落盘、审计未写前回调(diff 可用于崩溃恢复 checkpoint);shadow 不调用。 */
   onWritten?: (diff: MemoryDiff) => Promise<void> | void;
+  /** 记忆落盘后的向量增量同步;失败静默(向量是可选增强,不阻断学习)。 */
+  syncVectors?: () => Promise<void> | void;
 }
 
 export interface V2RunResult {
@@ -275,6 +277,7 @@ export async function runLessonPipelineV2(
   await applyOperations(allOps, { storage: deps.storage, now: deps.now, source: sessionId });
   const diff = { ...buildMemoryDiff(allOps, { sessionId, project }), v2 };
   await deps.onWritten?.(diff);
+  void Promise.resolve(deps.syncVectors?.()).catch(() => {});
   await writeMemoryDiff(diff, deps.storage);
   await decisionTail;
   return { diff, shadow: false, pending: inboxCandidates.length };

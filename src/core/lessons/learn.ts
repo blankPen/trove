@@ -35,6 +35,8 @@ export interface LessonProviderDeps {
   config?: Pick<Config, 'llm' | 'jev' | 'learn'>;
   /** 记忆落盘后、审计写盘前的回调(runner 用来写崩溃恢复 checkpoint)。 */
   onWritten?: (diff: MemoryDiff) => Promise<void> | void;
+  /** 记忆落盘后的向量增量同步(生产由 CLI 注入;测试不注入以免联网)。 */
+  syncVectors?: () => Promise<void> | void;
 }
 
 export interface ExtractionOutcome {
@@ -105,6 +107,7 @@ export async function runLessonExtraction(
     loadEvents: (id) => loadSessionEvents(vaultRoot, id),
     now: deps.now,
     onWritten: deps.onWritten,
+    syncVectors: deps.syncVectors,
   }).catch((e) => {
     // 模型重试后仍输出非 JSON → 当跳过忽略,不记失败。
     if (e instanceof LlmParseError) return null;

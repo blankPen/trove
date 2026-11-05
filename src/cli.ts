@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { hostname, tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -22,6 +23,7 @@ import {
   listLessons,
   searchLessons,
   searchSessions,
+  type SearchHybridConfig,
 } from './core/search/service.js';
 import {
   formatLesson,
@@ -63,6 +65,9 @@ import { refreshSidecars } from './core/lessons/sidecar.js';
 import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders, migrateJsonQueue, enqueueLearnSessions } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
 import { JobQueue } from './core/lessons/jobs.js';
+import { getEmbedder } from './core/lessons/embedding.js';
+import { VectorIndex } from './core/lessons/vector-index.js';
+import { syncVectorIndex } from './core/lessons/vector-sync.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
 import { learnClaudeMemo } from './core/lessons/memo.js';
 import { learnRecentMatters } from './core/lessons/recent.js';
@@ -506,6 +511,54 @@ async function cmdWhoami(
   out(opts.json ? JSON.stringify(result, null, 2) : formatWhoami(result));
 }
 
+/** 从 learn.embedding 映射混合召回配置;配置不可读/关闭时返回 undefined(纯 FTS)。 */
+async function hybridSearchConfig(paths: ReturnType<typeof trovePaths>): Promise<SearchHybridConfig | undefined> {
+  try {
+    const learn = readLearnConfig(await loadConfig(paths.config));
+    if (!learn.embedding.enabled) return undefined;
+    return {
+      embedding: { enabled: true, model: learn.embedding.model, host: learn.embedding.host },
+      vectorDb: paths.vectorDb,
+      modelCache: paths.modelCache,
+      recallTopK: learn.embedding.recallTopK,
+      rrfK: learn.embedding.rrfK,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** 生产学习写盘后的向量增量同步;任何失败静默(向量是可选增强,不阻断学习)。 */
+async function syncVectors(paths: ReturnType<typeof trovePaths>): Promise<void> {
+  try {
+    const learn = readLearnConfig(await loadConfig(paths.config));
+    if (!learn.embedding.enabled) return;
+    const vectors = VectorIndex.open(paths.vectorDb);
+    try {
+      const embedder = await getEmbedder(
+        { enabled: true, model: learn.embedding.model, host: learn.embedding.host },
+        { cacheDir: paths.modelCache },
+      );
+      if (!embedder) return;
+      vectors.setMeta('model', learn.embedding.model);
+      await syncVectorIndex(paths.vault, vectors, embedder);
+    } finally {
+      vectors.close();
+    }
+  } catch {
+    // 向量同步失败不阻断学习
+  }
+}
+
+/** 测试注入 lessonDeps 时不自动接向量同步(防联网);生产(undefined)才接。 */
+function withVectorSync(
+  lessonDeps: LessonProviderDeps | undefined,
+  paths: ReturnType<typeof trovePaths>,
+): LessonProviderDeps {
+  if (lessonDeps) return lessonDeps;
+  return { syncVectors: () => syncVectors(paths) };
+}
+
 async function cmdLessonsSearch(
   query: string,
   opts: { category?: string; type?: string; since?: string; limit?: string; json?: boolean },
@@ -515,14 +568,19 @@ async function cmdLessonsSearch(
 ): Promise<void> {
   const since = opts.since ? (parseSince(opts.since, nowMs) ?? undefined) : undefined;
   const limit = Math.max(1, Math.min(50, Number(opts.limit) || 10));
-  const hits = await searchLessons(paths.vault, {
-    query,
-    ...(opts.category ? { category: opts.category } : {}),
-    ...(opts.type ? { type: opts.type } : {}),
-    ...(since ? { since } : {}),
-    limit,
-    cwd: process.cwd(),
-  });
+  const hybrid = await hybridSearchConfig(paths);
+  const hits = await searchLessons(
+    paths.vault,
+    {
+      query,
+      ...(opts.category ? { category: opts.category } : {}),
+      ...(opts.type ? { type: opts.type } : {}),
+      ...(since ? { since } : {}),
+      limit,
+      cwd: process.cwd(),
+    },
+    hybrid,
+  );
   out(
     opts.json
       ? JSON.stringify({ query, total: hits.length, results: hits }, null, 2)
@@ -938,7 +996,7 @@ async function cmdLearnReview(
 
   if (opts.acceptAll) {
     for (const it of items) {
-      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn });
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
       out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
     }
     await printTrust(storage, out);
@@ -974,14 +1032,14 @@ async function cmdLearnReview(
     });
     if (isCancel(action) || action === 'quit') break;
     if (action === 'accept') {
-      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn });
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
       out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
     } else if (action === 'reject') {
       await rejectInboxItem(storage, it.id);
       out(`已拒绝: ${it.title}`);
     } else if (action === 'edit') {
       if (await editInboxItem(storage, it, out)) {
-        const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn });
+        const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
         out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
       }
     }
@@ -1071,6 +1129,18 @@ async function cmdLearnStatus(
 ): Promise<void> {
   const queue = JobQueue.open(paths.learnDb);
   const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const config = await loadConfig(paths.config);
+  const learn = readLearnConfig(config);
+  let vectorCount = 0;
+  if (existsSync(paths.vectorDb)) {
+    try {
+      const v = VectorIndex.open(paths.vectorDb);
+      vectorCount = v.count();
+      v.close();
+    } catch {
+      // 索引损坏按 0 计,不阻断 status
+    }
+  }
   try {
     const s = queue.stats();
     const dead = queue.listDead(5);
@@ -1086,6 +1156,8 @@ async function cmdLearnStatus(
             inboxPending: inbox.length,
             trust: trust.level,
             staleMemories,
+            vectors: vectorCount,
+            vectorModel: learn.embedding.enabled ? learn.embedding.model : null,
           },
           null,
           2,
@@ -1098,6 +1170,7 @@ async function cmdLearnStatus(
         `队列: 待处理 ${s.queued} · 重试等待 ${s.retryWait} · 运行中 ${s.running} · 完成 ${s.done} · 跳过 ${s.skipped} · 死信 ${s.dead}`,
         `最老排队: ${s.oldestQueuedAt ? `${humanSpan(Date.now() - s.oldestQueuedAt)}前` : '-'} · p50 ${s.p50Ms ?? '-'}ms · p95 ${s.p95Ms ?? '-'}ms`,
         `inbox 待审 ${inbox.length} · 信任等级 L${trust.level} · stale 记忆 ${staleMemories}`,
+        `向量 ${vectorCount} · 模型 ${learn.embedding.enabled ? learn.embedding.model : '-'}`,
       ].join('\n'),
     );
     for (const j of dead) out(`  失败: ${j.sessionKey} · ${j.errorClass ?? '-'} · ${j.lastError}`);
@@ -1190,6 +1263,19 @@ async function cmdDoctor(paths: ReturnType<typeof trovePaths>, out: (l: string) 
     push(`learn.db 可打开(待处理 ${s.queued + s.retryWait} · 死信 ${s.dead})`, true);
   } catch (e) {
     push(`learn.db 可打开 —— ${(e as Error).message}`, false);
+  }
+
+  if (!existsSync(paths.vectorDb)) {
+    push('向量索引尚未构建(纯 FTS 降级可用)', true);
+  } else {
+    try {
+      const v = VectorIndex.open(paths.vectorDb);
+      const n = v.count();
+      v.close();
+      push(`向量索引可打开(${n} 条)`, true);
+    } catch (e) {
+      push(`向量索引 —— ${(e as Error).message}`, false);
+    }
   }
 
   try {
@@ -1622,6 +1708,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   const err = deps.err ?? ((l: string) => console.error(l));
   const rawOut = deps.rawOut ?? ((s: string) => process.stdout.write(s));
   const paths = trovePaths(deps.base);
+  const lessonDeps = withVectorSync(deps.lessonDeps, paths);
   const createRemote = deps.createRemote ?? defaultCreateRemote;
   const resolveAdapters = deps.resolveAdapters ?? defaultResolveAdapters;
   const now = deps.now ?? Date.now;
@@ -1910,7 +1997,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('启动 stdio MCP 服务(供 Claude Code / Codex / OpenCode 接入)')
     .action(async () => {
       const { runMcpServer } = await import('./mcp/server.js');
-      await runMcpServer({ vault: paths.vault, cacheDir: paths.cache, version: VERSION, now });
+      await runMcpServer({ vault: paths.vault, cacheDir: paths.cache, version: VERSION, now, hybrid: await hybridSearchConfig(paths) });
     });
 
   const skillCmd = program.command('skill').description('安装/卸载 trove skill');
@@ -1965,7 +2052,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
         if (sessionId === 'migrate') {
           await cmdLearnMigrate(paths, out, opts);
         } else if (sessionId === 'review') {
-          await cmdLearnReview(paths, deps.lessonDeps, out, interactive, opts);
+          await cmdLearnReview(paths, lessonDeps, out, interactive, opts);
         } else if (sessionId === 'why') {
           await cmdLearnWhy(paths, arg, out);
         } else if (sessionId === 'trust') {
@@ -1988,13 +2075,13 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
             err('用法: trove learn -n <正整数>');
             return;
           }
-          const config = deps.lessonDeps?.config ?? (await loadConfig(paths.config));
+          const config = lessonDeps?.config ?? (await loadConfig(paths.config));
           out(`准备提取最近 ${n} 个未学习会话...`);
-          const summary = await learnRecentBatch(paths.vault, n, { ...deps.lessonDeps, config }, { log: (l) => out(l) });
+          const summary = await learnRecentBatch(paths.vault, n, { ...lessonDeps, config }, { log: (l) => out(l) });
           out(pc.green(summary));
         } else if (sessionId) {
-          const config = deps.lessonDeps?.config ?? (await loadConfig(paths.config));
-          await cmdLearnExtract(paths, sessionId, { ...deps.lessonDeps, config }, out, opts.force === true);
+          const config = lessonDeps?.config ?? (await loadConfig(paths.config));
+          await cmdLearnExtract(paths, sessionId, { ...lessonDeps, config }, out, opts.force === true);
         } else {
           err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>] | trove learn review|why|trust|curator|status|pause|resume|retry');
         }
@@ -2006,7 +2093,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('学习 Claude Code 自带记忆系统(~/.claude/projects/*/memory)进入 lessons')
     .option('--force', '即使已学习过也强制重跑')
     .action(async (opts: { force?: boolean }) => {
-      await cmdLearnMemo(paths, deps.lessonDeps, out, opts.force === true);
+      await cmdLearnMemo(paths, lessonDeps, out, opts.force === true);
     });
 
   program
@@ -2014,7 +2101,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('从最近会话聚合用户近期工作方向(时间+项目+主题)写入 recent_matters')
     .option('--force', '即使输入无变化也强制重跑')
     .action(async (opts: { force?: boolean }) => {
-      await cmdLearnRecent(paths, deps.lessonDeps, out, opts.force === true);
+      await cmdLearnRecent(paths, lessonDeps, out, opts.force === true);
     });
 
   program
@@ -2179,7 +2266,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           createRemote,
           resolveAdapters,
           now,
-          deps.lessonDeps,
+          lessonDeps,
           config.daemon.learnIntervalSeconds,
           config.daemon.learnBatch,
         ),

@@ -78,6 +78,14 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
       profileBytes: nonNeg(l.capacity?.profileBytes, d.capacity.profileBytes),
       entitiesPerType: nonNeg(l.capacity?.entitiesPerType, d.capacity.entitiesPerType),
     },
+    embedding: {
+      enabled: l.embedding?.enabled !== false,
+      model: strNonEmpty(l.embedding?.model, d.embedding.model),
+      host: strNonEmpty(l.embedding?.host, d.embedding.host),
+      gateTopK: nonNeg(l.embedding?.gateTopK, d.embedding.gateTopK),
+      recallTopK: nonNeg(l.embedding?.recallTopK, d.embedding.recallTopK),
+      rrfK: nonNeg(l.embedding?.rrfK, d.embedding.rrfK),
+    },
   };
 }
 
@@ -89,6 +97,10 @@ function clamp01(v: unknown, fallback: number): number {
 function nonNeg(v: unknown, fallback: number): number {
   const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
   return n < 0 ? 0 : n;
+}
+
+function strNonEmpty(v: unknown, fallback: string): string {
+  return typeof v === 'string' && v !== '' ? v : fallback;
 }
 
 function clampInt(v: unknown, fallback: number, min: number, max: number): number {

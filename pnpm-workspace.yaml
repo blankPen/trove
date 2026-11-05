@@ -4,3 +4,5 @@ packages:
 allowBuilds:
   esbuild: true
   fast-xml-parser: true
+  onnxruntime-node: false
+  protobufjs: false

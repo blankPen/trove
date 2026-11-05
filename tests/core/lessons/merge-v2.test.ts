@@ -1,6 +1,11 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { mergeMemoriesV2 } from '../../../src/core/lessons/merge.js';
 import { MockLlm } from '../../../src/core/lessons/llm.js';
+import { VectorIndex } from '../../../src/core/lessons/vector-index.js';
+import type { Embedder } from '../../../src/core/lessons/embedding.js';
 import type { MemoryCandidateV2 } from '../../../src/core/lessons/extract.js';
 import type { DecisionGateway, IdentityResult, ExistingForGate } from '../../../src/core/lessons/gateway.js';
 import type { LearnConfig } from '../../../src/config.js';
@@ -13,8 +18,19 @@ function cand(over: Partial<MemoryCandidateV2> = {}): MemoryCandidateV2 {
   return { type: 'experiences/gotcha', title: 'ECONNRESET 时指数退避重试', content: '正文', evidence, ...over };
 }
 
-function ex(path: string, type = 'experiences/gotcha', scope?: string): ExistingForGate {
-  return { id: 'exp_OLD', path, title: '旧标题', content: '旧正文', type, ...(scope ? { scope } : {}) };
+function ex(path: string, type = 'experiences/gotcha', scope?: string, title = '旧标题'): ExistingForGate {
+  return { id: 'exp_OLD', path, title, content: '旧正文', type, ...(scope ? { scope } : {}) };
+}
+
+let tmpDirs: string[] = [];
+afterEach(async () => {
+  await Promise.all(tmpDirs.splice(0).map((d) => rm(d, { recursive: true, force: true })));
+});
+
+async function tmpDb(): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), 'trove-merge-v2-'));
+  tmpDirs.push(dir);
+  return join(dir, 'vectors.sqlite');
 }
 
 function gateway(resolve: (c: unknown, e: ExistingForGate[]) => IdentityResult | Promise<IdentityResult>, captured?: { existing: ExistingForGate[][] }): DecisionGateway {
@@ -161,5 +177,39 @@ describe('mergeMemoriesV2 · 同路径覆盖防护', () => {
     const c = cand({ slug: 'x' });
     const ops = await mergeMemoriesV2([c], existing, { gateway: g, llm: new MockLlm(() => ({})), learn });
     expect(ops).toHaveLength(0);
+  });
+});
+
+describe('mergeMemoriesV2 · Gate C 向量粗筛', () => {
+  function existing6(): ExistingForGate[] {
+    return [
+      ex('experiences/gotcha-semantic.md', 'experiences/gotcha', undefined, '对象存储上传失败的排查思路'),
+      ex('experiences/g-1.md', 'experiences/gotcha', undefined, 'ECONNRESET 重试 一'),
+      ex('experiences/g-2.md', 'experiences/gotcha', undefined, 'ECONNRESET 重试 二'),
+      ex('experiences/g-3.md', 'experiences/gotcha', undefined, 'ECONNRESET 重试 三'),
+      ex('experiences/g-4.md', 'experiences/gotcha', undefined, 'ECONNRESET 重试 四'),
+      ex('experiences/g-5.md', 'experiences/gotcha', undefined, 'ECONNRESET 重试 五'),
+    ];
+  }
+
+  it('注入假 embedder/index:语义相近但标题不同的记忆并入候选(并集上限 5)', async () => {
+    const captured: { existing: ExistingForGate[][] } = { existing: [] };
+    const g = gateway(() => ({ decision: 'add', confidence: 1, reasons: [], source: 'jev' }), captured);
+    const vectors = VectorIndex.open(await tmpDb());
+    vectors.upsert('exp_OLD', 'experiences/gotcha-semantic.md', undefined, new Float32Array([1, 0]));
+    const embedder: Embedder = { dims: 2, encode: async () => [new Float32Array([1, 0])] };
+    await mergeMemoriesV2([cand()], existing6(), { gateway: g, llm: new MockLlm(() => ({})), learn, embedder, vectorIndex: vectors });
+    const got = captured.existing[0]!;
+    expect(got.some((e) => e.path === 'experiences/gotcha-semantic.md')).toBe(true);
+    expect(got.length).toBeLessThanOrEqual(5);
+    vectors.close();
+  });
+
+  it('不注入 embedder/index:保持标题 2-gram 原逻辑(标题无关的语义记忆被排除)', async () => {
+    const captured: { existing: ExistingForGate[][] } = { existing: [] };
+    const g = gateway(() => ({ decision: 'add', confidence: 1, reasons: [], source: 'jev' }), captured);
+    await mergeMemoriesV2([cand()], existing6(), { gateway: g, llm: new MockLlm(() => ({})), learn });
+    const got = captured.existing[0]!;
+    expect(got.some((e) => e.path === 'experiences/gotcha-semantic.md')).toBe(false);
   });
 });

@@ -99,7 +99,7 @@ export async function updateInboxItem(
 export async function acceptInboxItem(
   storage: StorageAdapter,
   id: string,
-  deps: { gateway: DecisionGateway; llm: LlmProvider; learn: LearnConfig; now?: () => Date },
+  deps: { gateway: DecisionGateway; llm: LlmProvider; learn: LearnConfig; now?: () => Date; afterWrite?: () => Promise<void> | void },
 ): Promise<{ paths: string[]; removed: boolean; reason?: string }> {
   const it = await readInboxItem(storage, id);
   if (!it) return { paths: [], removed: false };
@@ -133,6 +133,7 @@ export async function acceptInboxItem(
   });
   await removeInboxItem(storage, id);
   await recordReview(storage, 'accepted', deps.now);
+  void Promise.resolve(deps.afterWrite?.()).catch(() => {});
   return { paths: [...res.added, ...res.updated, ...res.appended], removed: true };
 }
 

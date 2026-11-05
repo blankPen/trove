@@ -80,6 +80,20 @@ export interface LearnLifecycleConfig {
   trajectoryMax: number;
 }
 
+/** 本地向量检索配置（A5）：bge-small-zh + RRF 混合召回。 */
+export interface LearnEmbeddingConfig {
+  enabled: boolean;
+  model: string;
+  /** 模型下载镜像；可用 learn.embedding.host 覆盖。 */
+  host: string;
+  /** Gate C 向量粗筛候选数。 */
+  gateTopK: number;
+  /** 混合召回里向量侧召回数。 */
+  recallTopK: number;
+  /** RRF 融合常数 k。 */
+  rrfK: number;
+}
+
 export interface LearnConfig {
   /** off=关闭;shadow=只计算并写审计;review=经验进 inbox 人工审;auto=达阈值直接写 */
   mode: 'off' | 'shadow' | 'review' | 'auto';
@@ -97,6 +111,7 @@ export interface LearnConfig {
   jev: { maxCallsPerSession: number; timeoutMs: number };
   lifecycle: LearnLifecycleConfig;
   capacity: CapacityConfig;
+  embedding: LearnEmbeddingConfig;
 }
 
 /** learn 默认值,`defaultConfig` 与 `readLearnConfig` 共用,避免重复字面量。 */
@@ -112,6 +127,7 @@ export function defaultLearnConfig(): LearnConfig {
     jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
     lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
     capacity: { ...DEFAULT_CAPACITY },
+    embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60 },
   };
 }
 
@@ -208,6 +224,7 @@ export function normalizeLearn(learn: unknown): LearnConfig {
   const j = (l.jev ?? {}) as Record<string, unknown>;
   const c = (l.lifecycle ?? {}) as Record<string, unknown>;
   const cap = (l.capacity ?? {}) as Record<string, unknown>;
+  const e = (l.embedding ?? {}) as Record<string, unknown>;
   return {
     mode: normalizeLearnMode(l.mode),
     autoMigrate: l.autoMigrate !== false,
@@ -236,7 +253,19 @@ export function normalizeLearn(learn: unknown): LearnConfig {
       profileBytes: num(cap.profileBytes, d.capacity.profileBytes),
       entitiesPerType: num(cap.entitiesPerType, d.capacity.entitiesPerType),
     },
+    embedding: {
+      enabled: e.enabled !== false,
+      model: strNonEmpty(e.model, d.embedding.model),
+      host: strNonEmpty(e.host, d.embedding.host),
+      gateTopK: num(e.gateTopK, d.embedding.gateTopK),
+      recallTopK: num(e.recallTopK, d.embedding.recallTopK),
+      rrfK: num(e.rrfK, d.embedding.rrfK),
+    },
   };
+}
+
+function strNonEmpty(v: unknown, fallback: string): string {
+  return typeof v === 'string' && v !== '' ? v : fallback;
 }
 
 function num(v: unknown, fallback: number): number {

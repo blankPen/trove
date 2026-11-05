@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch, recentUnlearnedKeys, hashSessionContent, enqueueLearnSessions, migrateJsonQueue } from '../../../src/core/lessons/learn.js';
+import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch, recentUnlearnedKeys, hashSessionContent, enqueueLearnSessions, migrateJsonQueue, resolveProviders } from '../../../src/core/lessons/learn.js';
 import { JobQueue } from '../../../src/core/lessons/jobs.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 import { libraryDir, libraryLessonsDir, safeSessionName } from '../../../src/core/layout.js';
@@ -375,6 +375,47 @@ describe('learn 入口(v2 单轨编排)', () => {
 
     expect(note).toBe('learn 已关闭（learn.mode=off）');
     expect(queue.stats()).toMatchObject({ queued: 1 });
+    queue.close();
+  });
+});
+
+describe('Jev 可选:未配置不阻断学习', () => {
+  it('resolveProviders 无 Jev 配置 → jev 为 null;有配置 → 返回提供方', () => {
+    expect(resolveProviders({ llm: v2Llm(), config: learnCfg('auto') }).jev).toBeNull();
+    const withJev = resolveProviders({ llm: v2Llm(), config: { ...learnCfg('auto'), jev: { apiKey: 'k', model: 'm' } } });
+    expect(withJev.jev).not.toBeNull();
+  });
+
+  it('resolveProviders 显式注入 jev: null → 不启用 Jev(即使配置里存在)', () => {
+    const { jev } = resolveProviders({ llm: v2Llm(), jev: null, config: { ...learnCfg('auto'), jev: { apiKey: 'k', model: 'm' } } });
+    expect(jev).toBeNull();
+  });
+
+  it('runLessonExtraction 无 Jev 配置 → 降级为启发式 + LLM 裁决,仍写入记忆与审计', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: v2Llm(), config: learnCfg('auto') });
+
+    expect(outcome.skipReason).toBeUndefined();
+    expect(outcome.diff?.summary.adds).toBe(1);
+    const memPath = (await storage.list()).find((f) => f.startsWith('experiences/') && !f.startsWith('experiences/.'));
+    expect(memPath).toBeTruthy();
+    expect(await storage.read('audit/s-1.json')).not.toBeNull();
+  });
+
+  it('learnPendingBatch 无 Jev 配置(daemon 队列路径)→ 不崩,正常完成', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+    enq(queue, ['claude-code:s-1']);
+
+    const note = await learnPendingBatch(vault, queue, { llm: v2Llm(), config: learnCfg('auto') }, 10);
+
+    expect(note).toContain('新增 1');
+    expect(await storage.read('audit/claude-code:s-1.json')).not.toBeNull();
     queue.close();
   });
 });

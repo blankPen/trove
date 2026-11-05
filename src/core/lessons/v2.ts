@@ -32,7 +32,8 @@ import type { InboxItem } from './inbox.js';
 
 export interface V2RunDeps {
   llm: LlmProvider;
-  jev: JevProvider;
+  /** Jev 提供方;null 表示未配置,压缩与门控降级为启发式 + LLM 裁决。 */
+  jev: JevProvider | null;
   storage: StorageAdapter;
   learn: LearnConfig;
   loadEvents: (id: string) => Promise<Event[]>;

@@ -291,6 +291,30 @@ describe('trove learn <session-id>(Stage 9 单会话提取命令)', () => {
   });
 });
 
+describe('trove learn 无 Jev 配置(外部增强可选)', () => {
+  it('learn <session>:不报「缺少 Jev 配置」,降级路径仍写出记忆', async () => {
+    await writeSession('claude-code', 's-1', sampleEvents('s-1'));
+
+    const code = await runLearn(['learn', 's-1'], { lessonDeps: { llm: happyLlm(), config: autoLearn() } });
+
+    expect(code).toBe(0);
+    const output = lines.join('\n');
+    expect(output).not.toContain('缺少 Jev 配置');
+    expect(output).toContain('本次新增 1 条');
+    expect(await storage.read('audit/s-1.json')).not.toBeNull();
+  });
+
+  it('learn review --accept-all:无 Jev 配置不阻断审核', async () => {
+    await writeInboxItem(storage, inboxItem());
+
+    const code = await runLearn(['learn', 'review', '--accept-all'], { lessonDeps: { llm: happyLlm(), config: reviewLearn() } });
+
+    expect(code).toBe(0);
+    expect(lines.join('\n')).not.toContain('缺少 Jev 配置');
+    expect(await listInbox(storage)).toEqual([]);
+  });
+});
+
 describe('全局端到端验收(端到端-1..4)', () => {
   it('端到端-1:调试错误+用户纠正+明确偏好 → debug_pattern(add)+preference(add),审计完整,索引一致', async () => {
     await writeSession('claude-code', 'e2e-1', richEvents('e2e-1'));

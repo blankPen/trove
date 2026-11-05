@@ -82,6 +82,19 @@ describe('Jev 快速压缩(LLM 分析前)', () => {
     await expect(compactEvents(events, jev)).resolves.toHaveLength(events.length);
   });
 
+  it('jev 为 null(未配置)→ 走确定性截断兜底,不抛', async () => {
+    const events = eventsWithCalls(16);
+    const out = await compactEvents(events, null);
+    // ≤80 条:兜底原样保留(仅排序)。
+    expect(out.map((e) => e.seq)).toEqual(events.map((e) => e.seq));
+  });
+
+  it('jev 为 null 且事件超 80 条 → 兜底截断为首尾各 40', async () => {
+    const events = eventsWithCalls(30);
+    const out = await compactEvents(events, null);
+    expect(out).toHaveLength(80);
+  });
+
   it('压缩后仍超预算 → 整体退回确定性截断(首尾各 40)', async () => {
     const events = eventsWithCalls(150, () => 'x'.repeat(1200));
     const out = await compactEvents(events, jevWithKeep(allKeep));

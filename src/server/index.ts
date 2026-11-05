@@ -20,9 +20,10 @@ import { libraryLessonsDir } from '../core/layout.js';
 import { LocalStorageAdapter } from '../core/lessons/storage.js';
 import { acceptInboxItem, listInbox, rejectInboxItem } from '../core/lessons/inbox.js';
 import { readTrust } from '../core/lessons/trust.js';
-import { readJevConfig, readLearnConfig, readLlmConfig } from '../core/lessons/config.js';
+import { readJevConfigOrNull, readLearnConfig, readLlmConfig } from '../core/lessons/config.js';
 import { DeepSeekLlm } from '../core/lessons/llm.js';
 import { TypeSafeJevScorer } from '../core/lessons/jev.js';
+import type { JevProvider } from '../core/lessons/jev.js';
 import { JevDecisionGateway } from '../core/lessons/gateway.js';
 import { buildMemoryHealth } from '../core/lessons/health.js';
 import { runCurator } from '../core/lessons/curator.js';
@@ -207,14 +208,16 @@ async function handle(
       const storage = new LocalStorageAdapter(libraryLessonsDir(opts.paths.vault));
       if (segs[4] === 'accept') {
         let llm;
-        let jev;
+        let jev: JevProvider | null;
         try {
           llm = new DeepSeekLlm(readLlmConfig(opts.config));
-          jev = new TypeSafeJevScorer(readJevConfig(opts.config));
         } catch (e) {
           json(res, 400, { error: (e as Error).message });
           return;
         }
+        // Jev 是可选增强:未配置就降级为启发式 + LLM 裁决,不阻断人工审核。
+        const jevConfig = readJevConfigOrNull(opts.config);
+        jev = jevConfig ? new TypeSafeJevScorer(jevConfig) : null;
         const learn = readLearnConfig(opts.config);
         const gateway = new JevDecisionGateway({ jev, learn });
         const result = await acceptInboxItem(storage, id, { gateway, llm, learn, now: () => new Date(now()) });

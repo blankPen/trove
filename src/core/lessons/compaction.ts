@@ -10,10 +10,10 @@ const MIN_CALLS_TO_COMPACT = 15;
 /** 压缩后渲染文本的字符预算 ≈ 30k token(按 4 字符/token 粗估)。 */
 const MAX_RENDER_CHARS = 30_000 * 4;
 
-/** 对已过滤的 events 做 Jev 快速压缩;jev 不支持或判定失败时降级为确定性截断。 */
-export async function compactEvents(events: Event[], jev: JevProvider): Promise<Event[]> {
+/** 对已过滤的 events 做 Jev 快速压缩;jev 未配置/不支持/判定失败时降级为确定性截断。 */
+export async function compactEvents(events: Event[], jev: JevProvider | null): Promise<Event[]> {
   const calls = collectCalls(events);
-  if (calls.length <= MIN_CALLS_TO_COMPACT || !jev.keepCalls) return truncateFallback(events);
+  if (!jev || calls.length <= MIN_CALLS_TO_COMPACT || !jev.keepCalls) return truncateFallback(events);
 
   const questions: Record<string, JevKeepQuestion> = {};
   for (const c of calls) {

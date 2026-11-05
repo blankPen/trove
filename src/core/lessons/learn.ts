@@ -9,7 +9,7 @@ import { loadLibraryIndex, rebuildUnifiedIndex } from '../library/index-file.js'
 import { hashBytes } from '../chunker.js';
 import { ensureLessonsLayout } from './layout.js';
 import { LocalStorageAdapter } from './storage.js';
-import { readLlmConfig, readJevConfig, readLearnConfig } from './config.js';
+import { readLlmConfig, readJevConfigOrNull, readLearnConfig } from './config.js';
 import { DeepSeekLlm, LlmParseError } from './llm.js';
 import type { LlmProvider } from './llm.js';
 import { createUsageSink } from './usage.js';
@@ -24,7 +24,8 @@ import { runQueuedJobs, BLOCKED_MESSAGE } from './runner.js';
 
 export interface LessonProviderDeps {
   llm?: LlmProvider;
-  jev?: JevProvider;
+  /** Jev 提供方;null/undefined 表示未配置,下游走启发式降级。 */
+  jev?: JevProvider | null;
   /** 可控时钟,测试注入;缺省系统时间。 */
   now?: () => Date;
   /** 覆盖环境变量;缺省读 process.env。 */
@@ -74,11 +75,18 @@ export async function loadSessionEvents(vaultRoot: string, sessionId: string): P
   return events;
 }
 
-export function resolveProviders(deps: LessonProviderDeps): { llm: LlmProvider; jev: JevProvider } {
-  // 懒构造:LLM/Jev 配置缺失时由调用方决定跳过还是报错,不拖垮无关命令与 daemon。
+export function resolveProviders(deps: LessonProviderDeps): { llm: LlmProvider; jev: JevProvider | null } {
+  // 懒构造:LLM 配置缺失时照旧抛错(必须配);Jev 是外部增强,未配置返回 null,下游降级为启发式 + LLM 裁决。
   const usagePath = deps.usagePath ?? trovePaths(deps.env?.TROVE_HOME).usageLog;
   const llm = deps.llm ?? new DeepSeekLlm(readLlmConfig(deps.config), { onUsage: createUsageSink(usagePath) });
-  const jev = deps.jev ?? new TypeSafeJevScorer(readJevConfig(deps.config));
+  let jev: JevProvider | null;
+  if (deps.jev === undefined) {
+    // 未注入:按配置解析;未配置 Jev 则为 null(外部增强缺失不阻断学习)。
+    const jevConfig = readJevConfigOrNull(deps.config);
+    jev = jevConfig ? new TypeSafeJevScorer(jevConfig) : null;
+  } else {
+    jev = deps.jev; // 显式 null = 不用 Jev
+  }
   return { llm, jev };
 }
 

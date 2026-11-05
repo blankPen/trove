@@ -32,18 +32,24 @@ export function readLlmConfig(config?: Pick<Config, 'llm'>): LlmConfig {
 }
 
 export function readJevConfig(config?: Pick<Config, 'jev'>): JevConfig {
-  const apiKey = config?.jev?.apiKey;
-  const model = config?.jev?.model;
-  if (!apiKey || !model) {
+  const cfg = readJevConfigOrNull(config);
+  if (!cfg) {
     const missing = [
-      ['jev.apiKey', apiKey],
-      ['jev.model', model],
+      ['jev.apiKey', config?.jev?.apiKey],
+      ['jev.model', config?.jev?.model],
     ]
       .filter(([, v]) => !v)
       .map(([k]) => k);
     throw new Error(`缺少 Jev 配置:${missing.join('、')};请用 trove config set jev.apiKey/jev.model 写入 ~/.trove/config.json`);
   }
-  return { apiKey, model, ...(config?.jev?.baseUrl ? { baseUrl: config.jev.baseUrl } : {}) };
+  return cfg;
+}
+
+/** 可选读取:Jev 未配置返回 null(外部增强缺失不阻断学习),不抛错。 */
+export function readJevConfigOrNull(config?: Pick<Config, 'jev'>): JevConfig | null {
+  const j = config?.jev;
+  if (!j?.apiKey || !j.model) return null;
+  return { apiKey: j.apiKey, model: j.model, ...(j.baseUrl ? { baseUrl: j.baseUrl } : {}) };
 }
 
 /** 读取 v2 学习配置:缺省补默认,quality 数值钳制到 [0,1],非法 mode 白名单兜底 review。 */

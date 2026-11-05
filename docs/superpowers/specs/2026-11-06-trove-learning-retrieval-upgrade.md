@@ -49,6 +49,11 @@
 **查询扩展 + HyDE + 向量 + 重排**整条管线。所以迁移必须接的是 **qmd 的完整管线**，
 不是把 FTS5 换成它的 BM25。
 
+**迁移前后的同语料 A/B 已经跑完**（§5.4）：在这份语料上，qmd 混合管线的 hit@3 与
+「只把 bigram 从 phrase 改成 OR」的放宽 FTS 打平（8/8），hit@1 略低，而单条查询代价是
+15~37 秒 vs < 0.5 秒。**因此迁移必须同时落 P0-1 的查询构造改造**——
+不能把「一个已定位的缺陷」换成「另一个后端」。
+
 **本 ticket 只出方案与评审文档；实现由编排者另开 ticket 承接**（见 §7）。
 
 ---
@@ -127,7 +132,7 @@ daemon learn 循环（learnIntervalSeconds=60，learnBatch=3）
 
 1. **串行**：`runner.ts:98`（批次内会话串行）、`learn.ts:287`（手动批量串行）、
    `v2.ts:201`（候选质量裁决串行）。并发度上界是 1。
-2. **重复投递转录**：见 §2.3，是 82% 的 token 去处。
+2. **重复投递转录**：见 §2.3，是 82.5% 的 token 去处。
 3. **跨会话去重失效**：`gateway.ts:195`，无 Jev 时 `resolveIdentity` 恒返回 `add`。
    `merge.ts:251` 的向量粗筛也从未被接上——`v2.ts:277` 调用 `mergeMemoriesV2` 时没有传
    `embedder` / `vectorIndex`，所以 `learn.embedding.gateTopK` 是死配置。
@@ -329,7 +334,72 @@ trove 的学习是 **「事后考古」**——把 agent 自己都没回看过�
    已经在 `~/.trove/cache/models` 里跑着。→ 迁移必须**删掉 bge 依赖**，
    同时把 transformers.js 从 `dependencies` 里摘掉（否则白留一个 200MB+ 的依赖树）。
 
-### 5.4 迁移目标形态
+### 5.4 qmd 混合管线的同语料 A/B（实测）
+
+模型按定案配置：`QMD_EMBED_MODEL=hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf`
++ qmd 默认的查询扩展（1.7B）与重排（Qwen3-Reranker-0.6B）。语料：同一个 `library/lessons`
+（1031 个 md，2088 个 chunk，嵌入耗时 9 分 27 秒）。
+
+判定口径：**top-3 里是否出现「正文含该主题关键词」的文档**（关键词代理判定，见 §5.4 限制）。
+
+| 系统 | hit@1 | hit@3 | 单条耗时 |
+| --- | --- | --- | --- |
+| 现状 FTS（strict：bigram phrase + term 间 AND） | 6/13 | 6/13 | < 0.5s |
+| 放宽 FTS（bigram OR，只改查询构造、不换后端） | **10/13** | **10/13** | < 0.5s |
+| qmd query（BM25 + 向量 + 查询扩展 + HyDE + RRF + 重排） | 6/13 | 8/13 | **15~37s** |
+
+逐条：
+
+| 查询 | strict | 放宽 | qmd（首个相关位次） |
+| --- | --- | --- | --- |
+| 怎么配置 llm | ✅ | ✅ | ✅ (1) |
+| trove 的经验提取流程 | ❌ | ✅ | ✅ (2) |
+| 飞书文档评论怎么读 | ❌ | ✅ | ✅ (1) |
+| quarantine | ✅ | ✅ | ✅ (2) |
+| gitlab webhook | ✅ | ✅ | ✅ (1) |
+| 飞书 | ✅ | ✅ | ✅ (1) |
+| trove | ✅ | ✅ | ✅ (1) |
+| playwright 截图 | ✅ | ✅ | ✅ (1) |
+| 为什么数据库连接超时 | ❌ | ❌ | ❌ |
+| webdav 同步慢怎么办 | ❌ | ⚠️ | ❌ |
+| COS 签名 | ❌ | ⚠️ | ❌ |
+| SignatureDoesNotMatch | ❌ | ⚠️ | ❌ |
+| s3 multipart upload | ❌ | ⚠️ | ❌ |
+
+**怎么读这张表**
+
+1. **13 条里有 5 条在语料里根本没有答案**——`连接池`/`connection timeout`、
+   `SignatureDoesNotMatch`、`COS 签名` 在 1004 条记忆里**一条都没有**；
+   `webdav` 只在一个 vitest 文档里被顺带提到；`multipart` 只在一个链接文档里出现。
+   这 5 条任何检索系统都救不回来，**要靠的是沉淀覆盖而不是召回**。
+   只看剩下 8 条有答案的：strict 6/8、放宽 8/8、qmd 6/8（hit@1）。
+2. **只改查询构造（bigram phrase → OR）就已经把 hit@1 拉到 8/8**，而且不动后端、不加模型、不改存储。
+3. **qmd 混合管线在这份语料上没有赢过放宽 FTS**：hit@3 打平（8/8），hit@1 略低，
+   代价是每条查询 15~37 秒（现状 FTS < 0.5 秒）、约 2.7GB 模型、node-llama-cpp 原生运行时。
+4. **⚠️ 放宽 FTS 那两个 ⚠️ 是判定口径的假阳性**：`COS 签名` 命中的是文档里的「函数**签名**」，
+   不是腾讯云 COS 的签名；`webdav` 命中的也是顺带提及。放宽 FTS 的真实成绩是 **8/8**（有答案的 8 条全中），
+   不是 10/13。
+
+**限制（必须写进实现 ticket 的验收口径）**
+
+- **判定口径是关键词代理**，不是人工标注；绝对值不可靠，可靠的是三者之间的相对关系。
+- **qmd 的 collection 当时把 `archive/` 也索引了**（25 个文档，其中含归档的重复条目），
+  稀释了候选池；实现时必须按 §7.1 排除。
+- **这份语料有大量近重复**（§2 的 50 条同主题簇）。语义召回受重复的影响比关键词召回大得多；
+  等 P1-3 主题级沉淀把语料收敛后，qmd 的相对表现应当变好——**这一点实现后必须复测**。
+- **只有 13 条查询、8 条有答案**，样本量小。
+
+**给实现 ticket 的结论**
+
+1. 迁移仍然按定案做（qmd + Qwen3-Embedding-0.6B），但**必须同时落 P0-1 的查询构造改造**
+   （bigram 不拼 phrase、term 间不做全 AND），否则等于把「一个已定位的缺陷」换成「另一个后端」。
+2. **collection 必须按 5 个类目分别注册**，并排除 `archive/`、`audit/`、`trajectories/`、`.trove/`。
+3. **验收口径不能只看 qmd 自己的分数**：用 §5.4 这张表作基线，
+   目标是 hit@1 ≥ 现状 strict 的 2 倍**且** ≥ 放宽 FTS 的水平。
+4. **性能要单列一条验收**：检索延迟必须可接受（qmd 冷启动 ~19s、热模型 ~15s/条，
+   需要常驻进程或 daemon 模式）。
+
+### 5.5 迁移目标形态
 
 ```
                     ┌─ qmd 索引（trove 的 lessons 目录注册为 collection）
@@ -461,17 +531,19 @@ searchLessons() ───┤
 
 | 步骤 | 做什么 | 要点 |
 | --- | --- | --- |
-| S0-1 | 引入 `@tobilu/qmd` 依赖 | SDK 模式 `createStore({ dbPath, config: { collections } })`，索引落 `~/.trove/cache/qmd.sqlite` |
-| S0-2 | 把 `library/lessons` 注册成 collection | 按 5 个类目分别注册（`preferences` / `entities` / `experiences` / `events` / `resources`），便于按类目过滤 |
+| S0-1 | 引入 `@tobilu/qmd` 依赖 | SDK 模式 `createStore({ dbPath, configPath })`，索引落 `~/.trove/cache/qmd.sqlite`；模型配置写 `~/.config/qmd/index.yml` 的 `models.embed`（**优先于 `QMD_EMBED_MODEL` 环境变量**） |
+| S0-2 | 把 `library/lessons` 按 5 个类目分别注册成 collection | `preferences` / `entities` / `experiences` / `events` / `resources`；**必须排除** `archive/`、`audit/`、`trajectories/`、`.trove/`、`INDEX.md`、`README.md` |
 | S0-3 | 写 `context` | 每个类目一段人写描述；qmd 官方称这对召回质量影响最大 |
-| S0-4 | 固定模型 | `QMD_EMBED_MODEL=hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf`；下载走 `HF_ENDPOINT=https://hf-mirror.com`（**本机 hf.co 超时，实测**） |
-| S0-5 | 换掉 `searchLessons()` 的内部实现 | 一次 `store.search({ query, collections, limit })` 取代 `LessonsIndex` + `VectorIndex` + RRF |
-| S0-6 | **删除 bge 链路** | 删 `src/core/lessons/embedding.ts` 的 bge 路径、`src/core/lessons/vector-index.ts`、`src/core/lessons/vector-sync.ts`、`src/core/search/hybrid.ts`；从 `package.json` 摘掉 `@huggingface/transformers`；清 `~/.trove/cache/vectors.sqlite` |
-| S0-7 | 保留 trove 语义层 | frontmatter 解析、`scope` 过滤、`evidence`、`use_count` 回写、merge/取代 全部留在 trove 侧 |
-| S0-8 | 回归 | §3.3 的 13 条查询 + §5.2 的 qmd 对照表固化成回归脚本，入库 |
+| S0-4 | 固定模型 | `models.embed: hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf`；下载走 `HF_ENDPOINT=https://hf-mirror.com`（**本机 hf.co 超时，实测**） |
+| S0-5 | **同时落 P0-1 查询构造改造** | bigram 不再拼 phrase、term 间不再全 AND、单字 token 兜底（见 §6 P0-1）。**不能只换后端**——§5.4 的 A/B 显示放宽 FTS 本身就能把 hit@1 拉到 8/8 |
+| S0-6 | 换掉 `searchLessons()` 的内部实现 | 一次 `store.search({ query, collection, limit })` 取代 `LessonsIndex` + `VectorIndex` + RRF；**进程要常驻或用 daemon 模式**，否则每条查询要重载模型（实测 15~37 秒） |
+| S0-7 | **删除 bge 链路** | 删 `src/core/lessons/embedding.ts` 的 bge 路径、`src/core/lessons/vector-index.ts`、`src/core/lessons/vector-sync.ts`、`src/core/search/hybrid.ts`；从 `package.json` 摘掉 `@huggingface/transformers`；清 `~/.trove/cache/vectors.sqlite` |
+| S0-8 | 保留 trove 语义层 | frontmatter 解析、`scope` 过滤、`evidence`、`use_count` 回写、merge/取代 全部留在 trove 侧 |
+| S0-9 | 回归 | §3.3 与 §5.4 的 13 条查询 + 判定口径固化成回归脚本，入库 |
 
-**验收口径**：同一批 13 条真实查询上，`qmd query` 的 top-3 命中率 ≥ 现状 FTS 的 2 倍；
-且去掉 bge 后 trove 的安装体积与常驻内存不劣化。
+**验收口径**：用 §5.4 的基线表判定——hit@1 ≥ 现状 strict 的 2 倍**且** ≥ 放宽 FTS 的水平；
+5 条语料里没有答案的查询单独标注为「不可达」，不计入分母；
+另加一条性能口径：检索延迟在模型常驻后 ≤ 2 秒。
 
 ### 7.2 学习与关联侧
 
@@ -500,7 +572,7 @@ searchLessons() ───┤
 | --- | --- | --- | --- | --- |
 | R1 | **模型下载源不可达**（**已实测**：`huggingface.co` 在本机 15s 超时，`hf-mirror.com` 0.7s 正常） | `qmd pull` 长时间无进展、缓存目录不增长 | 检索完全不可用 | 安装脚本与 daemon 启动一律带 `HF_ENDPOINT=https://hf-mirror.com`；首次启动做探测，失败则明确报错而不是静默降级 |
 | R2 | **node-llama-cpp 原生编译**（macOS 还要 Homebrew SQLite 才能加载扩展） | `qmd --version` 报 extension 加载失败 | 检索不可用 | 启动自检；把「装 Homebrew SQLite」写进 `trove init` 的前置提示 |
-| R3 | **换后端后召回排序整体变化** | 13 条查询的回归命中率低于现状 | 用户体感变差 | §3.3/§5.2 的对照表固化成回归脚本，CI/本地都能跑；上线前必须过 |
+| R3 | **换后端后召回排序整体变化** | 13 条查询的回归命中率低于现状 | 用户体感变差 | §3.3/§5.2/§5.4 的对照表固化成回归脚本，CI/本地都能跑；上线前必须过 |
 | R4 | **P1-2 事实摘要会改变 prompt 版本** | 新旧记忆在同一库里互相污染 | 提取质量下降 | 新版本号 + 迁移期按 `prompt_version` 过滤新旧 |
 | R5 | **P1-3 聚类批处理会重写存量** | 主题条目数骤降但 evidence 数暴涨 | 经验被揉坏 | 保留 `supersedes` / `evidence` 溯源 + 可回滚；聚类阈值按类目分别调 |
 | R6 | **删 bge 后失去中文兜底** | qmd 重排未跑通时召回质量无底线 | 无降级路径 | 灰度期双跑（qmd + 现有 FTS）对比一周，确认后再删 `vectors.sqlite` |
@@ -527,11 +599,10 @@ searchLessons() ───┤
 | 检索命中 | 复刻 `src/core/search/tokenize.ts` 的分词 + FTS5 建索引，跑 §3.3 的 13 条查询 |
 | 经验重复 | `library/lessons/experiences/**` 的 frontmatter `title` 做 2-gram Dice 聚类（Dice≥0.45） |
 | qmd 对比 | `qmd collection add ~/.trove/vault/library/lessons --name lessons` 后 `qmd search <query> -c lessons --json` |
-| qmd 混合管线 | `HF_ENDPOINT=https://hf-mirror.com QMD_EMBED_MODEL=hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf qmd pull` → `qmd embed` → `qmd query "<query>" -c lessons --json` |
+| qmd 混合管线 | `HF_ENDPOINT=https://hf-mirror.com qmd pull` → 在 `~/.config/qmd/index.yml` 的 `models.embed` 写 `hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf` → `qmd embed` → `qmd query "<query>" -c lessons --json` |
+| 三方 A/B | 同一进程内跑完 13 条查询（模型只加载一次）：复刻 `tokenize.ts` 的 strict/relaxed 两路 FTS，对照 qmd SDK 的 `store.search({ query, collection, limit })`，判定口径＝top-3 是否含主题关键词 |
 
-> 说明：qmd 的 `qmd query` 混合路径（查询扩展 + HyDE + 重排）在本机**尚未完成实测**——
-> 模型下载（3 个 GGUF，约 2.3GB）需要 `HF_ENDPOINT` 镜像才能拉下来（默认源 hf.co 实测超时）。
-> §5.3 关于「查询扩展与重排才是 qmd 的价值来源」的判断来自 qmd 官方文档与源码描述
-> （`dist/llm.js` 的模型解析、qmd README 的管线图），以及 §5.2 已实测的 BM25 对比，
-> 属于**未在本机验证**的部分。实现 ticket 的第一步应当补这次同语料 A/B，
-> 作为 S0 验收的基线。
+> §5.4 的 A/B 已在本机跑完：qmd 混合管线（Qwen3-Embedding-0.6B + 查询扩展 + HyDE + 重排）
+> 对同一份 `library/lessons` 语料，hit@3 与「放宽 FTS」打平、hit@1 略低，单条查询 15~37 秒。
+> 限制见 §5.4（关键词代理判定、qmd collection 误含 `archive/`、语料近重复、样本量 13 条），
+> 实现 ticket 需在 P1-3 收敛语料后复测。

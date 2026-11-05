@@ -87,6 +87,55 @@ describe('config(设计 §10.2)', () => {
     });
   });
 
+  it('learn 默认值 + 老配置补全 + 部分覆盖不丢其它字段', async () => {
+    expect(defaultConfig().learn).toEqual({
+      mode: 'review',
+      autoMigrate: true,
+      paused: false,
+      dailyTokenBudget: 200000,
+      maxAttempts: 5,
+      leaseTtlMs: 300000,
+      quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
+      jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+      lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
+      capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
+      embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60 },
+    });
+
+    // 老配置没有 learn 字段 → 补默认
+    const legacy = defaultConfig() as unknown as Record<string, unknown>;
+    delete legacy['learn'];
+    await saveConfig(cfg, legacy as never);
+    expect((await loadConfig(cfg)).learn).toEqual(defaultConfig().learn);
+
+    // 部分覆盖:缺的字段补默认,已填的保留
+    const partial = defaultConfig();
+    partial.learn = { mode: 'auto', autoMigrate: false, quality: { autoAccept: 0.9 } } as Config['learn'];
+    await saveConfig(cfg, partial);
+    expect((await loadConfig(cfg)).learn).toEqual({
+      mode: 'auto',
+      autoMigrate: false,
+      paused: false,
+      dailyTokenBudget: 200000,
+      maxAttempts: 5,
+      leaseTtlMs: 300000,
+      quality: { autoAccept: 0.9, reviewFloor: 0.6, evidenceMin: 0.8 },
+      jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+      lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
+      capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
+      embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60 },
+    });
+  });
+
+  it('老配置里的 learn.v2 字段被忽略,不再读', async () => {
+    const withV2 = defaultConfig() as unknown as { learn: Record<string, unknown> };
+    withV2.learn.v2 = true;
+    await saveConfig(cfg, withV2 as never);
+    const back = await loadConfig(cfg);
+    expect(back.learn).toEqual(defaultConfig().learn);
+    expect((back.learn as Record<string, unknown>).v2).toBeUndefined();
+  });
+
   it('文件不存在时 loadConfig 返回默认配置', async () => {
     const c = await loadConfig(cfg);
     expect(c.device.id).toMatch(UUID_RE);
@@ -135,6 +184,8 @@ describe('paths(设计 §6.1)', () => {
     expect(p.state).toBe('/Users/pz/.trove/state.json');
     expect(p.logs).toBe('/Users/pz/.trove/logs');
     expect(p.tmp).toBe('/Users/pz/.trove/tmp');
+    expect(p.vectorDb).toBe('/Users/pz/.trove/cache/vectors.sqlite');
+    expect(p.modelCache).toBe('/Users/pz/.trove/cache/models');
   });
 
   it('未指定 base 时默认 ~/.trove', () => {

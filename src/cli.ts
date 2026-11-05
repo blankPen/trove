@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { hostname } from 'node:os';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { Command, CommanderError } from 'commander';
-import { confirm, text } from '@clack/prompts';
+import { confirm, select, text } from '@clack/prompts';
 import pc from 'picocolors';
 import { trovePaths, type TrovePaths } from './paths.js';
 import { loadConfig, resolveRawSync, saveConfig, type Config, type RemoteConfig } from './config.js';
@@ -21,6 +23,7 @@ import {
   listLessons,
   searchLessons,
   searchSessions,
+  type SearchHybridConfig,
 } from './core/search/service.js';
 import {
   formatLesson,
@@ -56,15 +59,36 @@ import { defaultResolveAdapters, loadRuntime } from './runtime.js';
 import { startServer } from './server/index.js';
 import { createConsoleProgress } from './progress-console.js';
 import { silentProgress } from './progress.js';
-import { formatDiff, readLatestDiff, readSessionDiff } from './core/lessons/audit.js';
+import { formatDiff, readLatestDiff, readSessionDiff, readShadowDiff } from './core/lessons/audit.js';
 import { LocalStorageAdapter } from './core/lessons/storage.js';
 import { refreshSidecars } from './core/lessons/sidecar.js';
-import { runLessonExtraction, learnPendingBatch, learnRecentBatch } from './core/lessons/learn.js';
+import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders, migrateJsonQueue, enqueueLearnSessions } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
+import { JobQueue } from './core/lessons/jobs.js';
+import { getEmbedder } from './core/lessons/embedding.js';
+import { VectorIndex } from './core/lessons/vector-index.js';
+import { syncVectorIndex } from './core/lessons/vector-sync.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
 import { learnClaudeMemo } from './core/lessons/memo.js';
 import { learnRecentMatters } from './core/lessons/recent.js';
-import { enqueueLearn, readLearnQueue } from './core/lessons/queue.js';
+import { readLearnQueue } from './core/lessons/queue.js';
+import { planMigration, applyMigration, rollbackMigration } from './core/lessons/migrate.js';
+import { readLearnConfig } from './core/lessons/config.js';
+import { JevDecisionGateway } from './core/lessons/gateway.js';
+import {
+  acceptInboxItem,
+  listInbox,
+  readInboxItem,
+  rejectInboxItem,
+  updateInboxItem,
+} from './core/lessons/inbox.js';
+import type { InboxItem } from './core/lessons/inbox.js';
+import { readTrust, writeTrust } from './core/lessons/trust.js';
+import type { TrustLevel } from './core/lessons/trust.js';
+import { readDecisions } from './core/lessons/decisions.js';
+import { parseMemory } from './core/lessons/memory.js';
+import { countStaleMemories, maybeRunCurator, runCurator } from './core/lessons/curator.js';
+import { forgetMemory, restoreMemory, setPinned } from './core/lessons/control.js';
 import {
   daemonState,
   daemonLog,
@@ -158,7 +182,7 @@ const LESSON_LABELS: Array<[Exclude<keyof LessonsSummary, 'total'>, string]> = [
   ['resources', '资源'],
 ];
 
-function formatLessons(lessons: LessonsSummary, learnQueue: string[]): string[] {
+function formatLessons(lessons: LessonsSummary, learnPending: number): string[] {
   const lines = ['', pc.bold('学习沉淀')];
   if (lessons.total === 0) {
     lines.push('  暂无记忆(跑一次 trove learn)');
@@ -167,9 +191,21 @@ function formatLessons(lessons: LessonsSummary, learnQueue: string[]): string[] 
     lines.push(`  ${pc.green(`${lessons.total} 条记忆`)} · ${parts}`);
   }
   lines.push(
-    `  待学习 ${learnQueue.length > 0 ? pc.yellow(`${learnQueue.length} 个会话`) : '无'}`,
+    `  待学习 ${learnPending > 0 ? pc.yellow(`${learnPending} 个会话`) : '无'}`,
   );
   return lines;
+}
+
+/** 待学习数:DB queued+retryWait,加旧 JSON 队列尚未迁移的待办。 */
+async function pendingLearnCount(paths: ReturnType<typeof trovePaths>): Promise<number> {
+  const queue = JobQueue.open(paths.learnDb);
+  try {
+    const s = queue.stats();
+    const legacy = await readLearnQueue(paths.learnQueue);
+    return s.queued + s.retryWait + legacy.length;
+  } finally {
+    queue.close();
+  }
 }
 
 function formatRemote(
@@ -475,6 +511,54 @@ async function cmdWhoami(
   out(opts.json ? JSON.stringify(result, null, 2) : formatWhoami(result));
 }
 
+/** 从 learn.embedding 映射混合召回配置;配置不可读/关闭时返回 undefined(纯 FTS)。 */
+async function hybridSearchConfig(paths: ReturnType<typeof trovePaths>): Promise<SearchHybridConfig | undefined> {
+  try {
+    const learn = readLearnConfig(await loadConfig(paths.config));
+    if (!learn.embedding.enabled) return undefined;
+    return {
+      embedding: { enabled: true, model: learn.embedding.model, host: learn.embedding.host },
+      vectorDb: paths.vectorDb,
+      modelCache: paths.modelCache,
+      recallTopK: learn.embedding.recallTopK,
+      rrfK: learn.embedding.rrfK,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/** 生产学习写盘后的向量增量同步;任何失败静默(向量是可选增强,不阻断学习)。 */
+async function syncVectors(paths: ReturnType<typeof trovePaths>): Promise<void> {
+  try {
+    const learn = readLearnConfig(await loadConfig(paths.config));
+    if (!learn.embedding.enabled) return;
+    const vectors = VectorIndex.open(paths.vectorDb);
+    try {
+      const embedder = await getEmbedder(
+        { enabled: true, model: learn.embedding.model, host: learn.embedding.host },
+        { cacheDir: paths.modelCache },
+      );
+      if (!embedder) return;
+      vectors.setMeta('model', learn.embedding.model);
+      await syncVectorIndex(paths.vault, vectors, embedder);
+    } finally {
+      vectors.close();
+    }
+  } catch {
+    // 向量同步失败不阻断学习
+  }
+}
+
+/** 测试注入 lessonDeps 时不自动接向量同步(防联网);生产(undefined)才接。 */
+function withVectorSync(
+  lessonDeps: LessonProviderDeps | undefined,
+  paths: ReturnType<typeof trovePaths>,
+): LessonProviderDeps {
+  if (lessonDeps) return lessonDeps;
+  return { syncVectors: () => syncVectors(paths) };
+}
+
 async function cmdLessonsSearch(
   query: string,
   opts: { category?: string; type?: string; since?: string; limit?: string; json?: boolean },
@@ -484,14 +568,19 @@ async function cmdLessonsSearch(
 ): Promise<void> {
   const since = opts.since ? (parseSince(opts.since, nowMs) ?? undefined) : undefined;
   const limit = Math.max(1, Math.min(50, Number(opts.limit) || 10));
-  const hits = await searchLessons(paths.vault, {
-    query,
-    ...(opts.category ? { category: opts.category } : {}),
-    ...(opts.type ? { type: opts.type } : {}),
-    ...(since ? { since } : {}),
-    limit,
-    cwd: process.cwd(),
-  });
+  const hybrid = await hybridSearchConfig(paths);
+  const hits = await searchLessons(
+    paths.vault,
+    {
+      query,
+      ...(opts.category ? { category: opts.category } : {}),
+      ...(opts.type ? { type: opts.type } : {}),
+      ...(since ? { since } : {}),
+      limit,
+      cwd: process.cwd(),
+    },
+    hybrid,
+  );
   out(
     opts.json
       ? JSON.stringify({ query, total: hits.length, results: hits }, null, 2)
@@ -530,6 +619,53 @@ async function cmdLessonsList(
     limit: Math.max(1, Math.min(100, Number(opts.limit) || 50)),
   });
   out(opts.json ? JSON.stringify({ total: hits.length, results: hits }, null, 2) : formatLessonHits(hits));
+}
+
+/** pin/unpin:按 id 或路径设置/清除 pinned。 */
+async function cmdLessonPin(
+  ref: string,
+  pinned: boolean,
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const found = await setPinned(storage, ref, pinned);
+  if (!found) {
+    out(`没有找到记忆: ${ref}`);
+    return;
+  }
+  out(pinned ? `已固定: ${found.path}` : `已取消固定: ${found.path}`);
+}
+
+/** forget:移到 .trove/forgotten/<ISO>/,内容保留,可 restore 找回。 */
+async function cmdLessonForget(
+  ref: string,
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const res = await forgetMemory(storage, ref);
+  if (!res) {
+    out(`没有找到记忆: ${ref}`);
+    return;
+  }
+  out(`已忘掉（可恢复）: ${res.path} → ${res.target}`);
+}
+
+/** restore:从 archive/(或 --from 目录)移回原路径。 */
+async function cmdLessonRestore(
+  ref: string,
+  from: string | undefined,
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const res = await restoreMemory(storage, ref, from ? { from } : {});
+  if (!res) {
+    out(`没有找到可恢复的记忆: ${ref}`);
+    return;
+  }
+  out(`已恢复: ${res.path}`);
 }
 
 async function cmdSessionsSearch(
@@ -706,8 +842,31 @@ async function cmdLearnList(
   out: (l: string) => void,
 ): Promise<void> {
   const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
-  const diff = sessionId ? await readSessionDiff(storage, sessionId) : await readLatestDiff(storage);
+  const diff = sessionId
+    ? (await readSessionDiff(storage, sessionId)) ?? (await readShadowDiff(storage, sessionId))
+    : await readLatestDiff(storage);
   out(diff ? formatDiff(diff) : sessionId ? `无会话 ${sessionId} 的提取记录` : '尚无提取记录');
+}
+
+async function cmdLearnMigrate(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  opts: { apply?: boolean; rollback?: string },
+): Promise<void> {
+  if (opts.rollback) {
+    const n = await rollbackMigration(paths.vault, opts.rollback);
+    out(`已回滚 ${n} 条记忆`);
+    return;
+  }
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const plan = await planMigration(storage);
+  if (opts.apply) {
+    const r = await applyMigration(storage, plan, { vaultRoot: paths.vault });
+    out(`已迁移 ${r.migrated} 条记忆(已 v2 ${r.alreadyV2} 条跳过),备份目录: ${r.backupDir}`);
+    return;
+  }
+  out(`待迁移 ${plan.items.length} 条、已 v2 ${plan.alreadyV2} 条、跳过(非记忆) ${plan.skipped.length} 条`);
+  for (const p of plan.skipped.slice(0, 5)) out(`  跳过: ${p}`);
 }
 
 async function cmdLearnExtract(
@@ -777,6 +936,388 @@ async function cmdLearnRecent(
   out(formatDiff(outcome.diff!));
 }
 
+function formatInboxLine(it: InboxItem): string {
+  const q = it.quality
+    ? ` · 质量 ${it.quality.specific}/${it.quality.actionable}/${it.quality.transferable}/${it.quality.evidence}/${it.quality.non_duplicate}`
+    : '';
+  const ev = it.evidence[0]?.quote ? ` · 「${it.evidence[0].quote.slice(0, 60)}」` : '';
+  return `${it.id} · ${it.type} · ${it.title}${q} · ${it.session}${ev}`;
+}
+
+async function printTrust(storage: LocalStorageAdapter, out: (l: string) => void): Promise<void> {
+  const t = await readTrust(storage);
+  out(`信任等级 L${t.level} · 接受 ${t.accepted} · 拒绝 ${t.rejected} · 起始 ${t.since}`);
+}
+
+/** 用 $EDITOR(无则 vi)编辑正文,返回「是否接受」;取消编辑保持原样返回 false。 */
+async function editInboxItem(storage: LocalStorageAdapter, it: InboxItem, out: (l: string) => void): Promise<boolean> {
+  const tmp = join(tmpdir(), `trove-inbox-${it.id}.md`);
+  await writeFile(tmp, it.content, 'utf8');
+  const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
+  const r = spawnSync(editor, [tmp], { stdio: 'inherit' });
+  const edited = await readFile(tmp, 'utf8').catch(() => it.content);
+  await rm(tmp, { force: true }).catch(() => {});
+  if (r.error || edited === it.content) return false;
+  await updateInboxItem(storage, it.id, { content: edited });
+  out('正文已更新,重新确认:');
+  const ok = await select({
+    message: '编辑后是否接受?',
+    options: [
+      { value: 'accept', label: 'accept 接受' },
+      { value: 'reject', label: 'reject 拒绝' },
+    ],
+  });
+  return ok === 'accept';
+}
+
+async function cmdLearnReview(
+  paths: ReturnType<typeof trovePaths>,
+  lessonDeps: LessonProviderDeps | undefined,
+  out: (l: string) => void,
+  interactive: boolean,
+  opts: { acceptAll?: boolean; rejectAll?: boolean; session?: string; json?: boolean },
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const config = lessonDeps?.config ?? (await loadConfig(paths.config));
+  const learn = readLearnConfig(config);
+  const items = await listInbox(storage, opts.session ? { session: opts.session } : undefined);
+
+  if (opts.json) {
+    out(JSON.stringify(items, null, 2));
+    return;
+  }
+  if (items.length === 0) {
+    out('暂无待审候选(inbox 为空)');
+    return;
+  }
+
+  const { llm, jev } = resolveProviders({ ...lessonDeps, config });
+  const gateway = new JevDecisionGateway({ jev, learn, llm });
+
+  if (opts.acceptAll) {
+    for (const it of items) {
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
+      out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
+    }
+    await printTrust(storage, out);
+    return;
+  }
+  if (opts.rejectAll) {
+    for (const it of items) {
+      await rejectInboxItem(storage, it.id);
+      out(`已拒绝: ${it.title}`);
+    }
+    await printTrust(storage, out);
+    return;
+  }
+
+  if (!interactive) {
+    out(`待审 ${items.length} 条,前 ${Math.min(5, items.length)} 条摘要:`);
+    for (const it of items.slice(0, 5)) out(`  ${formatInboxLine(it)}`);
+    out('用 trove learn review 交互处理,或 --accept-all / --reject-all 批量处理');
+    return;
+  }
+
+  for (const it of items) {
+    out(formatInboxLine(it));
+    const action = await select({
+      message: `${it.type} · ${it.title}`,
+      options: [
+        { value: 'accept', label: 'accept 接受' },
+        { value: 'edit', label: 'edit 编辑' },
+        { value: 'reject', label: 'reject 拒绝' },
+        { value: 'skip', label: 'skip 跳过' },
+        { value: 'quit', label: 'quit 退出' },
+      ],
+    });
+    if (isCancel(action) || action === 'quit') break;
+    if (action === 'accept') {
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
+      out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
+    } else if (action === 'reject') {
+      await rejectInboxItem(storage, it.id);
+      out(`已拒绝: ${it.title}`);
+    } else if (action === 'edit') {
+      if (await editInboxItem(storage, it, out)) {
+        const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
+        out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
+      }
+    }
+    // skip: 不处理,继续下一条
+  }
+  await printTrust(storage, out);
+}
+
+async function cmdLearnWhy(
+  paths: ReturnType<typeof trovePaths>,
+  id: string | undefined,
+  out: (l: string) => void,
+): Promise<void> {
+  if (!id) {
+    out('用法: trove learn why <inbox-id | memory-id | session-id>');
+    return;
+  }
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+
+  const item = await readInboxItem(storage, id);
+  if (item) {
+    out(`inbox 候选: ${item.id}`);
+    out(`类型: ${item.type} · 标题: ${item.title} · 会话: ${item.session}`);
+    if (item.quality) {
+      out(`质量: specific=${item.quality.specific} actionable=${item.quality.actionable} transferable=${item.quality.transferable} evidence=${item.quality.evidence} non_duplicate=${item.quality.non_duplicate}`);
+    }
+    for (const e of item.evidence) out(`证据: ${e.quote}${e.path ? ` (${e.path}:${e.line ?? '-'})` : ''}`);
+    out(`正文:\n${item.content}`);
+    return;
+  }
+
+  for (const f of await storage.list()) {
+    if (f.split('/').some((seg) => seg.startsWith('.'))) continue;
+    const text = await storage.read(f);
+    if (text === null) continue;
+    const mem = parseMemory(text);
+    if (!mem || mem.id !== id) continue;
+    out(`记忆: ${f} · status=${mem.status} · version=${mem.version} · promptVersion=${mem.promptVersion ?? '-'}`);
+    if (mem.quality) {
+      out(`质量: specific=${mem.quality.specific} actionable=${mem.quality.actionable} transferable=${mem.quality.transferable} evidence=${mem.quality.evidence} non_duplicate=${mem.quality.non_duplicate}`);
+    }
+    for (const e of mem.evidence) out(`证据: ${e.quote}${e.path ? ` (${e.path}:${e.line ?? '-'})` : ''}`);
+    const session = mem.evidence[0]?.session;
+    if (session) {
+      const decisions = await readDecisions(storage, { session });
+      if (decisions.length) {
+        out(`会话 ${session} 的决策记录:`);
+        for (const d of decisions) out(`  [${d.at}] ${d.stage} ${d.decision} (${d.source})`);
+      }
+    }
+    return;
+  }
+
+  const decisions = await readDecisions(storage, { session: id });
+  if (decisions.length) {
+    out(`会话 ${id} 的决策记录:`);
+    for (const d of decisions) out(`[${d.at}] ${d.stage} ${d.decision} (${d.source})`);
+    return;
+  }
+  out(`找不到 ${id}(既不是 inbox id、记忆 id,也不是会话 id)`);
+}
+
+async function cmdLearnTrust(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  level: string | undefined,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  if (level === undefined) {
+    await printTrust(storage, out);
+    return;
+  }
+  const n = Number(level);
+  if (!Number.isInteger(n) || n < 0 || n > 3) {
+    out('用法: trove learn trust --level <0-3>');
+    return;
+  }
+  const cur = await readTrust(storage);
+  await writeTrust(storage, { ...cur, level: n as TrustLevel, updatedAt: new Date().toISOString() });
+  out(`信任等级已设为 L${n}(仅人为设置)`);
+}
+
+async function cmdLearnStatus(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  json: boolean,
+): Promise<void> {
+  const queue = JobQueue.open(paths.learnDb);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const config = await loadConfig(paths.config);
+  const learn = readLearnConfig(config);
+  let vectorCount = 0;
+  if (existsSync(paths.vectorDb)) {
+    try {
+      const v = VectorIndex.open(paths.vectorDb);
+      vectorCount = v.count();
+      v.close();
+    } catch {
+      // 索引损坏按 0 计,不阻断 status
+    }
+  }
+  try {
+    const s = queue.stats();
+    const dead = queue.listDead(5);
+    const inbox = await listInbox(storage);
+    const trust = await readTrust(storage);
+    const staleMemories = await countStaleMemories(storage);
+    if (json) {
+      out(
+        JSON.stringify(
+          {
+            queue: s,
+            recentFailures: dead.map((j) => ({ id: j.id, sessionKey: j.sessionKey, error: j.lastError, errorClass: j.errorClass, attempts: j.attempts })),
+            inboxPending: inbox.length,
+            trust: trust.level,
+            staleMemories,
+            vectors: vectorCount,
+            vectorModel: learn.embedding.enabled ? learn.embedding.model : null,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    out(
+      [
+        `队列: 待处理 ${s.queued} · 重试等待 ${s.retryWait} · 运行中 ${s.running} · 完成 ${s.done} · 跳过 ${s.skipped} · 死信 ${s.dead}`,
+        `最老排队: ${s.oldestQueuedAt ? `${humanSpan(Date.now() - s.oldestQueuedAt)}前` : '-'} · p50 ${s.p50Ms ?? '-'}ms · p95 ${s.p95Ms ?? '-'}ms`,
+        `inbox 待审 ${inbox.length} · 信任等级 L${trust.level} · stale 记忆 ${staleMemories}`,
+        `向量 ${vectorCount} · 模型 ${learn.embedding.enabled ? learn.embedding.model : '-'}`,
+      ].join('\n'),
+    );
+    for (const j of dead) out(`  失败: ${j.sessionKey} · ${j.errorClass ?? '-'} · ${j.lastError}`);
+  } finally {
+    queue.close();
+  }
+}
+
+/** curator:跑一轮记忆生命周期维护(过期 → stale → 归档,复活最近用过的)。 */
+async function cmdLearnCurator(
+  opts: { dryRun?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const config = await loadConfig(paths.config);
+  const learn = readLearnConfig(config);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const report = await runCurator(storage, {
+    staleDays: learn.lifecycle.staleDays,
+    archiveDays: learn.lifecycle.archiveDays,
+    trajectoryDays: learn.lifecycle.trajectoryDays,
+    trajectoryMax: learn.lifecycle.trajectoryMax,
+    ...(opts.dryRun ? { dryRun: true } : {}),
+  });
+  out(
+    `curator${opts.dryRun ? '(dry-run)' : ''}: stale ${report.stale.length} · 归档 ${report.archived.length} · 复活 ${report.revived.length} · 使用更新 ${report.usageUpdated.length}`,
+  );
+  for (const p of report.stale.slice(0, 5)) out(`  stale: ${p}`);
+  for (const p of report.archived.slice(0, 5)) out(`  归档: ${p}`);
+  for (const p of report.revived.slice(0, 5)) out(`  复活: ${p}`);
+  for (const p of report.usageUpdated.slice(0, 5)) out(`  使用更新: ${p}`);
+}
+
+async function cmdLearnPause(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  paused: boolean,
+): Promise<void> {
+  const config = await loadConfig(paths.config);
+  config.learn.paused = paused;
+  await saveConfig(paths.config, config);
+  out(paused ? 'learn 已暂停(learn.paused=true)' : 'learn 已恢复(learn.paused=false)');
+}
+
+async function cmdLearnRetry(
+  paths: ReturnType<typeof trovePaths>,
+  jobId: string | undefined,
+  out: (l: string) => void,
+): Promise<void> {
+  if (!jobId) {
+    out('用法: trove learn retry <job-id>');
+    return;
+  }
+  const queue = JobQueue.open(paths.learnDb);
+  try {
+    const job = queue.get(jobId);
+    if (!job) {
+      out(`没有找到作业: ${jobId}`);
+      return;
+    }
+    if (job.state !== 'dead') {
+      out(`作业 ${jobId} 当前状态 ${job.state},无需重试(仅 dead 可重试)`);
+      return;
+    }
+    queue.retry(jobId);
+    out(`作业 ${jobId} 已重新入队`);
+  } finally {
+    queue.close();
+  }
+}
+
+async function cmdDoctor(paths: ReturnType<typeof trovePaths>, out: (l: string) => void): Promise<void> {
+  const results: Array<[string, boolean]> = [];
+  const push = (label: string, ok: boolean): void => void results.push([label, ok]);
+
+  let config: Config | null = null;
+  try {
+    config = await loadConfig(paths.config);
+    push('config.json 可读', true);
+  } catch (e) {
+    push(`config.json 可读 —— ${(e as Error).message}`, false);
+  }
+  push('LLM 配置齐全', !!(config?.llm?.baseUrl && config.llm.model && config.llm.apiKey));
+  push('Jev 配置齐全', !!(config?.jev?.apiKey && config.jev.model));
+
+  try {
+    const queue = JobQueue.open(paths.learnDb);
+    const s = queue.stats();
+    queue.close();
+    push(`learn.db 可打开(待处理 ${s.queued + s.retryWait} · 死信 ${s.dead})`, true);
+  } catch (e) {
+    push(`learn.db 可打开 —— ${(e as Error).message}`, false);
+  }
+
+  if (!existsSync(paths.vectorDb)) {
+    push('向量索引尚未构建(纯 FTS 降级可用)', true);
+  } else {
+    try {
+      const v = VectorIndex.open(paths.vectorDb);
+      const n = v.count();
+      v.close();
+      push(`向量索引可打开(${n} 条)`, true);
+    } catch (e) {
+      push(`向量索引 —— ${(e as Error).message}`, false);
+    }
+  }
+
+  try {
+    const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+    const inbox = await listInbox(storage);
+    push(`inbox 待审 ${inbox.length}`, true);
+    push('迁移标记存在', await storage.exists('.trove/migrated-v2.json'));
+  } catch (e) {
+    push(`lessons 布局可读 —— ${(e as Error).message}`, false);
+  }
+
+  try {
+    const search = await getSearchStatus(paths.vault, paths.cache);
+    push(`search cache(会话索引 ${search.sessions.indexedSessions}/${search.sessions.totalSessions})`, true);
+  } catch (e) {
+    push(`search cache —— ${(e as Error).message}`, false);
+  }
+
+  try {
+    const probe = join(paths.tmp, `doctor-${Date.now()}.tmp`);
+    await writeFile(probe, 'ok');
+    await rm(probe, { force: true });
+    push('磁盘 tmp 可写', true);
+  } catch (e) {
+    push(`磁盘 tmp 可写 —— ${(e as Error).message}`, false);
+  }
+
+  try {
+    const d = await daemonState(paths);
+    push(d.running ? `daemon 运行中 (pid ${d.pid})` : 'daemon 未运行', true);
+  } catch (e) {
+    push(`daemon 状态 —— ${(e as Error).message}`, false);
+  }
+
+  let failed = false;
+  for (const [label, ok] of results) {
+    out(`${ok ? pc.green('✓') : pc.red('!')} ${label}`);
+    if (!ok) failed = true;
+  }
+  if (failed) throw new Error('doctor 检查未全部通过');
+}
+
 async function cmdStatus(
   paths: ReturnType<typeof trovePaths>,
   createRemote: (config: RemoteConfig) => RemoteStore,
@@ -799,13 +1340,13 @@ async function cmdStatus(
   const probe = isRemoteConfigured(config.remote)
     ? probeRemote(createRemote(config.remote), AbortSignal.timeout(5000))
     : Promise.resolve(null);
-  const [index, libraryPending, daemon, remote, lessons, learnQueue] = await Promise.all([
+  const [index, libraryPending, daemon, remote, lessons, learnPending] = await Promise.all([
     loadLibraryIndex(paths.vault),
     computeLibraryPending(paths.vault, state),
     daemonState(paths),
     probe,
     computeLessonsSummary(paths.vault),
-    readLearnQueue(paths.learnQueue),
+    pendingLearnCount(paths),
   ]);
 
   const nowMs = now();
@@ -814,7 +1355,7 @@ async function cmdStatus(
       ...formatStatus(report, {
         library: index ? { skills: Object.keys(index.skills).length } : null,
       }),
-...formatLessons(lessons, learnQueue),
+...formatLessons(lessons, learnPending),
       ...formatRemote(describeRemote(config.remote), remote, config.device.id, nowMs),
       ...formatDaemon(daemon, nowMs),
       ...formatPending(report.pending, libraryPending, rawSync),
@@ -1082,22 +1623,56 @@ function daemonRuntime(
     },
     afterSync: async (report) => {
       const ids = report.collected.changedSessions;
-      await enqueueLearn(paths.learnQueue, ids);
-      return ids.length ? `经验提取入队 ${ids.length} 个新会话` : undefined;
+      const queue = JobQueue.open(paths.learnDb);
+      try {
+        await migrateJsonQueue(paths.learnQueue, queue, paths.vault);
+        const n = await enqueueLearnSessions(paths.vault, queue, ids);
+        return n ? `经验提取入队 ${n} 个新会话` : undefined;
+      } finally {
+        queue.close();
+      }
     },
     learnTick: async () => {
       // 每 tick 重读配置,模型端点变更即时生效,无需重启 daemon。
       const config = await loadConfig(paths.config);
-      const pending = await learnPendingBatch(paths.vault, paths.learnQueue, { ...lessonDeps, config, usagePath: paths.usageLog }, learnBatch, {
-        log: (l) => void daemonLog(paths, l),
-      });
-      // 近期方向聚合:hash 不变则 skip(不烧 token),有实际更新才记一行,避免每 tick 刷噪音。
-      const recent = await learnRecentMatters(paths.vault, { ...lessonDeps, config });
-      const parts = [pending, recent.diff ? '近期方向已刷新' : undefined].filter((x): x is string => !!x);
-      return parts.length ? parts.join(' · ') : undefined;
+      const queue = JobQueue.open(paths.learnDb, config.learn.maxAttempts);
+      try {
+        const pending = await learnPendingBatch(paths.vault, queue, { ...lessonDeps, config, usagePath: paths.usageLog }, learnBatch, {
+          log: (l) => void daemonLog(paths, l),
+        });
+        // 近期方向聚合:hash 不变则 skip(不烧 token),有实际更新才记一行,避免每 tick 刷噪音。
+        const recent = await learnRecentMatters(paths.vault, { ...lessonDeps, config });
+        const parts = [pending, recent.diff ? '近期方向已刷新' : undefined].filter((x): x is string => !!x);
+        const curator = await runCuratorPeriodically(paths, config);
+        if (curator) parts.push(curator);
+        return parts.length ? parts.join(' · ') : undefined;
+      } finally {
+        queue.close();
+      }
     },
     learnIntervalSeconds,
   };
+}
+
+/** daemon 周期任务:最多每 7 天跑一次 curator;失败只记日志,不阻断学习。 */
+async function runCuratorPeriodically(
+  paths: ReturnType<typeof trovePaths>,
+  config: Config,
+): Promise<string | undefined> {
+  const learn = readLearnConfig(config);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  try {
+    const report = await maybeRunCurator(storage, {
+      staleDays: learn.lifecycle.staleDays,
+      archiveDays: learn.lifecycle.archiveDays,
+      trajectoryDays: learn.lifecycle.trajectoryDays,
+      trajectoryMax: learn.lifecycle.trajectoryMax,
+    });
+    if (!report) return undefined;
+    return `curator: stale ${report.stale.length} · 归档 ${report.archived.length} · 复活 ${report.revived.length}`;
+  } catch (e) {
+    return `curator 失败(不影响学习): ${(e as Error).message}`;
+  }
 }
 
 /** 主入口:用 commander 定义命令并分发。返回进程退出码。 */
@@ -1133,6 +1708,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   const err = deps.err ?? ((l: string) => console.error(l));
   const rawOut = deps.rawOut ?? ((s: string) => process.stdout.write(s));
   const paths = trovePaths(deps.base);
+  const lessonDeps = withVectorSync(deps.lessonDeps, paths);
   const createRemote = deps.createRemote ?? defaultCreateRemote;
   const resolveAdapters = deps.resolveAdapters ?? defaultResolveAdapters;
   const now = deps.now ?? Date.now;
@@ -1264,7 +1840,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
 
   program
     .command('lessons [action] [value]')
-    .description('检索经验/实体/偏好/决策/资源 (action: search / show / list)')
+    .description('检索经验/实体/偏好/决策/资源 (action: search / show / list / pin / unpin / forget / restore)')
     .option('--category <name>', 'preferences / entities / experiences / events / resources')
     .option('--type <name>', '记忆类型,如 experiences/gotcha')
     .option('--since <range>', '时间窗,如 7d / 90d / 2026-10-01')
@@ -1272,6 +1848,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--section <heading>', 'show: 只读某个标题小节')
     .option('--lines <range>', 'show: 只读行范围,如 1-80')
     .option('--full', 'show: 读取完整正文(上限 64KB)')
+    .option('--from <dir>', 'restore: 恢复来源目录(默认 archive)')
     .option('--json', '输出 JSON')
     .action(
       async (
@@ -1285,6 +1862,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           section?: string;
           lines?: string;
           full?: boolean;
+          from?: string;
           json?: boolean;
         },
       ) => {
@@ -1303,6 +1881,24 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           await cmdLessonShow(value, opts, paths, out);
         } else if (a === 'list') {
           await cmdLessonsList(opts, paths, out, now());
+        } else if (a === 'pin' || a === 'unpin') {
+          if (!value) {
+            err(`用法: trove lessons ${a} <id|path>`);
+            return;
+          }
+          await cmdLessonPin(value, a === 'pin', paths, out);
+        } else if (a === 'forget') {
+          if (!value) {
+            err('用法: trove lessons forget <id|path>');
+            return;
+          }
+          await cmdLessonForget(value, paths, out);
+        } else if (a === 'restore') {
+          if (!value) {
+            err('用法: trove lessons restore <id|path> [--from <dir>]');
+            return;
+          }
+          await cmdLessonRestore(value, opts.from, paths, out);
         } else {
           err(`未知的 lessons 子命令: ${a}`);
         }
@@ -1401,7 +1997,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('启动 stdio MCP 服务(供 Claude Code / Codex / OpenCode 接入)')
     .action(async () => {
       const { runMcpServer } = await import('./mcp/server.js');
-      await runMcpServer({ vault: paths.vault, cacheDir: paths.cache, version: VERSION, now });
+      await runMcpServer({ vault: paths.vault, cacheDir: paths.cache, version: VERSION, now, hybrid: await hybridSearchConfig(paths) });
     });
 
   const skillCmd = program.command('skill').description('安装/卸载 trove skill');
@@ -1438,14 +2034,40 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   program
     .command('learn')
     .description('经验提取与审计查看')
-    .argument('[sessionId]', '对单会话跑提取流水线(缺省需配合 --list)')
+    .argument('[sessionId]', '会话 id,或子命令:migrate / review / why / trust / curator(缺省需配合 --list)')
+    .argument('[arg]', 'review/why/trust 的附加参数(why 的记忆 id 等)')
     .option('--list', '查看最近一次提取的审计 diff')
-    .option('--session <id>', '配合 --list 指定会话')
+    .option('--session <id>', '配合 --list 或 review 指定会话')
     .option('--force', '即使已提取过也强制重跑')
     .option('-n, --recent <n>', '按最近优先提取 n 个未学习会话')
+    .option('--apply', '配合 migrate:实际执行迁移(默认 dry-run)')
+    .option('--rollback <dir>', '配合 migrate:从备份目录恢复')
+    .option('--accept-all', '配合 review:接受全部待审候选')
+    .option('--reject-all', '配合 review:拒绝全部待审候选')
+    .option('--json', '配合 review/status:输出 JSON')
+    .option('--level <n>', '配合 trust:显式设置信任等级(0-3)')
+    .option('--dry-run', '配合 curator:只统计不写盘')
     .action(
-      async (sessionId: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string }) => {
-        if (opts.list) {
+      async (sessionId: string | undefined, arg: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string; apply?: boolean; rollback?: string; acceptAll?: boolean; rejectAll?: boolean; json?: boolean; level?: string; dryRun?: boolean }) => {
+        if (sessionId === 'migrate') {
+          await cmdLearnMigrate(paths, out, opts);
+        } else if (sessionId === 'review') {
+          await cmdLearnReview(paths, lessonDeps, out, interactive, opts);
+        } else if (sessionId === 'why') {
+          await cmdLearnWhy(paths, arg, out);
+        } else if (sessionId === 'trust') {
+          await cmdLearnTrust(paths, out, opts.level);
+        } else if (sessionId === 'curator') {
+          await cmdLearnCurator(opts, paths, out);
+        } else if (sessionId === 'status') {
+          await cmdLearnStatus(paths, out, opts.json === true);
+        } else if (sessionId === 'pause') {
+          await cmdLearnPause(paths, out, true);
+        } else if (sessionId === 'resume') {
+          await cmdLearnPause(paths, out, false);
+        } else if (sessionId === 'retry') {
+          await cmdLearnRetry(paths, arg, out);
+        } else if (opts.list) {
           await cmdLearnList(paths, opts.session, out);
         } else if (opts.recent !== undefined) {
           const n = Number(opts.recent);
@@ -1453,15 +2075,15 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
             err('用法: trove learn -n <正整数>');
             return;
           }
-          const config = await loadConfig(paths.config);
+          const config = lessonDeps?.config ?? (await loadConfig(paths.config));
           out(`准备提取最近 ${n} 个未学习会话...`);
-          const summary = await learnRecentBatch(paths.vault, n, { ...deps.lessonDeps, config }, { log: (l) => out(l) });
+          const summary = await learnRecentBatch(paths.vault, n, { ...lessonDeps, config }, { log: (l) => out(l) });
           out(pc.green(summary));
         } else if (sessionId) {
-          const config = await loadConfig(paths.config);
-          await cmdLearnExtract(paths, sessionId, { ...deps.lessonDeps, config }, out, opts.force === true);
+          const config = lessonDeps?.config ?? (await loadConfig(paths.config));
+          await cmdLearnExtract(paths, sessionId, { ...lessonDeps, config }, out, opts.force === true);
         } else {
-          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>]');
+          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>] | trove learn review|why|trust|curator|status|pause|resume|retry');
         }
       },
     );
@@ -1471,7 +2093,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('学习 Claude Code 自带记忆系统(~/.claude/projects/*/memory)进入 lessons')
     .option('--force', '即使已学习过也强制重跑')
     .action(async (opts: { force?: boolean }) => {
-      await cmdLearnMemo(paths, deps.lessonDeps, out, opts.force === true);
+      await cmdLearnMemo(paths, lessonDeps, out, opts.force === true);
     });
 
   program
@@ -1479,7 +2101,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('从最近会话聚合用户近期工作方向(时间+项目+主题)写入 recent_matters')
     .option('--force', '即使输入无变化也强制重跑')
     .action(async (opts: { force?: boolean }) => {
-      await cmdLearnRecent(paths, deps.lessonDeps, out, opts.force === true);
+      await cmdLearnRecent(paths, lessonDeps, out, opts.force === true);
     });
 
   program
@@ -1519,6 +2141,13 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
         return;
       }
       await cmdStatus(paths, createRemote, resolveAdapters, out, now);
+    });
+
+  program
+    .command('doctor')
+    .description('自检本地配置、学习队列、检索缓存与 daemon 状态')
+    .action(async () => {
+      await cmdDoctor(paths, out);
     });
 
   program
@@ -1637,7 +2266,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           createRemote,
           resolveAdapters,
           now,
-          deps.lessonDeps,
+          lessonDeps,
           config.daemon.learnIntervalSeconds,
           config.daemon.learnBatch,
         ),

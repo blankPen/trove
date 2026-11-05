@@ -24,13 +24,15 @@ export interface ParsedFrontmatter {
   tags: string[];
   scope: string;
   source: string | null;
+  /** v2 记忆 id;旧文件没有该字段。 */
+  id?: string;
   createdAt?: string;
   updatedAt?: string;
   supersededBy?: string;
 }
 
 /** 切分 frontmatter 块与正文;不是合法 frontmatter 返回 null。 */
-function splitFrontmatter(text: string): { block: string; body: string } | null {
+export function splitFrontmatter(text: string): { block: string; body: string } | null {
   if (!text.startsWith('---')) return null;
   const firstNewline = text.indexOf('\n');
   if (firstNewline === -1) return null;
@@ -63,6 +65,7 @@ export function parseFrontmatter(text: string): ParsedFrontmatter | null {
   const tags = parseJson(fields['tags']);
   const scope = parseJson(fields['scope']);
   const source = parseJson(fields['source']);
+  const id = parseJson(fields['id']);
   const createdAt = parseJson(fields['created_at']);
   const updatedAt = parseJson(fields['updated_at']);
   const supersededBy = parseJson(fields['superseded_by']);
@@ -72,10 +75,32 @@ export function parseFrontmatter(text: string): ParsedFrontmatter | null {
     tags: Array.isArray(tags) ? tags.map(String) : [],
     scope: typeof scope === 'string' ? scope : 'global',
     source: typeof source === 'string' ? source : null,
+    ...(typeof id === 'string' ? { id } : {}),
     ...(typeof createdAt === 'string' ? { createdAt } : {}),
     ...(typeof updatedAt === 'string' ? { updatedAt } : {}),
     ...(typeof supersededBy === 'string' ? { supersededBy } : {}),
   };
+}
+
+/**
+ * 在 frontmatter 块内改一个字段,正文原样保留。
+ * value 为 null 时删除该行;字段不存在时插到块尾。非 frontmatter 文件原样返回。
+ */
+export function setFrontmatterField(text: string, key: string, value: string | null): string {
+  const split = splitFrontmatter(text);
+  if (!split) return text;
+  const lines = split.block.split('\n');
+  const re = new RegExp(`^${key}:.*$`);
+  const idx = lines.findIndex((l) => re.test(l));
+  if (value === null) {
+    if (idx === -1) return text;
+    lines.splice(idx, 1);
+  } else if (idx === -1) {
+    lines.push(`${key}: ${value}`);
+  } else {
+    lines[idx] = `${key}: ${value}`;
+  }
+  return `---\n${lines.join('\n')}\n---${split.body}`;
 }
 
 /** 返回 frontmatter 之后的正文;无合法 frontmatter 返回 null。 */

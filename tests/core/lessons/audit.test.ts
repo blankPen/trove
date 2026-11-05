@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildMemoryDiff, writeMemoryDiff, readLatestDiff, readSessionDiff, formatDiff } from '../../../src/core/lessons/audit.js';
+import { buildMemoryDiff, writeMemoryDiff, readLatestDiff, readSessionDiff, readShadowDiff, formatDiff } from '../../../src/core/lessons/audit.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 import type { MemoryOp } from '../../../src/core/lessons/merge.js';
 
@@ -79,5 +79,18 @@ describe('审计日志(Stage 8)', () => {
     expect(session).toEqual(diff);
 
     expect(await readSessionDiff(storage, 'no-such')).toBeNull();
+  });
+
+  it('shadow 审计可经 readShadowDiff 读回,标准路径不读 shadow', async () => {
+    const diff = buildMemoryDiff(
+      [{ op: 'skip', type: 'experiences/foo', title: '候选', reason: 'shadow:add' }],
+      CTX,
+    );
+    await storage.write('audit/sess-1.shadow.json', JSON.stringify(diff, null, 2));
+
+    expect(await readShadowDiff(storage, 'sess-1')).toEqual(diff);
+    expect(await readShadowDiff(storage, 'no-such')).toBeNull();
+    // readSessionDiff 保持只读标准路径,不回退 shadow
+    expect(await readSessionDiff(storage, 'sess-1')).toBeNull();
   });
 });

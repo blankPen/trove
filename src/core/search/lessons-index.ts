@@ -19,7 +19,11 @@ export interface LessonDoc {
   title: string;
   type: string;
   tags: string[];
+  /** v2 记忆 id;旧文件没有。 */
+  id?: string;
   updatedAt?: string;
+  /** 项目作用域 global 或 project:<slug>;无 frontmatter 的文件没有。 */
+  scope?: string;
   body: string;
 }
 
@@ -29,6 +33,8 @@ export interface LessonHit {
   type: string;
   tags: string[];
   updatedAt?: string;
+  id?: string;
+  scope?: string;
   snippet: string;
   score: number;
   scoreParts: ScoreParts;
@@ -53,7 +59,7 @@ interface Row {
   score: number;
 }
 
-const SKIP_DIRS = new Set(['archive', 'audit']);
+const SKIP_DIRS = new Set(['archive', 'audit', 'trajectories', '.trove']);
 const SKIP_FILES = new Set(['INDEX.md', 'README.md']);
 
 async function walk(root: string, rel = ''): Promise<string[]> {
@@ -122,7 +128,9 @@ export class LessonsIndex {
           title: fm?.title || basename(rel),
           type: fm?.type ?? '',
           tags: fm?.tags ?? [],
+          ...(fm?.id ? { id: fm.id } : {}),
           ...(fm?.updatedAt ? { updatedAt: fm.updatedAt } : {}),
+          ...(fm?.scope ? { scope: fm.scope } : {}),
           body,
         };
         docs.set(rel, doc);
@@ -199,6 +207,8 @@ export class LessonsIndex {
         type: row.type,
         tags,
         ...(row.updated_at ? { updatedAt: row.updated_at } : {}),
+        ...(doc?.id ? { id: doc.id } : {}),
+        ...(doc?.scope ? { scope: doc.scope } : {}),
         snippet: snippetAround(body, query) || clip(body, 160),
         score: parts.bm25 + parts.recency + parts.exact + parts.project,
         scoreParts: parts,
@@ -223,6 +233,8 @@ export class LessonsIndex {
         type: d.type,
         tags: d.tags,
         ...(d.updatedAt ? { updatedAt: d.updatedAt } : {}),
+        ...(d.id ? { id: d.id } : {}),
+        ...(d.scope ? { scope: d.scope } : {}),
         snippet: clip(d.body, 160),
         score: 0,
         scoreParts: { bm25: 0, recency: 0, exact: 0, project: 0 },

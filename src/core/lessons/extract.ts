@@ -4,6 +4,8 @@ import type { LlmProvider } from './llm.js';
 import type { Classification, SessionSummary } from './analyze.js';
 import { renderEvents } from './analyze.js';
 import { getMemoryType } from './schema.js';
+import { EXPERIENCE_SECTIONS } from './contract.js';
+import type { EvidenceRef, QualityScore } from './memory.js';
 
 export interface MemoryCandidate {
   /** 记忆类型 key,如 `experiences/debug_pattern`。 */
@@ -122,6 +124,138 @@ function parseCandidate(raw: unknown, validTypes: Set<string>, seqs: Set<number>
   return { type, title, content, slug, evidence };
 }
 
+// ── v2 提取:evidence 为 [{seq,quote}],经验类强制五段式 ──
+
+export interface MemoryCandidateV2 {
+  type: string;
+  title: string;
+  content: string;
+  slug?: string;
+  evidence: EvidenceRef[];
+  /** 项目 scope(global 或 project:<slug>);提取阶段不填,由流水线 inferScope 回填。 */
+  scope?: string;
+  /** 流水线回填,供 merge 写进 meta(提取阶段不填)。 */
+  quality?: QualityScore;
+  confidence?: number;
+  sourceTrajectories?: string[];
+}
+
+const V2_CANDIDATE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    memories: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          type: { type: 'string' },
+          title: { type: 'string' },
+          content: { type: 'string' },
+          slug: { type: 'string' },
+          evidence: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: { seq: { type: 'integer' }, quote: { type: 'string' } },
+              required: ['seq', 'quote'],
+            },
+          },
+        },
+        required: ['type', 'title', 'content', 'evidence'],
+      },
+    },
+  },
+  required: ['memories'],
+};
+
+export async function extractMemoriesV2(
+  summary: SessionSummary,
+  classification: Classification,
+  events: Event[],
+  deps: ExtractDeps,
+): Promise<MemoryCandidateV2[]> {
+  const out: MemoryCandidateV2[] = [];
+  for (const category of Object.keys(TYPES_BY_CATEGORY) as (keyof Classification)[]) {
+    if (!classification[category]) continue;
+    out.push(...(await extractCategoryV2(category, summary, events, deps)));
+  }
+  return out;
+}
+
+async function extractCategoryV2(
+  category: keyof Classification,
+  summary: SessionSummary,
+  events: Event[],
+  deps: ExtractDeps,
+): Promise<MemoryCandidateV2[]> {
+  const allowed = TYPES_BY_CATEGORY[category];
+  const isExperience = category === 'experiences';
+  const prompt = [
+    ...(isExperience
+      ? [
+          `从会话中提取「经验」类记忆,type 只能是:${allowed.join('、')}。`,
+          `每条经验的 content 必须用五段式结构输出:${EXPERIENCE_SECTIONS.map((s) => `## ${s}`).join(' / ')};证据段「## 证据」由流水线自动追加,不要自己写。`,
+          '要求一条经验只表达一个意图;命令/错误串/路径要具体;禁止空话(如「要注意」「视情况而定」「谨慎处理」)。',
+          '各 type 验收点:',
+          ...allowed.map((t) => `- ${t}: ${getMemoryType(t)?.extractionPrompt ?? ''}`),
+        ]
+      : [
+          `从会话中提取「${CATEGORY_LABEL[category]}」类记忆,type 只能是:${allowed.join('、')}。`,
+          '每条记忆的 content 用结构化 Markdown 输出:1~3 个 `##` 小节(如背景/要点/结论),每节 1~3 条 `-` 要点;不要输出一整段纯文本。',
+          '每条记忆必须带 evidence:quote 为事件原文中的连续片段(至少 12 字),seq 为对应事件序号。',
+        ]),
+    ...(category === 'preferences'
+      ? ['各 type 提取口径:', ...allowed.map((t) => `- ${t}: ${getMemoryType(t)?.extractionPrompt ?? ''}`)]
+      : []),
+    ...(category === 'resources'
+      ? ['资源类记忆的 content 必须包含来源:URL(http/https)或文件路径(事件里的 @path:line),做到完全可溯源。']
+      : []),
+    `摘要:${JSON.stringify(summary)}`,
+    '事件:',
+    renderEvents(events),
+    ...(deps.existing ? [`已有记忆(避免重复提取):${deps.existing}`] : []),
+  ].join('\n');
+
+  const raw = await deps.llm.generate<{ memories?: unknown }>(prompt, V2_CANDIDATE_SCHEMA, 'learn:extract');
+  const list = Array.isArray(raw?.memories) ? raw.memories : [];
+  const validTypes = new Set(allowed);
+  const out: MemoryCandidateV2[] = [];
+  for (const item of list) {
+    const c = parseCandidateV2(item, validTypes, events);
+    if (!c) continue;
+    // outcome-aware:失败会话(且无纠正)不得把 workflow 写成成功流程
+    if (summary.outcome === 'failure' && !summary.hasCorrection && c.type === 'experiences/workflow') continue;
+    out.push(c);
+  }
+  return out;
+}
+
+function parseCandidateV2(raw: unknown, validTypes: Set<string>, events: Event[]): MemoryCandidateV2 | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const type = String(r.type ?? '');
+  if (!validTypes.has(type)) return null;
+  const title = scrubSecrets(String(r.title ?? '').trim());
+  const content = scrubSecrets(String(r.content ?? '').trim());
+  if (!title || !content) return null;
+  const bySeq = new Map(events.map((e) => [e.seq, e]));
+  const evidence: EvidenceRef[] = [];
+  if (Array.isArray(r.evidence)) {
+    for (const item of r.evidence) {
+      if (typeof item !== 'object' || item === null) continue;
+      const o = item as Record<string, unknown>;
+      const seq = Number(o.seq);
+      const quote = typeof o.quote === 'string' ? o.quote : '';
+      if (!Number.isInteger(seq) || !bySeq.has(seq)) continue;
+      if (!quote) continue; // quote 太短留给 evidence 校验拒绝,这里只要求非空
+      evidence.push({ session: bySeq.get(seq)!.session, seq, quote });
+    }
+  }
+  if (evidence.length === 0) return null;
+  const slug = typeof r.slug === 'string' && r.slug.trim() ? r.slug : undefined;
+  return { type, title, content, slug, evidence };
+}
+
 // shortcut: 敏感值抹除走关键词正则,覆盖常见密钥形态;命中即整段替换为 [REDACTED]。
 const SECRET_PATTERNS: RegExp[] = [
   /AKIA[0-9A-Z]{16}/g,
@@ -133,4 +267,14 @@ export function scrubSecrets(text: string): string {
   let out = text;
   for (const re of SECRET_PATTERNS) out = out.replace(re, '[REDACTED]');
   return out;
+}
+
+/** 高置信敏感形态(T0 只认这些):AWS 密钥与 PEM 私钥块。其它交给 Gate A safe 与提取时 scrubSecrets。 */
+const HIGH_CONFIDENCE_SECRETS: RegExp[] = [
+  /AKIA[0-9A-Z]{16}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/,
+];
+
+export function hasSensitiveSecret(text: string): boolean {
+  return HIGH_CONFIDENCE_SECRETS.some((re) => re.test(text));
 }

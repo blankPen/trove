@@ -4,8 +4,16 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { computeLessonsSummary, type LessonsSummary } from '../../status.js';
 import { libraryLessonsDir } from '../layout.js';
+import { LocalStorageAdapter } from '../lessons/storage.js';
+import { readMemoryUsage, recordMemoryUsageBatch, summarizeMemoryUsage } from '../lessons/memory-usage.js';
+import type { MemoryAction } from '../lessons/memory-usage.js';
 import { loadLibraryIndex } from '../library/index-file.js';
 import { LessonsIndex, resolveLessonPath, type LessonDoc, type LessonHit, type LessonQuery } from './lessons-index.js';
+import { applyUsageRanking } from './rank.js';
+import { searchLessonsHybrid } from './hybrid.js';
+import { getEmbedder } from '../lessons/embedding.js';
+import type { EmbeddingConfig } from '../lessons/embedding.js';
+import { VectorIndex } from '../lessons/vector-index.js';
 import {
   SessionsIndex,
   type BuildStats,
@@ -16,6 +24,15 @@ import {
 
 export interface LessonResult extends LessonDoc {
   truncated: boolean;
+}
+
+/** 混合召回配置：由 CLI/MCP 从 learn.embedding 映射；缺省走纯 FTS。 */
+export interface SearchHybridConfig {
+  embedding: EmbeddingConfig;
+  vectorDb: string;
+  modelCache?: string;
+  recallTopK?: number;
+  rrfK?: number;
 }
 
 export interface SessionSearchResult {
@@ -65,9 +82,78 @@ export function closeSearchCache(): void {
   lessonsCache.clear();
 }
 
-export async function searchLessons(vaultRoot: string, opts: LessonQuery): Promise<LessonHit[]> {
+export async function searchLessons(
+  vaultRoot: string,
+  opts: LessonQuery,
+  hybrid?: SearchHybridConfig,
+): Promise<LessonHit[]> {
   const index = await getLessonsIndex(vaultRoot);
-  return index.search(opts);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  let hits = hybrid ? await hybridSearch(index, vaultRoot, opts, hybrid) : index.search(opts);
+  try {
+    // 使用反馈排序;usage 读取失败不阻断检索,保留原排序。
+    hits = applyUsageRanking(hits, summarizeMemoryUsage(await readMemoryUsage(storage)), { cwd: opts.cwd });
+  } catch {
+    // 埋点/排序不影响检索结果
+  }
+  const events = hits
+    .map((hit, i) => ({ id: index.get(hit.path)?.id, action: 'retrieved' as MemoryAction, rank: i + 1 }))
+    .filter((e): e is { id: string; action: MemoryAction; rank: number } => !!e.id);
+  await trackUsage(storage, events, opts.query);
+  return hits;
+}
+
+/** 打开向量索引做混合召回；向量库不存在/为空/损坏/无模型 → 一律回退纯 FTS，不报错。 */
+async function hybridSearch(
+  index: LessonsIndex,
+  vaultRoot: string,
+  opts: LessonQuery,
+  hybrid: SearchHybridConfig,
+): Promise<LessonHit[]> {
+  if (!existsSync(hybrid.vectorDb)) return index.search(opts);
+  let vectors: VectorIndex;
+  try {
+    vectors = VectorIndex.open(hybrid.vectorDb);
+  } catch {
+    return index.search(opts);
+  }
+  try {
+    if (vectors.count() === 0) return index.search(opts);
+    const embedder = await getEmbedder(hybrid.embedding, { cacheDir: hybrid.modelCache });
+    return await searchLessonsHybrid(vaultRoot, opts.query ?? '', opts, {
+      index,
+      embedder,
+      vectors,
+      recallTopK: hybrid.recallTopK,
+      rrfK: hybrid.rrfK,
+    });
+  } finally {
+    vectors.close();
+  }
+}
+
+/** 记录使用事件;写失败静默忽略,绝不拖垮检索。 */
+async function trackUsage(
+  storage: LocalStorageAdapter,
+  events: { id: string; action: MemoryAction; rank?: number }[],
+  query?: string,
+): Promise<void> {
+  if (events.length === 0) return;
+  const now = new Date().toISOString();
+  try {
+    await recordMemoryUsageBatch(
+      storage,
+      events.map((e) => ({
+        at: now,
+        memory_id: e.id,
+        action: e.action,
+        ...(query ? { query } : {}),
+        ...(e.rank !== undefined ? { rank: e.rank } : {}),
+      })),
+    );
+  } catch {
+    // 埋点失败不阻断检索
+  }
 }
 
 export async function listLessons(vaultRoot: string, opts: LessonQuery = {}): Promise<LessonHit[]> {
@@ -91,6 +177,7 @@ export async function getLesson(
   const index = await getLessonsIndex(vaultRoot);
   const doc = index.get(rel);
   if (!doc) return null;
+  if (doc.id) await trackUsage(new LocalStorageAdapter(libraryLessonsDir(vaultRoot)), [{ id: doc.id, action: 'viewed' }]);
   let body = doc.body;
   if (opts.section) body = sliceSection(body, opts.section) ?? '';
   if (opts.lines) body = sliceLines(body, opts.lines);

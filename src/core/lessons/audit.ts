@@ -82,6 +82,11 @@ export async function readSessionDiff(storage: StorageAdapter, sessionId: string
   return readDiffAt(storage, `audit/${sessionId}.json`);
 }
 
+/** 读 shadow 观察轮的审计(v2 shadow 模式写 .shadow.json);不存在返回 null。 */
+export async function readShadowDiff(storage: StorageAdapter, sessionId: string): Promise<MemoryDiff | null> {
+  return readDiffAt(storage, `audit/${sessionId}.shadow.json`);
+}
+
 async function readDiffAt(storage: StorageAdapter, path: string): Promise<MemoryDiff | null> {
   const text = await storage.read(path);
   if (text === null) return null;

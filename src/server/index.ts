@@ -5,7 +5,7 @@ import type { Adapter } from '../adapters/index.js';
 import type { Config } from '../config.js';
 import type { TrovePaths } from '../paths.js';
 import type { RemoteStore } from '../remote/store.js';
-import { intParam, json, notFound, param } from './http.js';
+import { intParam, json, notFound, param, readBody } from './http.js';
 import { listLessons, readLessonFile } from './lessons.js';
 import { buildOverview } from './overview.js';
 import { listSkills, readSkillFile } from './skills.js';
@@ -16,6 +16,17 @@ import { resolveRawSync } from '../config.js';
 import { runSyncOnce } from '../runtime.js';
 import { SyncJob, type SyncRunner } from './sync.js';
 import { daemonState, restartDaemon } from '../daemon.js';
+import { libraryLessonsDir } from '../core/layout.js';
+import { LocalStorageAdapter } from '../core/lessons/storage.js';
+import { acceptInboxItem, listInbox, rejectInboxItem } from '../core/lessons/inbox.js';
+import { readTrust } from '../core/lessons/trust.js';
+import { readJevConfigOrNull, readLearnConfig, readLlmConfig } from '../core/lessons/config.js';
+import { DeepSeekLlm } from '../core/lessons/llm.js';
+import { TypeSafeJevScorer } from '../core/lessons/jev.js';
+import type { JevProvider } from '../core/lessons/jev.js';
+import { JevDecisionGateway } from '../core/lessons/gateway.js';
+import { buildMemoryHealth } from '../core/lessons/health.js';
+import { runCurator } from '../core/lessons/curator.js';
 
 export interface DaemonControl {
   restart(): Promise<{ pid: number; wasRunning: boolean }>;
@@ -183,6 +194,65 @@ async function handle(
     }
     if (url.pathname === '/api/usage') {
       json(res, 200, await buildUsage(opts.paths));
+      return;
+    }
+    if (url.pathname === '/api/inbox') {
+      const storage = new LocalStorageAdapter(libraryLessonsDir(opts.paths.vault));
+      const [items, trust] = await Promise.all([listInbox(storage), readTrust(storage)]);
+      json(res, 200, { items, trust });
+      return;
+    }
+    // /api/inbox/{id}/{accept|reject}
+    if (segs[2] === 'inbox' && segs[3] && segs[4] && req.method === 'POST') {
+      const id = decodeURIComponent(segs[3]);
+      const storage = new LocalStorageAdapter(libraryLessonsDir(opts.paths.vault));
+      if (segs[4] === 'accept') {
+        let llm;
+        let jev: JevProvider | null;
+        try {
+          llm = new DeepSeekLlm(readLlmConfig(opts.config));
+        } catch (e) {
+          json(res, 400, { error: (e as Error).message });
+          return;
+        }
+        // Jev 是可选增强:未配置就降级为启发式 + LLM 裁决,不阻断人工审核。
+        const jevConfig = readJevConfigOrNull(opts.config);
+        jev = jevConfig ? new TypeSafeJevScorer(jevConfig) : null;
+        const learn = readLearnConfig(opts.config);
+        const gateway = new JevDecisionGateway({ jev, learn });
+        const result = await acceptInboxItem(storage, id, { gateway, llm, learn, now: () => new Date(now()) });
+        if (!result.removed) {
+          if (result.reason) json(res, 409, { error: result.reason });
+          else notFound(res, '这条候选');
+        } else {
+          json(res, 200, { paths: result.paths });
+        }
+        return;
+      }
+      if (segs[4] === 'reject') {
+        const ok = await rejectInboxItem(storage, id);
+        if (!ok) notFound(res, '这条候选');
+        else json(res, 200, { ok: true });
+        return;
+      }
+    }
+    if (url.pathname === '/api/health') {
+      json(res, 200, await buildMemoryHealth(opts.paths, now));
+      return;
+    }
+    if (url.pathname === '/api/curator' && req.method === 'POST') {
+      const storage = new LocalStorageAdapter(libraryLessonsDir(opts.paths.vault));
+      const learn = readLearnConfig(opts.config);
+      let dryRun = true;
+      try {
+        const raw = await readBody(req);
+        const parsed = raw.trim() ? (JSON.parse(raw) as { dryRun?: unknown }) : {};
+        dryRun = parsed.dryRun !== false;
+      } catch {
+        // 无体或非法 JSON:保持默认 dry-run
+      }
+      const report = await runCurator(storage, { ...learn.lifecycle, dryRun, now: () => new Date(now()) });
+      json(res, 200, report);
       return;
     }
     if (url.pathname === '/api/daemon') {

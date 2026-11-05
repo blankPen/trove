@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rebuildUnifiedIndex } from '../../src/core/library/index-file.js';
 import { renderFrontmatter, type FrontmatterInput } from '../../src/core/lessons/frontmatter.js';
+import type { InboxItem } from '../../src/core/lessons/inbox.js';
 
 /**
  * 测试用 vault 的 base 目录:落在临时目录。
@@ -101,6 +102,14 @@ export async function seedLesson(
   const abs = join(vaultRoot(base), 'library/lessons', ...rel.split('/'));
   await mkdir(join(abs, '..'), { recursive: true });
   await writeFile(abs, `${renderFrontmatter(frontmatter)}\n${body}\n`);
+}
+
+/** 落一条待审候选(inbox 在 lessons 根的 .trove/inbox/ 下);返回绝对路径,便于清理。 */
+export async function seedInboxItem(base: string, item: InboxItem): Promise<string> {
+  const abs = join(vaultRoot(base), 'library/lessons/.trove/inbox', `${item.id}.json`);
+  await mkdir(join(abs, '..'), { recursive: true });
+  await writeFile(abs, JSON.stringify(item, null, 2));
+  return abs;
 }
 
 /** 落一个技能版本:meta 声明文件清单,版本目录存文件内容。 */

@@ -40,6 +40,7 @@ function isMemoryFile(rel: string): boolean {
   if (!rel.endsWith('.md')) return false;
   if (base.startsWith('.')) return false;
   if (base === 'INDEX.md' || base === 'README.md') return false;
+  if (rel.startsWith('trajectories/') || rel.startsWith('.trove/')) return false;
   return true;
 }
 

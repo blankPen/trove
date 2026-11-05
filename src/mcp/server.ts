@@ -10,6 +10,7 @@ import {
   listLessons,
   searchLessons,
   searchSessions,
+  type SearchHybridConfig,
 } from '../core/search/service.js';
 import {
   formatLesson,
@@ -26,6 +27,8 @@ export interface McpOptions {
   cacheDir: string;
   version: string;
   now?: () => number;
+  /** 混合召回配置;缺省纯 FTS。 */
+  hybrid?: SearchHybridConfig;
 }
 
 function textResult(text: string): { content: Array<{ type: 'text'; text: string }> } {
@@ -98,14 +101,18 @@ export function createMcpServer(opts: McpOptions): McpServer {
     },
     async (args) => {
       try {
-        const hits = await searchLessons(vault, {
-          query: args.query,
-          ...(args.category ? { category: args.category } : {}),
-          ...(args.type ? { type: args.type } : {}),
-          ...(args.since ? { since: sinceCutoff(args.since, now) } : {}),
-          ...(args.limit ? { limit: args.limit } : {}),
-          cwd: process.cwd(),
-        });
+        const hits = await searchLessons(
+          vault,
+          {
+            query: args.query,
+            ...(args.category ? { category: args.category } : {}),
+            ...(args.type ? { type: args.type } : {}),
+            ...(args.since ? { since: sinceCutoff(args.since, now) } : {}),
+            ...(args.limit ? { limit: args.limit } : {}),
+            cwd: process.cwd(),
+          },
+          opts.hybrid,
+        );
         return textResult(formatLessonHits(hits));
       } catch (err) {
         return errorResult(`检索经验失败：${(err as Error).message}`);

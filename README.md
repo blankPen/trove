@@ -200,6 +200,12 @@ trove status --json             # machine-readable overview
 
 `trove status` reports four things: what each tool has archived locally (count and size), whether the remote is reachable (5 s probe, device count, last seen), the daemon's state and last result, and what is still pending — sessions, files and skills by category.
 
+### Local vector search
+
+Lessons search is hybrid: SQLite FTS5 + BM25 fused with a local embedding model via Reciprocal Rank Fusion (RRF). `trove learn` maintains a separate vector index (`~/.trove/cache/vectors.sqlite`), rebuilt incrementally from the same lessons. The model is `Xenova/bge-small-zh-v1.5` (q8-quantised, 512-dim), run locally through `@huggingface/transformers` with ONNX Runtime; it downloads once (~90 MB) into `~/.trove/cache/models` on first use, and only that first download needs network.
+
+Tune it under `learn.embedding` — `enabled`, `model`, `host` (default `https://hf-mirror.com`), `gateTopK`, `recallTopK`, `rrfK`. It degrades gracefully: no network, missing model, or an empty/corrupt index all fall back to pure FTS5, so commands never error.
+
 ### Knowledge base for agents (skill + MCP)
 
 `trove mcp` exposes seven read-only tools over stdio; `trove skill install` puts the matching skill in `~/.claude/skills` and/or `~/.agents/skills`. The CLI and MCP surfaces are one-to-one:

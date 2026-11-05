@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
+import { DEFAULT_CAPACITY, type CapacityConfig } from './core/lessons/capacity.js';
 
 /** 配置数据模型(设计 §10.2)。 */
 
@@ -57,6 +58,86 @@ export interface DaemonConfig {
   learnBatch: number;
 }
 
+/** v2 学习质量门限(0..1)。 */
+export interface LearnQualityConfig {
+  /** 总质量分 ≥ 该值且五维达标 → 自动接受 */
+  autoAccept: number;
+  /** 总质量分 ≥ 该值 → 升级人工/LLM 裁决 */
+  reviewFloor: number;
+  /** 证据分硬门:低于该值直接拒绝 */
+  evidenceMin: number;
+}
+
+/** 记忆生命周期参数(curator 用)。 */
+export interface LearnLifecycleConfig {
+  /** 多少天没被用到算 stale */
+  staleDays: number;
+  /** 多少天没被用到算归档 */
+  archiveDays: number;
+  /** 轨迹保留天数 */
+  trajectoryDays: number;
+  /** 单项目最多保留多少条轨迹 */
+  trajectoryMax: number;
+}
+
+/** 本地向量检索配置（A5）：bge-small-zh + RRF 混合召回。 */
+export interface LearnEmbeddingConfig {
+  enabled: boolean;
+  model: string;
+  /** 模型下载镜像；可用 learn.embedding.host 覆盖。 */
+  host: string;
+  /** Gate C 向量粗筛候选数。 */
+  gateTopK: number;
+  /** 混合召回里向量侧召回数。 */
+  recallTopK: number;
+  /** RRF 融合常数 k。 */
+  rrfK: number;
+}
+
+export interface LearnConfig {
+  /** off=关闭;shadow=只计算并写审计;review=经验进 inbox 人工审;auto=达阈值直接写 */
+  mode: 'off' | 'shadow' | 'review' | 'auto';
+  /** 正式学习前自动把老 v1 记忆迁移为 v2 schema;默认开启 */
+  autoMigrate: boolean;
+  /** 暂停队列消费(daemon 不跑学习作业) */
+  paused: boolean;
+  /** 每日 token 预算上限;达到即暂停当日学习 */
+  dailyTokenBudget: number;
+  /** 单个作业最大尝试次数 */
+  maxAttempts: number;
+  /** 作业租约时长(毫秒),超时未心跳视为崩溃可重领 */
+  leaseTtlMs: number;
+  quality: LearnQualityConfig;
+  jev: { maxCallsPerSession: number; timeoutMs: number };
+  lifecycle: LearnLifecycleConfig;
+  capacity: CapacityConfig;
+  embedding: LearnEmbeddingConfig;
+}
+
+/** learn 默认值,`defaultConfig` 与 `readLearnConfig` 共用,避免重复字面量。 */
+export function defaultLearnConfig(): LearnConfig {
+  return {
+    mode: 'review',
+    autoMigrate: true,
+    paused: false,
+    dailyTokenBudget: 200000,
+    maxAttempts: 5,
+    leaseTtlMs: 300000,
+    quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
+    jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+    lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
+    capacity: { ...DEFAULT_CAPACITY },
+    embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60 },
+  };
+}
+
+const LEARN_MODES: ReadonlyArray<LearnConfig['mode']> = ['off', 'shadow', 'review', 'auto'];
+
+/** 白名单兜底 review:非法/未知 mode 一律回退 review,不静默改成会直接写盘的 auto。 */
+export function normalizeLearnMode(v: unknown): LearnConfig['mode'] {
+  return (LEARN_MODES as readonly unknown[]).includes(v) ? (v as LearnConfig['mode']) : 'review';
+}
+
 export interface Config {
   device: DeviceConfig;
   remote: RemoteConfig;
@@ -67,6 +148,8 @@ export interface Config {
   llm?: { baseUrl: string; model: string; apiKey: string };
   /** Jev 打分端点;baseUrl 缺省用官方端点,可指向代理/镜像绕过区域限制 */
   jev?: { apiKey: string; model: string; baseUrl?: string };
+  /** v2 学习流水线配置;老配置缺字段时深合并补默认 */
+  learn: LearnConfig;
 }
 
 /** 命令行显式开关优先;否则取配置;老配置文件缺省按开启。 */
@@ -98,6 +181,7 @@ export function defaultConfig(
     },
     sync: { raw: true },
     daemon: { intervalSeconds: 300, since: '7d', startOnInit: true, learnIntervalSeconds: 60, learnBatch: 3 },
+    learn: defaultLearnConfig(),
   };
 }
 
@@ -116,7 +200,7 @@ export async function loadConfig(path: string): Promise<Config> {
   } catch {
     throw new Error(`配置文件损坏,无法解析 JSON: ${path}`);
   }
-  // 老配置没有 sync / daemon 字段:按默认补齐
+  // 老配置没有 sync / daemon / learn 字段:按默认补齐
   return {
     ...parsed,
     remote: normalizeRemote(parsed.remote),
@@ -128,7 +212,64 @@ export async function loadConfig(path: string): Promise<Config> {
       learnIntervalSeconds: parsed.daemon?.learnIntervalSeconds ?? 60,
       learnBatch: parsed.daemon?.learnBatch ?? 3,
     },
+    learn: normalizeLearn(parsed.learn),
   };
+}
+
+/** 老配置的 learn 段深合并:缺字段补默认、部分覆盖不丢、数值保持原样(钳制交给 readLearnConfig)。 */
+export function normalizeLearn(learn: unknown): LearnConfig {
+  const d = defaultLearnConfig();
+  const l = (learn ?? {}) as Record<string, unknown>;
+  const q = (l.quality ?? {}) as Record<string, unknown>;
+  const j = (l.jev ?? {}) as Record<string, unknown>;
+  const c = (l.lifecycle ?? {}) as Record<string, unknown>;
+  const cap = (l.capacity ?? {}) as Record<string, unknown>;
+  const e = (l.embedding ?? {}) as Record<string, unknown>;
+  return {
+    mode: normalizeLearnMode(l.mode),
+    autoMigrate: l.autoMigrate !== false,
+    paused: l.paused === true,
+    dailyTokenBudget: num(l.dailyTokenBudget, d.dailyTokenBudget),
+    maxAttempts: num(l.maxAttempts, d.maxAttempts),
+    leaseTtlMs: num(l.leaseTtlMs, d.leaseTtlMs),
+    quality: {
+      autoAccept: num(q.autoAccept, d.quality.autoAccept),
+      reviewFloor: num(q.reviewFloor, d.quality.reviewFloor),
+      evidenceMin: num(q.evidenceMin, d.quality.evidenceMin),
+    },
+    jev: {
+      maxCallsPerSession: num(j.maxCallsPerSession, d.jev.maxCallsPerSession),
+      timeoutMs: num(j.timeoutMs, d.jev.timeoutMs),
+    },
+    lifecycle: {
+      staleDays: num(c.staleDays, d.lifecycle.staleDays),
+      archiveDays: num(c.archiveDays, d.lifecycle.archiveDays),
+      trajectoryDays: num(c.trajectoryDays, d.lifecycle.trajectoryDays),
+      trajectoryMax: num(c.trajectoryMax, d.lifecycle.trajectoryMax),
+    },
+    capacity: {
+      experiencesPerProject: num(cap.experiencesPerProject, d.capacity.experiencesPerProject),
+      experiencesGlobal: num(cap.experiencesGlobal, d.capacity.experiencesGlobal),
+      profileBytes: num(cap.profileBytes, d.capacity.profileBytes),
+      entitiesPerType: num(cap.entitiesPerType, d.capacity.entitiesPerType),
+    },
+    embedding: {
+      enabled: e.enabled !== false,
+      model: strNonEmpty(e.model, d.embedding.model),
+      host: strNonEmpty(e.host, d.embedding.host),
+      gateTopK: num(e.gateTopK, d.embedding.gateTopK),
+      recallTopK: num(e.recallTopK, d.embedding.recallTopK),
+      rrfK: num(e.rrfK, d.embedding.rrfK),
+    },
+  };
+}
+
+function strNonEmpty(v: unknown, fallback: string): string {
+  return typeof v === 'string' && v !== '' ? v : fallback;
+}
+
+function num(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 }
 
 /**

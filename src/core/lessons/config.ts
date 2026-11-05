@@ -53,6 +53,10 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
   return {
     mode: normalizeLearnMode(l.mode),
     autoMigrate: l.autoMigrate !== false,
+    paused: l.paused === true,
+    dailyTokenBudget: nonNeg(l.dailyTokenBudget, d.dailyTokenBudget),
+    maxAttempts: clampInt(l.maxAttempts, d.maxAttempts, 1, 20),
+    leaseTtlMs: Math.max(10000, nonNeg(l.leaseTtlMs, d.leaseTtlMs)),
     quality: {
       autoAccept: clamp01(l.quality?.autoAccept, d.quality.autoAccept),
       reviewFloor: clamp01(l.quality?.reviewFloor, d.quality.reviewFloor),
@@ -73,4 +77,9 @@ function clamp01(v: unknown, fallback: number): number {
 function nonNeg(v: unknown, fallback: number): number {
   const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
   return n < 0 ? 0 : n;
+}
+
+function clampInt(v: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? Math.round(v) : fallback;
+  return n < min ? min : n > max ? max : n;
 }

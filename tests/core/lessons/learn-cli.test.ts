@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { run } from '../../../src/cli.js';
 import { trovePaths } from '../../../src/paths.js';
+import { loadConfig } from '../../../src/config.js';
+import { JobQueue } from '../../../src/core/lessons/jobs.js';
 import { libraryDir, libraryLessonsDir, safeSessionName } from '../../../src/core/layout.js';
 import { buildMemoryDiff, writeMemoryDiff } from '../../../src/core/lessons/audit.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
@@ -460,5 +462,66 @@ describe('trove learn review/why/trust(人工审核与信任)', () => {
     expect(code).toBe(0);
     expect(lines.join('\n')).toContain('L2');
     expect((await readTrust(storage)).level).toBe(2);
+  });
+});
+
+describe('trove learn status/pause/resume/retry 与 trove doctor(A3 可用性)', () => {
+  it('learn status --json 输出队列统计、inbox 待审与 trust', async () => {
+    const queue = JobQueue.open(trovePaths(base).learnDb);
+    queue.enqueue([{ sessionKey: 'claude-code:s-1', contentHash: 'h1' }]);
+    queue.close();
+
+    const code = await runLearn(['learn', 'status', '--json']);
+
+    expect(code).toBe(0);
+    const parsed = JSON.parse(lines.join('\n'));
+    expect(parsed.queue.queued).toBe(1);
+    expect(parsed.inboxPending).toBe(0);
+    expect(parsed.trust).toBe(0);
+  });
+
+  it('learn pause/resume 切换 learn.paused 并落盘', async () => {
+    expect(await runLearn(['learn', 'pause'])).toBe(0);
+    expect(lines.join('\n')).toContain('learn 已暂停');
+    expect((await loadConfig(trovePaths(base).config)).learn.paused).toBe(true);
+
+    lines.length = 0;
+    expect(await runLearn(['learn', 'resume'])).toBe(0);
+    expect(lines.join('\n')).toContain('learn 已恢复');
+    expect((await loadConfig(trovePaths(base).config)).learn.paused).toBe(false);
+  });
+
+  it('learn retry 把 dead 作业重新入队', async () => {
+    const queue = JobQueue.open(trovePaths(base).learnDb);
+    queue.enqueue([{ sessionKey: 'claude-code:s-1', contentHash: 'h1' }]);
+    const job = queue.lease('t', 1000)!;
+    queue.fail(job.id, { class: 'config', message: 'boom' });
+    queue.close();
+
+    expect(await runLearn(['learn', 'retry', job.id])).toBe(0);
+    expect(lines.join('\n')).toContain('已重新入队');
+
+    const after = JobQueue.open(trovePaths(base).learnDb);
+    expect(after.stats().queued).toBe(1);
+    after.close();
+  });
+
+  it('learn retry 非 dead 作业提示无需重试', async () => {
+    const queue = JobQueue.open(trovePaths(base).learnDb);
+    queue.enqueue([{ sessionKey: 'claude-code:s-1', contentHash: 'h1' }]);
+    const job = queue.lease('t', 1000)!;
+    queue.close();
+
+    expect(await runLearn(['learn', 'retry', job.id])).toBe(0);
+    expect(lines.join('\n')).toContain('无需重试');
+  });
+
+  it('doctor 输出逐项检查,缺 LLM/Jev 配置时 exit 1', async () => {
+    const code = await runLearn(['doctor']);
+    const output = lines.join('\n');
+    expect(output).toContain('config.json 可读');
+    expect(output).toContain('LLM 配置齐全');
+    expect(output).toContain('learn.db 可打开');
+    expect(code).toBe(1); // 全新 base 无 LLM/Jev 配置 → 至少两项失败
   });
 });

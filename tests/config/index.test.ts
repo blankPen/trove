@@ -91,6 +91,10 @@ describe('config(设计 §10.2)', () => {
     expect(defaultConfig().learn).toEqual({
       mode: 'review',
       autoMigrate: true,
+      paused: false,
+      dailyTokenBudget: 200000,
+      maxAttempts: 5,
+      leaseTtlMs: 300000,
       quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
     });
@@ -108,6 +112,10 @@ describe('config(设计 §10.2)', () => {
     expect((await loadConfig(cfg)).learn).toEqual({
       mode: 'auto',
       autoMigrate: false,
+      paused: false,
+      dailyTokenBudget: 200000,
+      maxAttempts: 5,
+      leaseTtlMs: 300000,
       quality: { autoAccept: 0.9, reviewFloor: 0.6, evidenceMin: 0.8 },
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
     });

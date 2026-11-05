@@ -72,6 +72,14 @@ export interface LearnConfig {
   mode: 'off' | 'shadow' | 'review' | 'auto';
   /** 正式学习前自动把老 v1 记忆迁移为 v2 schema;默认开启 */
   autoMigrate: boolean;
+  /** 暂停队列消费(daemon 不跑学习作业) */
+  paused: boolean;
+  /** 每日 token 预算上限;达到即暂停当日学习 */
+  dailyTokenBudget: number;
+  /** 单个作业最大尝试次数 */
+  maxAttempts: number;
+  /** 作业租约时长(毫秒),超时未心跳视为崩溃可重领 */
+  leaseTtlMs: number;
   quality: LearnQualityConfig;
   jev: { maxCallsPerSession: number; timeoutMs: number };
 }
@@ -81,6 +89,10 @@ export function defaultLearnConfig(): LearnConfig {
   return {
     mode: 'review',
     autoMigrate: true,
+    paused: false,
+    dailyTokenBudget: 200000,
+    maxAttempts: 5,
+    leaseTtlMs: 300000,
     quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
     jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
   };
@@ -180,6 +192,10 @@ export function normalizeLearn(learn: unknown): LearnConfig {
   return {
     mode: normalizeLearnMode(l.mode),
     autoMigrate: l.autoMigrate !== false,
+    paused: l.paused === true,
+    dailyTokenBudget: num(l.dailyTokenBudget, d.dailyTokenBudget),
+    maxAttempts: num(l.maxAttempts, d.maxAttempts),
+    leaseTtlMs: num(l.leaseTtlMs, d.leaseTtlMs),
     quality: {
       autoAccept: num(q.autoAccept, d.quality.autoAccept),
       reviewFloor: num(q.reviewFloor, d.quality.reviewFloor),

@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch, recentUnlearnedKeys } from '../../../src/core/lessons/learn.js';
-import { readLearnQueue, enqueueLearn } from '../../../src/core/lessons/queue.js';
+import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch, recentUnlearnedKeys, hashSessionContent, enqueueLearnSessions, migrateJsonQueue } from '../../../src/core/lessons/learn.js';
+import { JobQueue } from '../../../src/core/lessons/jobs.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 import { libraryDir, libraryLessonsDir, safeSessionName } from '../../../src/core/layout.js';
 import { MockLlm, LlmParseError } from '../../../src/core/lessons/llm.js';
@@ -78,6 +79,13 @@ async function writeIndex(sessions: Array<{ harness: string; session: string; ev
 function learnCfg(mode: 'auto' | 'shadow' | 'off' | 'review') {
   return { learn: { mode, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } };
 }
+
+/** 直接入队(绕过会话文件哈希),contentHash 用 key 推导,便于断言唯一键去重。 */
+function enq(queue: JobQueue, keys: string[]): number {
+  return queue.enqueue(keys.map((k) => ({ sessionKey: k, contentHash: `h-${k}` })));
+}
+
+const sha256hex = (s: string): string => createHash('sha256').update(s, 'utf8').digest('hex');
 
 /** v2 Jev:score 全高、keepCalls 全高,通过 Gate A/B。 */
 function v2Jev(): JevProvider {
@@ -277,7 +285,7 @@ describe('learn 入口(v2 单轨编排)', () => {
     expect(await storage.read('audit/s-1.json')).toBeNull();
   });
 
-  it('learnPendingBatch 只处理队列里的候选,已审计跳过,处理完出队', async () => {
+  it('learnPendingBatch 只处理队列里的候选,已审计跳过,处理完落终态', async () => {
     const e1 = sampleEvents('s-1');
     const e2 = sampleEvents('s-2');
     await writeSession('claude-code', 's-1', e1);
@@ -288,15 +296,17 @@ describe('learn 入口(v2 单轨编排)', () => {
     ]);
     // s-2 已提取过:harness:session 审计文件已存在 → 跳过
     await storage.write('audit/claude-code:s-2.json', '{}');
-    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1', 'claude-code:s-2']);
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+    enq(queue, ['claude-code:s-1', 'claude-code:s-2']);
 
-    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
+    const note = await learnPendingBatch(vault, queue, { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
 
     expect(note).toContain('新增 1');
     expect(note).toContain('跳过 1');
     expect(await storage.read('audit/claude-code:s-1.json')).not.toBeNull();
     expect(await storage.read('audit/claude-code:s-2.json')).toBe('{}'); // 未被重写
-    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual([]);
+    expect(queue.stats()).toMatchObject({ done: 1, skipped: 1, queued: 0 });
+    queue.close();
   });
 
   it('learnPendingBatch 裸 session 跨 harness 撞名时各自独立去重', async () => {
@@ -309,59 +319,112 @@ describe('learn 入口(v2 单轨编排)', () => {
     ]);
     // 仅 codex 已提取过
     await storage.write('audit/codex:s-1.json', '{}');
-    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1', 'codex:s-1']);
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+    enq(queue, ['claude-code:s-1', 'codex:s-1']);
 
-    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
+    const note = await learnPendingBatch(vault, queue, { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
 
     expect(note).toContain('新增 1');
     expect(note).toContain('跳过 1');
     expect(await storage.read('audit/claude-code:s-1.json')).not.toBeNull();
     expect(await storage.read('audit/codex:s-1.json')).toBe('{}'); // 未被重写
+    queue.close();
   });
 
   it('learnPendingBatch 按 batch 限量,只处理前 N 个候选,其余留在队列', async () => {
     for (let i = 1; i <= 5; i++) await storage.write(`audit/claude-code:s-${i}.json`, '{}');
-    await enqueueLearn(
-      join(vault, 'learn-queue.json'),
-      ['s-1', 's-2', 's-3', 's-4', 's-5'].map((s) => `claude-code:${s}`),
-    );
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+    enq(queue, ['s-1', 's-2', 's-3', 's-4', 's-5'].map((s) => `claude-code:${s}`));
 
-    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 3);
+    const note = await learnPendingBatch(vault, queue, { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 3);
 
     expect(note).toContain('跳过 3');
     expect(note).toContain('待办 2');
-    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual(['claude-code:s-4', 'claude-code:s-5']);
+    expect(queue.stats()).toMatchObject({ skipped: 3, queued: 2 });
+    queue.close();
   });
 
   it('learnPendingBatch 空队列直接返回 undefined,不触碰 providers', async () => {
-    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+    const note = await learnPendingBatch(vault, queue, { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
     expect(note).toBeUndefined();
+    queue.close();
   });
 
-  it('learnPendingBatch 提取失败落标记并出队,后续不再重试', async () => {
+  it('learnPendingBatch 提取失败落 retry_wait,可退避重试', async () => {
     const e1 = sampleEvents('s-1');
     await writeSession('claude-code', 's-1', e1);
     await writeIndex([{ harness: 'claude-code', session: 's-1', events: e1 }]);
-    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1']);
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+    enq(queue, ['claude-code:s-1']);
 
     const failingLlm = new MockLlm(() => { throw new Error('LLM 炸了'); });
-    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: failingLlm, jev: v2Jev(), config: learnCfg('auto') }, 10);
+    const note = await learnPendingBatch(vault, queue, { llm: failingLlm, jev: v2Jev(), config: learnCfg('auto') }, 10);
 
     expect(note).toContain('失败 1');
-    expect(await storage.read('audit/claude-code:s-1.failed.json')).not.toBeNull();
-    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual([]);
-
-    const note2 = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
-    expect(note2).toBeUndefined();
+    expect(note).toContain('待办 1');
+    expect(queue.stats()).toMatchObject({ retryWait: 1, done: 0, dead: 0 });
+    queue.close();
   });
 
   it('learnPendingBatch off 模式打印关闭提示,不动队列', async () => {
-    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1']);
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+    enq(queue, ['claude-code:s-1']);
 
-    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('off') }, 10);
+    const note = await learnPendingBatch(vault, queue, { llm: v2Llm(), jev: v2Jev(), config: learnCfg('off') }, 10);
 
     expect(note).toBe('learn 已关闭（learn.mode=off）');
-    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual(['claude-code:s-1']);
+    expect(queue.stats()).toMatchObject({ queued: 1 });
+    queue.close();
+  });
+});
+
+describe('入队与会话哈希', () => {
+  it('hashSessionContent 稳定,内容变化后哈希变化', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const h1 = await hashSessionContent(vault, 'claude-code:s-1');
+    const h2 = await hashSessionContent(vault, 'claude-code:s-1');
+    expect(h1).toBe(h2);
+
+    // 追加一行 → 内容变化 → 哈希变化
+    const dir = join(libraryDir(vault), 'sessions', 'claude-code', safeSessionName('s-1'));
+    await writeFile(join(dir, 'd1.jsonl'), ev.map((e) => JSON.stringify(e)).join('\n') + '\n' + JSON.stringify(ev[0]) + '\n', 'utf8');
+    expect(await hashSessionContent(vault, 'claude-code:s-1')).not.toBe(h1);
+  });
+
+  it('hashSessionContent 索引缺失回退 sha256(sessionKey)', async () => {
+    expect(await hashSessionContent(vault, 'claude-code:s-x')).toBe(sha256hex('claude-code:s-x'));
+  });
+
+  it('enqueueLearnSessions 重复入队不增(唯一键幂等)', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+
+    expect(await enqueueLearnSessions(vault, queue, ['claude-code:s-1'])).toBe(1);
+    expect(await enqueueLearnSessions(vault, queue, ['claude-code:s-1'])).toBe(0);
+    expect(queue.stats().queued).toBe(1);
+    queue.close();
+  });
+
+  it('migrateJsonQueue 读旧 JSON 入队并改名 .migrated;文件不存在返回 0', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+    const jsonPath = join(vault, 'learn-queue.json');
+    await writeFile(jsonPath, JSON.stringify(['claude-code:s-1'], null, 2) + '\n', 'utf8');
+    const queue = JobQueue.open(join(vault, 'learn.db'));
+
+    expect(await migrateJsonQueue(jsonPath, queue, vault)).toBe(1);
+    expect(queue.stats().queued).toBe(1);
+    await expect(readFile(jsonPath, 'utf8')).rejects.toThrow(); // 原文件已改名
+    expect(await readFile(`${jsonPath}.migrated`, 'utf8')).toContain('claude-code:s-1');
+    expect(await migrateJsonQueue(jsonPath, queue, vault)).toBe(0); // 已不存在
+    queue.close();
   });
 });
 

@@ -60,12 +60,13 @@ import { silentProgress } from './progress.js';
 import { formatDiff, readLatestDiff, readSessionDiff, readShadowDiff } from './core/lessons/audit.js';
 import { LocalStorageAdapter } from './core/lessons/storage.js';
 import { refreshSidecars } from './core/lessons/sidecar.js';
-import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders } from './core/lessons/learn.js';
+import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders, migrateJsonQueue, enqueueLearnSessions } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
+import { JobQueue } from './core/lessons/jobs.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
 import { learnClaudeMemo } from './core/lessons/memo.js';
 import { learnRecentMatters } from './core/lessons/recent.js';
-import { enqueueLearn, readLearnQueue } from './core/lessons/queue.js';
+import { readLearnQueue } from './core/lessons/queue.js';
 import { planMigration, applyMigration, rollbackMigration } from './core/lessons/migrate.js';
 import { readLearnConfig } from './core/lessons/config.js';
 import { JevDecisionGateway } from './core/lessons/gateway.js';
@@ -174,7 +175,7 @@ const LESSON_LABELS: Array<[Exclude<keyof LessonsSummary, 'total'>, string]> = [
   ['resources', '资源'],
 ];
 
-function formatLessons(lessons: LessonsSummary, learnQueue: string[]): string[] {
+function formatLessons(lessons: LessonsSummary, learnPending: number): string[] {
   const lines = ['', pc.bold('学习沉淀')];
   if (lessons.total === 0) {
     lines.push('  暂无记忆(跑一次 trove learn)');
@@ -183,9 +184,21 @@ function formatLessons(lessons: LessonsSummary, learnQueue: string[]): string[] 
     lines.push(`  ${pc.green(`${lessons.total} 条记忆`)} · ${parts}`);
   }
   lines.push(
-    `  待学习 ${learnQueue.length > 0 ? pc.yellow(`${learnQueue.length} 个会话`) : '无'}`,
+    `  待学习 ${learnPending > 0 ? pc.yellow(`${learnPending} 个会话`) : '无'}`,
   );
   return lines;
+}
+
+/** 待学习数:DB queued+retryWait,加旧 JSON 队列尚未迁移的待办。 */
+async function pendingLearnCount(paths: ReturnType<typeof trovePaths>): Promise<number> {
+  const queue = JobQueue.open(paths.learnDb);
+  try {
+    const s = queue.stats();
+    const legacy = await readLearnQueue(paths.learnQueue);
+    return s.queued + s.retryWait + legacy.length;
+  } finally {
+    queue.close();
+  }
 }
 
 function formatRemote(
@@ -1002,6 +1015,147 @@ async function cmdLearnTrust(
   out(`信任等级已设为 L${n}(仅人为设置)`);
 }
 
+async function cmdLearnStatus(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  json: boolean,
+): Promise<void> {
+  const queue = JobQueue.open(paths.learnDb);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  try {
+    const s = queue.stats();
+    const dead = queue.listDead(5);
+    const inbox = await listInbox(storage);
+    const trust = await readTrust(storage);
+    if (json) {
+      out(
+        JSON.stringify(
+          {
+            queue: s,
+            recentFailures: dead.map((j) => ({ id: j.id, sessionKey: j.sessionKey, error: j.lastError, errorClass: j.errorClass, attempts: j.attempts })),
+            inboxPending: inbox.length,
+            trust: trust.level,
+          },
+          null,
+          2,
+        ),
+      );
+      return;
+    }
+    out(
+      [
+        `队列: 待处理 ${s.queued} · 重试等待 ${s.retryWait} · 运行中 ${s.running} · 完成 ${s.done} · 跳过 ${s.skipped} · 死信 ${s.dead}`,
+        `最老排队: ${s.oldestQueuedAt ? `${humanSpan(Date.now() - s.oldestQueuedAt)}前` : '-'} · p50 ${s.p50Ms ?? '-'}ms · p95 ${s.p95Ms ?? '-'}ms`,
+        `inbox 待审 ${inbox.length} · 信任等级 L${trust.level}`,
+      ].join('\n'),
+    );
+    for (const j of dead) out(`  失败: ${j.sessionKey} · ${j.errorClass ?? '-'} · ${j.lastError}`);
+  } finally {
+    queue.close();
+  }
+}
+
+async function cmdLearnPause(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  paused: boolean,
+): Promise<void> {
+  const config = await loadConfig(paths.config);
+  config.learn.paused = paused;
+  await saveConfig(paths.config, config);
+  out(paused ? 'learn 已暂停(learn.paused=true)' : 'learn 已恢复(learn.paused=false)');
+}
+
+async function cmdLearnRetry(
+  paths: ReturnType<typeof trovePaths>,
+  jobId: string | undefined,
+  out: (l: string) => void,
+): Promise<void> {
+  if (!jobId) {
+    out('用法: trove learn retry <job-id>');
+    return;
+  }
+  const queue = JobQueue.open(paths.learnDb);
+  try {
+    const job = queue.get(jobId);
+    if (!job) {
+      out(`没有找到作业: ${jobId}`);
+      return;
+    }
+    if (job.state !== 'dead') {
+      out(`作业 ${jobId} 当前状态 ${job.state},无需重试(仅 dead 可重试)`);
+      return;
+    }
+    queue.retry(jobId);
+    out(`作业 ${jobId} 已重新入队`);
+  } finally {
+    queue.close();
+  }
+}
+
+async function cmdDoctor(paths: ReturnType<typeof trovePaths>, out: (l: string) => void): Promise<void> {
+  const results: Array<[string, boolean]> = [];
+  const push = (label: string, ok: boolean): void => void results.push([label, ok]);
+
+  let config: Config | null = null;
+  try {
+    config = await loadConfig(paths.config);
+    push('config.json 可读', true);
+  } catch (e) {
+    push(`config.json 可读 —— ${(e as Error).message}`, false);
+  }
+  push('LLM 配置齐全', !!(config?.llm?.baseUrl && config.llm.model && config.llm.apiKey));
+  push('Jev 配置齐全', !!(config?.jev?.apiKey && config.jev.model));
+
+  try {
+    const queue = JobQueue.open(paths.learnDb);
+    const s = queue.stats();
+    queue.close();
+    push(`learn.db 可打开(待处理 ${s.queued + s.retryWait} · 死信 ${s.dead})`, true);
+  } catch (e) {
+    push(`learn.db 可打开 —— ${(e as Error).message}`, false);
+  }
+
+  try {
+    const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+    const inbox = await listInbox(storage);
+    push(`inbox 待审 ${inbox.length}`, true);
+    push('迁移标记存在', await storage.exists('.trove/migrated-v2.json'));
+  } catch (e) {
+    push(`lessons 布局可读 —— ${(e as Error).message}`, false);
+  }
+
+  try {
+    const search = await getSearchStatus(paths.vault, paths.cache);
+    push(`search cache(会话索引 ${search.sessions.indexedSessions}/${search.sessions.totalSessions})`, true);
+  } catch (e) {
+    push(`search cache —— ${(e as Error).message}`, false);
+  }
+
+  try {
+    const probe = join(paths.tmp, `doctor-${Date.now()}.tmp`);
+    await writeFile(probe, 'ok');
+    await rm(probe, { force: true });
+    push('磁盘 tmp 可写', true);
+  } catch (e) {
+    push(`磁盘 tmp 可写 —— ${(e as Error).message}`, false);
+  }
+
+  try {
+    const d = await daemonState(paths);
+    push(d.running ? `daemon 运行中 (pid ${d.pid})` : 'daemon 未运行', true);
+  } catch (e) {
+    push(`daemon 状态 —— ${(e as Error).message}`, false);
+  }
+
+  let failed = false;
+  for (const [label, ok] of results) {
+    out(`${ok ? pc.green('✓') : pc.red('!')} ${label}`);
+    if (!ok) failed = true;
+  }
+  if (failed) throw new Error('doctor 检查未全部通过');
+}
+
 async function cmdStatus(
   paths: ReturnType<typeof trovePaths>,
   createRemote: (config: RemoteConfig) => RemoteStore,
@@ -1024,13 +1178,13 @@ async function cmdStatus(
   const probe = isRemoteConfigured(config.remote)
     ? probeRemote(createRemote(config.remote), AbortSignal.timeout(5000))
     : Promise.resolve(null);
-  const [index, libraryPending, daemon, remote, lessons, learnQueue] = await Promise.all([
+  const [index, libraryPending, daemon, remote, lessons, learnPending] = await Promise.all([
     loadLibraryIndex(paths.vault),
     computeLibraryPending(paths.vault, state),
     daemonState(paths),
     probe,
     computeLessonsSummary(paths.vault),
-    readLearnQueue(paths.learnQueue),
+    pendingLearnCount(paths),
   ]);
 
   const nowMs = now();
@@ -1039,7 +1193,7 @@ async function cmdStatus(
       ...formatStatus(report, {
         library: index ? { skills: Object.keys(index.skills).length } : null,
       }),
-...formatLessons(lessons, learnQueue),
+...formatLessons(lessons, learnPending),
       ...formatRemote(describeRemote(config.remote), remote, config.device.id, nowMs),
       ...formatDaemon(daemon, nowMs),
       ...formatPending(report.pending, libraryPending, rawSync),
@@ -1307,19 +1461,30 @@ function daemonRuntime(
     },
     afterSync: async (report) => {
       const ids = report.collected.changedSessions;
-      await enqueueLearn(paths.learnQueue, ids);
-      return ids.length ? `经验提取入队 ${ids.length} 个新会话` : undefined;
+      const queue = JobQueue.open(paths.learnDb);
+      try {
+        await migrateJsonQueue(paths.learnQueue, queue, paths.vault);
+        const n = await enqueueLearnSessions(paths.vault, queue, ids);
+        return n ? `经验提取入队 ${n} 个新会话` : undefined;
+      } finally {
+        queue.close();
+      }
     },
     learnTick: async () => {
       // 每 tick 重读配置,模型端点变更即时生效,无需重启 daemon。
       const config = await loadConfig(paths.config);
-      const pending = await learnPendingBatch(paths.vault, paths.learnQueue, { ...lessonDeps, config, usagePath: paths.usageLog }, learnBatch, {
-        log: (l) => void daemonLog(paths, l),
-      });
-      // 近期方向聚合:hash 不变则 skip(不烧 token),有实际更新才记一行,避免每 tick 刷噪音。
-      const recent = await learnRecentMatters(paths.vault, { ...lessonDeps, config });
-      const parts = [pending, recent.diff ? '近期方向已刷新' : undefined].filter((x): x is string => !!x);
-      return parts.length ? parts.join(' · ') : undefined;
+      const queue = JobQueue.open(paths.learnDb, config.learn.maxAttempts);
+      try {
+        const pending = await learnPendingBatch(paths.vault, queue, { ...lessonDeps, config, usagePath: paths.usageLog }, learnBatch, {
+          log: (l) => void daemonLog(paths, l),
+        });
+        // 近期方向聚合:hash 不变则 skip(不烧 token),有实际更新才记一行,避免每 tick 刷噪音。
+        const recent = await learnRecentMatters(paths.vault, { ...lessonDeps, config });
+        const parts = [pending, recent.diff ? '近期方向已刷新' : undefined].filter((x): x is string => !!x);
+        return parts.length ? parts.join(' · ') : undefined;
+      } finally {
+        queue.close();
+      }
     },
     learnIntervalSeconds,
   };
@@ -1673,7 +1838,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--rollback <dir>', '配合 migrate:从备份目录恢复')
     .option('--accept-all', '配合 review:接受全部待审候选')
     .option('--reject-all', '配合 review:拒绝全部待审候选')
-    .option('--json', '配合 review:输出待审列表 JSON')
+    .option('--json', '配合 review/status:输出 JSON')
     .option('--level <n>', '配合 trust:显式设置信任等级(0-3)')
     .action(
       async (sessionId: string | undefined, arg: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string; apply?: boolean; rollback?: string; acceptAll?: boolean; rejectAll?: boolean; json?: boolean; level?: string }) => {
@@ -1685,6 +1850,14 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           await cmdLearnWhy(paths, arg, out);
         } else if (sessionId === 'trust') {
           await cmdLearnTrust(paths, out, opts.level);
+        } else if (sessionId === 'status') {
+          await cmdLearnStatus(paths, out, opts.json === true);
+        } else if (sessionId === 'pause') {
+          await cmdLearnPause(paths, out, true);
+        } else if (sessionId === 'resume') {
+          await cmdLearnPause(paths, out, false);
+        } else if (sessionId === 'retry') {
+          await cmdLearnRetry(paths, arg, out);
         } else if (opts.list) {
           await cmdLearnList(paths, opts.session, out);
         } else if (opts.recent !== undefined) {
@@ -1701,7 +1874,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           const config = deps.lessonDeps?.config ?? (await loadConfig(paths.config));
           await cmdLearnExtract(paths, sessionId, { ...deps.lessonDeps, config }, out, opts.force === true);
         } else {
-          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>] | trove learn review|why|trust');
+          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>] | trove learn review|why|trust|status|pause|resume|retry');
         }
       },
     );
@@ -1759,6 +1932,13 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
         return;
       }
       await cmdStatus(paths, createRemote, resolveAdapters, out, now);
+    });
+
+  program
+    .command('doctor')
+    .description('自检本地配置、学习队列、检索缓存与 daemon 状态')
+    .action(async () => {
+      await cmdDoctor(paths, out);
     });
 
   program

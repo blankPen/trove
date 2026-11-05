@@ -1,11 +1,12 @@
 /** 阶段 9:经验提取的编排入口。把「选会话 → 跑流水线 → 批量跳过已审计」接到 CLI 与 daemon。 */
-import { readFile } from 'node:fs/promises';
+import { readFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Event } from '../events/schema.js';
 import type { Config } from '../../config.js';
 import { libraryDir, libraryLessonsDir } from '../layout.js';
 import { trovePaths } from '../../paths.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from '../library/index-file.js';
+import { hashBytes } from '../chunker.js';
 import { ensureLessonsLayout } from './layout.js';
 import { LocalStorageAdapter } from './storage.js';
 import { readLlmConfig, readJevConfig, readLearnConfig } from './config.js';
@@ -16,8 +17,10 @@ import { TypeSafeJevScorer } from './jev.js';
 import type { JevProvider } from './jev.js';
 import { runLessonPipelineV2 } from './v2.js';
 import type { MemoryDiff } from './audit.js';
-import { readLearnQueue, removeLearn } from './queue.js';
+import { readLearnQueue } from './queue.js';
 import { autoMigrateLessons } from './migrate.js';
+import { JobQueue, type JobInput } from './jobs.js';
+import { runQueuedJobs, BLOCKED_MESSAGE } from './runner.js';
 
 export interface LessonProviderDeps {
   llm?: LlmProvider;
@@ -30,6 +33,8 @@ export interface LessonProviderDeps {
   usagePath?: string;
   /** 模型端点配置(~/.trove/config.json 的 llm/jev 段)与 learn 段;缺省由调用方注入。 */
   config?: Pick<Config, 'llm' | 'jev' | 'learn'>;
+  /** 记忆落盘后、审计写盘前的回调(runner 用来写崩溃恢复 checkpoint)。 */
+  onWritten?: (diff: MemoryDiff) => Promise<void> | void;
 }
 
 export interface ExtractionOutcome {
@@ -99,6 +104,7 @@ export async function runLessonExtraction(
     learn,
     loadEvents: (id) => loadSessionEvents(vaultRoot, id),
     now: deps.now,
+    onWritten: deps.onWritten,
   }).catch((e) => {
     // 模型重试后仍输出非 JSON → 当跳过忽略,不记失败。
     if (e instanceof LlmParseError) return null;
@@ -126,67 +132,76 @@ export async function runLessonExtraction(
 }
 
 /**
- * 从队列取最多 batch 个候选,逐个跑流水线;处理完(成功/被过滤/失败)都出队,失败落 .failed 标记。
- * 只学队列里的「本轮新会话」,历史会话走 `trove learn <id>` 手动补。缺配置时不 drain 队列。
+ * 从 learn.db 队列取最多 batch 个作业跑流水线;处理完(成功/被过滤/失败)按各自终态落库。
+ * 只学队列里的「本轮新会话」,历史会话走 `trove learn <id>` 手动补。
  */
 export async function learnPendingBatch(
   vaultRoot: string,
-  queuePath: string,
+  queue: JobQueue,
   deps: LessonProviderDeps = {},
   batch = 3,
   opts: { log?: (line: string) => void } = {},
 ): Promise<string | undefined> {
-  const ids = await readLearnQueue(queuePath);
-  if (ids.length === 0) return undefined;
-
-  if (readLearnConfig(deps.config).mode === 'off') {
-    opts.log?.('learn 已关闭（learn.mode=off）');
-    return 'learn 已关闭（learn.mode=off）';
+  const learn = readLearnConfig(deps.config);
+  const res = await runQueuedJobs(vaultRoot, queue, deps, {
+    owner: 'learn',
+    batch,
+    leaseTtlMs: learn.leaseTtlMs,
+    usagePath: deps.usagePath ?? trovePaths(deps.env?.TROVE_HOME).usageLog,
+    dailyTokenBudget: learn.dailyTokenBudget,
+    log: opts.log,
+  });
+  if (res.blocked) {
+    const msg = BLOCKED_MESSAGE[res.blocked];
+    opts.log?.(msg);
+    return msg;
   }
+  if (res.processed === 0) return undefined;
+  const s = queue.stats();
+  return `经验提取:新增 ${res.done} · 跳过 ${res.skipped} · 失败 ${res.failed} · 待办 ${s.queued + s.retryWait}`;
+}
 
-  let providers: { llm: LlmProvider; jev: JevProvider };
+/** 会话内容哈希:统一索引 canonical jsonl 字节 SHA-256;索引缺失时回退 sha256(sessionKey)。 */
+export async function hashSessionContent(vaultRoot: string, sessionKey: string): Promise<string> {
   try {
-    providers = resolveProviders(deps);
-  } catch (e) {
-    opts.log?.(`跳过经验提取:${(e as Error).message}`);
-    return undefined;
-  }
-
-  const candidates = ids.slice(0, batch);
-  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
-  let extracted = 0;
-  let skipped = 0;
-  let failed = 0;
-  let pendingTotal = 0;
-  for (const key of candidates) {
-    try {
-      const outcome = await runLessonExtraction(vaultRoot, key, { llm: providers.llm, jev: providers.jev, now: deps.now, config: deps.config });
-      if (outcome.skipReason) {
-        skipped++;
-        opts.log?.(`会话 ${key} 未达阈值,跳过:${outcome.skipReason}`);
-      } else if (outcome.shadow) {
-        extracted++;
-        opts.log?.(`会话 ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计`);
-      } else {
-        extracted++;
-        pendingTotal += outcome.pending ?? 0;
-        const d = outcome.diff?.summary;
-        const pending = outcome.pending ? ` · 待审 ${outcome.pending}` : '';
-        opts.log?.(`会话 ${key} 提取完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}${pending}`);
+    const index = (await loadLibraryIndex(vaultRoot)) ?? (await rebuildUnifiedIndex(vaultRoot));
+    const s = Object.values(index.sessions).find(
+      (it) => it.session === sessionKey || `${it.harness}:${it.session}` === sessionKey,
+    );
+    if (s) {
+      const path = join(libraryDir(vaultRoot), ...s.canonical.path.split('/'));
+      try {
+        return hashBytes(await readFile(path));
+      } catch {
+        // 文件缺失 → 回退
       }
-    } catch (e) {
-      failed++;
-      const msg = (e as Error).message;
-      // 落失败标记,阻止同一坏会话被反复重跑完整 LLM 流水线;标记可删后重试。
-      await storage.write(`audit/${key}.failed.json`, JSON.stringify({ session_id: key, error: msg, at: new Date().toISOString() }, null, 2)).catch(() => {});
-      opts.log?.(`会话 ${key} 提取失败:${msg}`);
     }
+  } catch {
+    // 索引缺失/损坏 → 回退
   }
+  return hashBytes(Buffer.from(sessionKey, 'utf8'));
+}
 
-  await removeLearn(queuePath, candidates);
-  const remaining = (await readLearnQueue(queuePath)).length;
-  const pendingPart = pendingTotal > 0 ? ` · 待审 ${pendingTotal}` : '';
-  return `经验提取:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 待办 ${remaining}${pendingPart}`;
+/** 把 sync 报告里的 changedSessions(harness:session)入队,返回新入队条数(唯一键忽略重复)。 */
+export async function enqueueLearnSessions(vaultRoot: string, queue: JobQueue, sessionKeys: string[]): Promise<number> {
+  const inputs: JobInput[] = [];
+  for (const key of sessionKeys) {
+    inputs.push({ sessionKey: key, contentHash: await hashSessionContent(vaultRoot, key) });
+  }
+  return queue.enqueue(inputs);
+}
+
+/** 旧 JSON 队列平滑迁移:读 learn-queue.json 的 ids 逐个入队,成功后改名 .migrated;文件不存在返回 0。 */
+export async function migrateJsonQueue(jsonPath: string, queue: JobQueue, vaultRoot: string): Promise<number> {
+  try {
+    await stat(jsonPath);
+  } catch {
+    return 0;
+  }
+  const ids = await readLearnQueue(jsonPath);
+  const n = await enqueueLearnSessions(vaultRoot, queue, ids);
+  await rename(jsonPath, `${jsonPath}.migrated`);
+  return n;
 }
 
 /** 从统一索引按 startedAt 降序取最多 limit 个「未学习」会话 key(harness:session)。 */

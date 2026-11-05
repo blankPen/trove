@@ -60,6 +60,7 @@ describe('renderMemory / parseMemory', () => {
     useCount: 5,
     helpfulCount: 2,
     promptVersion: 'exp-v3',
+    pinned: false,
     body: '正文第一行\n第二行',
   };
 
@@ -89,6 +90,18 @@ describe('renderMemory / parseMemory', () => {
   it('无 type 返回 null', () => {
     expect(parseMemory('---\ntitle: "x"\n---\n正文')).toBeNull();
     expect(parseMemory('没有 frontmatter')).toBeNull();
+  });
+
+  it('pinned:true 往返保留,未固定的文件不写该字段', () => {
+    const pinned = renderMemory({ ...full, pinned: true });
+    expect(pinned).toContain('pinned: true');
+    expect(parseMemory(pinned)!.pinned).toBe(true);
+    expect(renderMemory(full)).not.toContain('pinned:');
+  });
+
+  it('旧文件缺省 pinned=false', () => {
+    const v1 = renderFrontmatter({ type: 'experiences/gotcha', title: '旧坑' }) + '\n旧正文\n';
+    expect(parseMemory(v1)!.pinned).toBe(false);
   });
 });
 

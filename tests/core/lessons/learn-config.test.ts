@@ -50,4 +50,17 @@ describe('readLearnConfig(v2 单轨学习配置)', () => {
     expect(got.autoMigrate).toBe(false);
     expect((got as Record<string, unknown>).v2).toBeUndefined();
   });
+
+  it('lifecycle 缺省补默认,部分覆盖保留', () => {
+    expect(readLearnConfig().lifecycle).toEqual({
+      staleDays: 14,
+      archiveDays: 30,
+      trajectoryDays: 90,
+      trajectoryMax: 500,
+    });
+    const got = readLearnConfig(learn({ lifecycle: { staleDays: 7 } } as never));
+    expect(got.lifecycle.staleDays).toBe(7);
+    expect(got.lifecycle.archiveDays).toBe(30);
+    expect(got.lifecycle.trajectoryMax).toBe(500);
+  });
 });

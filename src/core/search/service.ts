@@ -4,6 +4,9 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { computeLessonsSummary, type LessonsSummary } from '../../status.js';
 import { libraryLessonsDir } from '../layout.js';
+import { LocalStorageAdapter } from '../lessons/storage.js';
+import { recordMemoryUsage } from '../lessons/memory-usage.js';
+import type { MemoryAction } from '../lessons/memory-usage.js';
 import { loadLibraryIndex } from '../library/index-file.js';
 import { LessonsIndex, resolveLessonPath, type LessonDoc, type LessonHit, type LessonQuery } from './lessons-index.js';
 import {
@@ -67,7 +70,35 @@ export function closeSearchCache(): void {
 
 export async function searchLessons(vaultRoot: string, opts: LessonQuery): Promise<LessonHit[]> {
   const index = await getLessonsIndex(vaultRoot);
-  return index.search(opts);
+  const hits = index.search(opts);
+  const events = hits
+    .map((hit, i) => ({ id: index.get(hit.path)?.id, action: 'retrieved' as MemoryAction, rank: i + 1 }))
+    .filter((e): e is { id: string; action: MemoryAction; rank: number } => !!e.id);
+  await trackUsage(vaultRoot, events, opts.query);
+  return hits;
+}
+
+/** 记录使用事件;写失败静默忽略,绝不拖垮检索。 */
+async function trackUsage(
+  vaultRoot: string,
+  events: { id: string; action: MemoryAction; rank?: number }[],
+  query?: string,
+): Promise<void> {
+  if (events.length === 0) return;
+  const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  for (const e of events) {
+    try {
+      await recordMemoryUsage(storage, {
+        at: new Date().toISOString(),
+        memory_id: e.id,
+        action: e.action,
+        ...(query ? { query } : {}),
+        ...(e.rank !== undefined ? { rank: e.rank } : {}),
+      });
+    } catch {
+      // 埋点失败不阻断检索
+    }
+  }
 }
 
 export async function listLessons(vaultRoot: string, opts: LessonQuery = {}): Promise<LessonHit[]> {
@@ -91,6 +122,7 @@ export async function getLesson(
   const index = await getLessonsIndex(vaultRoot);
   const doc = index.get(rel);
   if (!doc) return null;
+  if (doc.id) await trackUsage(vaultRoot, [{ id: doc.id, action: 'viewed' }]);
   let body = doc.body;
   if (opts.section) body = sliceSection(body, opts.section) ?? '';
   if (opts.lines) body = sliceLines(body, opts.lines);

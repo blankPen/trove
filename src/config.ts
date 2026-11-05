@@ -67,6 +67,18 @@ export interface LearnQualityConfig {
   evidenceMin: number;
 }
 
+/** 记忆生命周期参数(curator 用)。 */
+export interface LearnLifecycleConfig {
+  /** 多少天没被用到算 stale */
+  staleDays: number;
+  /** 多少天没被用到算归档 */
+  archiveDays: number;
+  /** 轨迹保留天数 */
+  trajectoryDays: number;
+  /** 单项目最多保留多少条轨迹 */
+  trajectoryMax: number;
+}
+
 export interface LearnConfig {
   /** off=关闭;shadow=只计算并写审计;review=经验进 inbox 人工审;auto=达阈值直接写 */
   mode: 'off' | 'shadow' | 'review' | 'auto';
@@ -82,6 +94,7 @@ export interface LearnConfig {
   leaseTtlMs: number;
   quality: LearnQualityConfig;
   jev: { maxCallsPerSession: number; timeoutMs: number };
+  lifecycle: LearnLifecycleConfig;
 }
 
 /** learn 默认值,`defaultConfig` 与 `readLearnConfig` 共用,避免重复字面量。 */
@@ -95,6 +108,7 @@ export function defaultLearnConfig(): LearnConfig {
     leaseTtlMs: 300000,
     quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
     jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+    lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
   };
 }
 
@@ -189,6 +203,7 @@ export function normalizeLearn(learn: unknown): LearnConfig {
   const l = (learn ?? {}) as Record<string, unknown>;
   const q = (l.quality ?? {}) as Record<string, unknown>;
   const j = (l.jev ?? {}) as Record<string, unknown>;
+  const c = (l.lifecycle ?? {}) as Record<string, unknown>;
   return {
     mode: normalizeLearnMode(l.mode),
     autoMigrate: l.autoMigrate !== false,
@@ -204,6 +219,12 @@ export function normalizeLearn(learn: unknown): LearnConfig {
     jev: {
       maxCallsPerSession: num(j.maxCallsPerSession, d.jev.maxCallsPerSession),
       timeoutMs: num(j.timeoutMs, d.jev.timeoutMs),
+    },
+    lifecycle: {
+      staleDays: num(c.staleDays, d.lifecycle.staleDays),
+      archiveDays: num(c.archiveDays, d.lifecycle.archiveDays),
+      trajectoryDays: num(c.trajectoryDays, d.lifecycle.trajectoryDays),
+      trajectoryMax: num(c.trajectoryMax, d.lifecycle.trajectoryMax),
     },
   };
 }

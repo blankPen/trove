@@ -66,6 +66,12 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
       maxCallsPerSession: nonNeg(l.jev?.maxCallsPerSession, d.jev.maxCallsPerSession),
       timeoutMs: nonNeg(l.jev?.timeoutMs, d.jev.timeoutMs),
     },
+    lifecycle: {
+      staleDays: nonNeg(l.lifecycle?.staleDays, d.lifecycle.staleDays),
+      archiveDays: nonNeg(l.lifecycle?.archiveDays, d.lifecycle.archiveDays),
+      trajectoryDays: nonNeg(l.lifecycle?.trajectoryDays, d.lifecycle.trajectoryDays),
+      trajectoryMax: clampInt(l.lifecycle?.trajectoryMax, d.lifecycle.trajectoryMax, 0, 100000),
+    },
   };
 }
 

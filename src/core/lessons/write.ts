@@ -133,6 +133,7 @@ function renderV2Patch(op: Extract<MemoryOp, { op: 'patch' }>, existing: string 
     useCount: old?.useCount ?? 0,
     helpfulCount: old?.helpfulCount ?? 0,
     promptVersion: meta.promptVersion,
+    pinned: old?.pinned,
     body: v2Body(op.type, op.content, evidence),
   };
   return renderMemory(mem);
@@ -213,6 +214,21 @@ function addIndexRow(text: string, o: { type: string; title: string; path: strin
   if (idx === -1) return text;
   lines.splice(idx + 1, 0, indexRow(o));
   return lines.join('\n');
+}
+
+/** 从 INDEX.md 移除指定路径的行(归档/忘掉时用)。 */
+export async function removeIndexEntry(storage: StorageAdapter, path: string): Promise<void> {
+  const text = (await storage.read('INDEX.md')) ?? '';
+  await storage.write('INDEX.md', removeIndexRow(text, path));
+}
+
+/** 在 INDEX.md 补一行(恢复记忆时用);INDEX.md 不存在时按模板建。 */
+export async function addIndexEntry(
+  storage: StorageAdapter,
+  o: { type: string; title: string; path: string; content: string },
+): Promise<void> {
+  const text = (await storage.read('INDEX.md')) ?? INDEX_TEMPLATE;
+  await storage.write('INDEX.md', addIndexRow(text, o));
 }
 
 function patchIndexRow(text: string, o: { type: string; title: string; path: string; content: string }): string {

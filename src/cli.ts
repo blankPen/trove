@@ -82,6 +82,8 @@ import { readTrust, writeTrust } from './core/lessons/trust.js';
 import type { TrustLevel } from './core/lessons/trust.js';
 import { readDecisions } from './core/lessons/decisions.js';
 import { parseMemory } from './core/lessons/memory.js';
+import { countStaleMemories, maybeRunCurator, runCurator } from './core/lessons/curator.js';
+import { forgetMemory, restoreMemory, setPinned } from './core/lessons/control.js';
 import {
   daemonState,
   daemonLog,
@@ -561,6 +563,53 @@ async function cmdLessonsList(
   out(opts.json ? JSON.stringify({ total: hits.length, results: hits }, null, 2) : formatLessonHits(hits));
 }
 
+/** pin/unpin:按 id 或路径设置/清除 pinned。 */
+async function cmdLessonPin(
+  ref: string,
+  pinned: boolean,
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const found = await setPinned(storage, ref, pinned);
+  if (!found) {
+    out(`没有找到记忆: ${ref}`);
+    return;
+  }
+  out(pinned ? `已固定: ${found.path}` : `已取消固定: ${found.path}`);
+}
+
+/** forget:移到 .trove/forgotten/<ISO>/,内容保留,可 restore 找回。 */
+async function cmdLessonForget(
+  ref: string,
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const res = await forgetMemory(storage, ref);
+  if (!res) {
+    out(`没有找到记忆: ${ref}`);
+    return;
+  }
+  out(`已忘掉（可恢复）: ${res.path} → ${res.target}`);
+}
+
+/** restore:从 archive/(或 --from 目录)移回原路径。 */
+async function cmdLessonRestore(
+  ref: string,
+  from: string | undefined,
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const res = await restoreMemory(storage, ref, from ? { from } : {});
+  if (!res) {
+    out(`没有找到可恢复的记忆: ${ref}`);
+    return;
+  }
+  out(`已恢复: ${res.path}`);
+}
+
 async function cmdSessionsSearch(
   query: string,
   opts: { harness?: string; device?: string; since?: string; limit?: string; exact?: boolean; json?: boolean },
@@ -1027,6 +1076,7 @@ async function cmdLearnStatus(
     const dead = queue.listDead(5);
     const inbox = await listInbox(storage);
     const trust = await readTrust(storage);
+    const staleMemories = await countStaleMemories(storage);
     if (json) {
       out(
         JSON.stringify(
@@ -1035,6 +1085,7 @@ async function cmdLearnStatus(
             recentFailures: dead.map((j) => ({ id: j.id, sessionKey: j.sessionKey, error: j.lastError, errorClass: j.errorClass, attempts: j.attempts })),
             inboxPending: inbox.length,
             trust: trust.level,
+            staleMemories,
           },
           null,
           2,
@@ -1046,13 +1097,38 @@ async function cmdLearnStatus(
       [
         `队列: 待处理 ${s.queued} · 重试等待 ${s.retryWait} · 运行中 ${s.running} · 完成 ${s.done} · 跳过 ${s.skipped} · 死信 ${s.dead}`,
         `最老排队: ${s.oldestQueuedAt ? `${humanSpan(Date.now() - s.oldestQueuedAt)}前` : '-'} · p50 ${s.p50Ms ?? '-'}ms · p95 ${s.p95Ms ?? '-'}ms`,
-        `inbox 待审 ${inbox.length} · 信任等级 L${trust.level}`,
+        `inbox 待审 ${inbox.length} · 信任等级 L${trust.level} · stale 记忆 ${staleMemories}`,
       ].join('\n'),
     );
     for (const j of dead) out(`  失败: ${j.sessionKey} · ${j.errorClass ?? '-'} · ${j.lastError}`);
   } finally {
     queue.close();
   }
+}
+
+/** curator:跑一轮记忆生命周期维护(过期 → stale → 归档,复活最近用过的)。 */
+async function cmdLearnCurator(
+  opts: { dryRun?: boolean },
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+): Promise<void> {
+  const config = await loadConfig(paths.config);
+  const learn = readLearnConfig(config);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const report = await runCurator(storage, {
+    staleDays: learn.lifecycle.staleDays,
+    archiveDays: learn.lifecycle.archiveDays,
+    trajectoryDays: learn.lifecycle.trajectoryDays,
+    trajectoryMax: learn.lifecycle.trajectoryMax,
+    ...(opts.dryRun ? { dryRun: true } : {}),
+  });
+  out(
+    `curator${opts.dryRun ? '(dry-run)' : ''}: stale ${report.stale.length} · 归档 ${report.archived.length} · 复活 ${report.revived.length} · 使用更新 ${report.usageUpdated.length}`,
+  );
+  for (const p of report.stale.slice(0, 5)) out(`  stale: ${p}`);
+  for (const p of report.archived.slice(0, 5)) out(`  归档: ${p}`);
+  for (const p of report.revived.slice(0, 5)) out(`  复活: ${p}`);
+  for (const p of report.usageUpdated.slice(0, 5)) out(`  使用更新: ${p}`);
 }
 
 async function cmdLearnPause(
@@ -1481,6 +1557,8 @@ function daemonRuntime(
         // 近期方向聚合:hash 不变则 skip(不烧 token),有实际更新才记一行,避免每 tick 刷噪音。
         const recent = await learnRecentMatters(paths.vault, { ...lessonDeps, config });
         const parts = [pending, recent.diff ? '近期方向已刷新' : undefined].filter((x): x is string => !!x);
+        const curator = await runCuratorPeriodically(paths, config);
+        if (curator) parts.push(curator);
         return parts.length ? parts.join(' · ') : undefined;
       } finally {
         queue.close();
@@ -1488,6 +1566,27 @@ function daemonRuntime(
     },
     learnIntervalSeconds,
   };
+}
+
+/** daemon 周期任务:最多每 7 天跑一次 curator;失败只记日志,不阻断学习。 */
+async function runCuratorPeriodically(
+  paths: ReturnType<typeof trovePaths>,
+  config: Config,
+): Promise<string | undefined> {
+  const learn = readLearnConfig(config);
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  try {
+    const report = await maybeRunCurator(storage, {
+      staleDays: learn.lifecycle.staleDays,
+      archiveDays: learn.lifecycle.archiveDays,
+      trajectoryDays: learn.lifecycle.trajectoryDays,
+      trajectoryMax: learn.lifecycle.trajectoryMax,
+    });
+    if (!report) return undefined;
+    return `curator: stale ${report.stale.length} · 归档 ${report.archived.length} · 复活 ${report.revived.length}`;
+  } catch (e) {
+    return `curator 失败(不影响学习): ${(e as Error).message}`;
+  }
 }
 
 /** 主入口:用 commander 定义命令并分发。返回进程退出码。 */
@@ -1654,7 +1753,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
 
   program
     .command('lessons [action] [value]')
-    .description('检索经验/实体/偏好/决策/资源 (action: search / show / list)')
+    .description('检索经验/实体/偏好/决策/资源 (action: search / show / list / pin / unpin / forget / restore)')
     .option('--category <name>', 'preferences / entities / experiences / events / resources')
     .option('--type <name>', '记忆类型,如 experiences/gotcha')
     .option('--since <range>', '时间窗,如 7d / 90d / 2026-10-01')
@@ -1662,6 +1761,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--section <heading>', 'show: 只读某个标题小节')
     .option('--lines <range>', 'show: 只读行范围,如 1-80')
     .option('--full', 'show: 读取完整正文(上限 64KB)')
+    .option('--from <dir>', 'restore: 恢复来源目录(默认 archive)')
     .option('--json', '输出 JSON')
     .action(
       async (
@@ -1675,6 +1775,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           section?: string;
           lines?: string;
           full?: boolean;
+          from?: string;
           json?: boolean;
         },
       ) => {
@@ -1693,6 +1794,24 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           await cmdLessonShow(value, opts, paths, out);
         } else if (a === 'list') {
           await cmdLessonsList(opts, paths, out, now());
+        } else if (a === 'pin' || a === 'unpin') {
+          if (!value) {
+            err(`用法: trove lessons ${a} <id|path>`);
+            return;
+          }
+          await cmdLessonPin(value, a === 'pin', paths, out);
+        } else if (a === 'forget') {
+          if (!value) {
+            err('用法: trove lessons forget <id|path>');
+            return;
+          }
+          await cmdLessonForget(value, paths, out);
+        } else if (a === 'restore') {
+          if (!value) {
+            err('用法: trove lessons restore <id|path> [--from <dir>]');
+            return;
+          }
+          await cmdLessonRestore(value, opts.from, paths, out);
         } else {
           err(`未知的 lessons 子命令: ${a}`);
         }
@@ -1828,7 +1947,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   program
     .command('learn')
     .description('经验提取与审计查看')
-    .argument('[sessionId]', '会话 id,或子命令:migrate / review / why / trust(缺省需配合 --list)')
+    .argument('[sessionId]', '会话 id,或子命令:migrate / review / why / trust / curator(缺省需配合 --list)')
     .argument('[arg]', 'review/why/trust 的附加参数(why 的记忆 id 等)')
     .option('--list', '查看最近一次提取的审计 diff')
     .option('--session <id>', '配合 --list 或 review 指定会话')
@@ -1840,8 +1959,9 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--reject-all', '配合 review:拒绝全部待审候选')
     .option('--json', '配合 review/status:输出 JSON')
     .option('--level <n>', '配合 trust:显式设置信任等级(0-3)')
+    .option('--dry-run', '配合 curator:只统计不写盘')
     .action(
-      async (sessionId: string | undefined, arg: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string; apply?: boolean; rollback?: string; acceptAll?: boolean; rejectAll?: boolean; json?: boolean; level?: string }) => {
+      async (sessionId: string | undefined, arg: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string; apply?: boolean; rollback?: string; acceptAll?: boolean; rejectAll?: boolean; json?: boolean; level?: string; dryRun?: boolean }) => {
         if (sessionId === 'migrate') {
           await cmdLearnMigrate(paths, out, opts);
         } else if (sessionId === 'review') {
@@ -1850,6 +1970,8 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           await cmdLearnWhy(paths, arg, out);
         } else if (sessionId === 'trust') {
           await cmdLearnTrust(paths, out, opts.level);
+        } else if (sessionId === 'curator') {
+          await cmdLearnCurator(opts, paths, out);
         } else if (sessionId === 'status') {
           await cmdLearnStatus(paths, out, opts.json === true);
         } else if (sessionId === 'pause') {
@@ -1874,7 +1996,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           const config = deps.lessonDeps?.config ?? (await loadConfig(paths.config));
           await cmdLearnExtract(paths, sessionId, { ...deps.lessonDeps, config }, out, opts.force === true);
         } else {
-          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>] | trove learn review|why|trust|status|pause|resume|retry');
+          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>] | trove learn review|why|trust|curator|status|pause|resume|retry');
         }
       },
     );

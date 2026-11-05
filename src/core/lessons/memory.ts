@@ -40,6 +40,8 @@ export interface MemoryV2 {
   useCount: number;
   helpfulCount: number;
   promptVersion?: string;
+  /** 用户手动固定:不参与 curator 的 stale/archive。 */
+  pinned?: boolean;
   body: string;
 }
 
@@ -109,6 +111,7 @@ export function renderMemory(m: MemoryV2): string {
     `status: ${m.status}`,
     `version: ${m.version}`,
   ];
+  if (m.pinned) lines.push('pinned: true');
   if (m.confidence !== undefined) lines.push(`confidence: ${JSON.stringify(m.confidence)}`);
   if (m.quality !== undefined) lines.push(`quality: ${JSON.stringify(m.quality)}`);
   lines.push(`evidence: ${JSON.stringify(m.evidence ?? [])}`);
@@ -156,6 +159,7 @@ export function parseMemory(text: string): MemoryV2 | null {
     useCount: int(fields['use_count'], 0),
     helpfulCount: int(fields['helpful_count'], 0),
     promptVersion: strOpt(fields['prompt_version']),
+    pinned: bool(fields['pinned']),
     // renderMemory 在 `---` 后留一行空行;splitFrontmatter 只剥掉换行,这里再剥掉空行。
     body: split.body.replace(/^\n/, ''),
   };
@@ -203,6 +207,10 @@ function int(v: string | undefined, fallback: number): number {
 function numOpt(v: string | undefined): number | undefined {
   const p = parseJson(v);
   return typeof p === 'number' && Number.isFinite(p) ? p : undefined;
+}
+
+function bool(v: string | undefined): boolean {
+  return parseJson(v) === true;
 }
 
 function strArray(v: string | undefined): string[] {

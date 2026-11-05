@@ -19,6 +19,8 @@ export interface LessonDoc {
   title: string;
   type: string;
   tags: string[];
+  /** v2 记忆 id;旧文件没有。 */
+  id?: string;
   updatedAt?: string;
   body: string;
 }
@@ -122,6 +124,7 @@ export class LessonsIndex {
           title: fm?.title || basename(rel),
           type: fm?.type ?? '',
           tags: fm?.tags ?? [],
+          ...(fm?.id ? { id: fm.id } : {}),
           ...(fm?.updatedAt ? { updatedAt: fm.updatedAt } : {}),
           body,
         };

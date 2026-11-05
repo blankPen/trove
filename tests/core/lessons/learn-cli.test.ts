@@ -11,6 +11,9 @@ import type { MemoryOp } from '../../../src/core/lessons/merge.js';
 import { MockLlm } from '../../../src/core/lessons/llm.js';
 import type { JevProvider } from '../../../src/core/lessons/jev.js';
 import type { Event } from '../../../src/core/events/schema.js';
+import { listInbox, writeInboxItem } from '../../../src/core/lessons/inbox.js';
+import type { InboxItem } from '../../../src/core/lessons/inbox.js';
+import { readTrust } from '../../../src/core/lessons/trust.js';
 
 let base: string;
 let storage: LocalStorageAdapter;
@@ -87,6 +90,31 @@ function v2Jev(): JevProvider {
     async keepCalls(_s: unknown, q: Record<string, unknown>): Promise<Record<string, number>> {
       return Object.fromEntries(Object.keys(q).map((k) => [k, 0.95]));
     },
+  };
+}
+
+/** 默认 review 下需要写记忆的用例显式切 auto(与规格一致)。 */
+function autoLearn() {
+  return { learn: { mode: 'auto' as const, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } };
+}
+
+function reviewLearn() {
+  return { learn: { mode: 'review' as const, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } };
+}
+
+function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
+  return {
+    id: 'inbox_abc123',
+    session: 's-1',
+    type: 'experiences/debug_pattern',
+    title: '脚本退出应该用 set -e',
+    content: EXPERIENCE_CONTENT,
+    evidence: [{ session: 's-1', seq: 1, quote: '脚本退出应该用 set -e' }],
+    quality: { specific: 0.9, actionable: 0.9, transferable: 0.8, evidence: 1, non_duplicate: 0.9 },
+    confidence: 0.9,
+    promptVersion: 'exp-v3',
+    createdAt: '2026-01-01T00:00:00.000Z',
+    ...overrides,
   };
 }
 
@@ -252,7 +280,7 @@ describe('trove learn <session-id>(Stage 9 单会话提取命令)', () => {
   it('用例 9-1:注入 mock 提供方,对单会话跑通 v2 全链路并输出审计摘要', async () => {
     await writeSession('claude-code', 's-1', sampleEvents('s-1'));
 
-    const code = await runLearn(['learn', 's-1'], { lessonDeps: { llm: happyLlm(), jev: v2Jev() } });
+    const code = await runLearn(['learn', 's-1'], { lessonDeps: { llm: happyLlm(), jev: v2Jev(), config: autoLearn() } });
 
     expect(code).toBe(0);
     const output = lines.join('\n');
@@ -265,7 +293,7 @@ describe('全局端到端验收(端到端-1..4)', () => {
   it('端到端-1:调试错误+用户纠正+明确偏好 → debug_pattern(add)+preference(add),审计完整,索引一致', async () => {
     await writeSession('claude-code', 'e2e-1', richEvents('e2e-1'));
 
-    const code = await runLearn(['learn', 'e2e-1'], { lessonDeps: { llm: richLlm(), jev: v2Jev() } });
+    const code = await runLearn(['learn', 'e2e-1'], { lessonDeps: { llm: richLlm(), jev: v2Jev(), config: autoLearn() } });
 
     expect(code).toBe(0);
     const output = lines.join('\n');
@@ -286,12 +314,12 @@ describe('全局端到端验收(端到端-1..4)', () => {
   it('端到端-2:纯闲聊会话由模型摘要判 trivial 跳过,落 skipped 标记,不产生记忆文件', async () => {
     await writeSession('claude-code', 'e2e-2', chatEvents('e2e-2'));
 
-    const code = await runLearn(['learn', 'e2e-2'], { lessonDeps: { llm: chatLlm(), jev: v2Jev() } });
+    const code = await runLearn(['learn', 'e2e-2'], { lessonDeps: { llm: chatLlm(), jev: v2Jev(), config: autoLearn() } });
 
     expect(code).toBe(0);
     expect(lines.join('\n')).toContain('会话未达提取阈值,跳过: trivial');
     // 只留骨架文件 + 跳过标记;无记忆文件、memory_diff 或成功审计
-    const SKELETON = new Set(['INDEX.md', '.overview.md', 'README.md', '.trove/decisions.jsonl', 'audit/e2e-2.skipped.json']);
+    const SKELETON = new Set(['INDEX.md', '.overview.md', 'README.md', '.trove/decisions.jsonl', '.trove/migrated-v2.json', 'audit/e2e-2.skipped.json']);
     const extra = (await storage.list()).filter((f) => !SKELETON.has(f));
     expect(extra).toEqual([]);
     expect(await storage.exists('memory_diff.json')).toBe(false);
@@ -300,7 +328,7 @@ describe('全局端到端验收(端到端-1..4)', () => {
 
   it('端到端-3:同一会话默认第二次跳过,已学习不再重复;--force 重跑则 merge 层幂等不翻倍', async () => {
     await writeSession('claude-code', 'e2e-3', richEvents('e2e-3'));
-    const deps = { lessonDeps: { llm: richLlm(), jev: v2Jev() } };
+    const deps = { lessonDeps: { llm: richLlm(), jev: v2Jev(), config: autoLearn() } };
 
     expect(await runLearn(['learn', 'e2e-3'], deps)).toBe(0);
     const files1 = (await storage.list()).sort();
@@ -324,7 +352,7 @@ describe('全局端到端验收(端到端-1..4)', () => {
   it('端到端-4:L0 INDEX → L1 overview → L2 详情三级可读,INDEX 行路径指向真实文件', async () => {
     await writeSession('claude-code', 'e2e-4', richEvents('e2e-4'));
 
-    expect(await runLearn(['learn', 'e2e-4'], { lessonDeps: { llm: richLlm(), jev: v2Jev() } })).toBe(0);
+    expect(await runLearn(['learn', 'e2e-4'], { lessonDeps: { llm: richLlm(), jev: v2Jev(), config: autoLearn() } })).toBe(0);
 
     const index = await storage.read('INDEX.md');
     expect(index).not.toBeNull();
@@ -367,7 +395,7 @@ describe('trove learn -n(批量学习最近会话)', () => {
     await mkdir(lib, { recursive: true });
     await writeFile(join(lib, 'index.json'), JSON.stringify({ v: 1, generatedAt: new Date().toISOString(), hash: '', sessions: sessionsMap, skills: {} }, null, 2) + '\n', 'utf8');
 
-    const code = await runLearn(['learn', '-n', '1'], { lessonDeps: { llm: happyLlm(), jev: v2Jev() } });
+    const code = await runLearn(['learn', '-n', '1'], { lessonDeps: { llm: happyLlm(), jev: v2Jev(), config: autoLearn() } });
 
     expect(code).toBe(0);
     const output = lines.join('\n');
@@ -384,5 +412,53 @@ describe('trove learn -n(批量学习最近会话)', () => {
 
     expect(code).toBe(0);
     expect(lines.join('\n')).toContain('ERR 用法: trove learn -n <正整数>');
+  });
+});
+
+describe('trove learn review/why/trust(人工审核与信任)', () => {
+  it('review --accept-all 接受候选:记忆落盘、inbox 清空、trust.accepted 增加', async () => {
+    await writeInboxItem(storage, inboxItem());
+
+    const code = await runLearn(['learn', 'review', '--accept-all'], { lessonDeps: { llm: happyLlm(), jev: v2Jev(), config: reviewLearn() } });
+
+    expect(code).toBe(0);
+    expect(await listInbox(storage)).toEqual([]);
+    expect((await storage.list()).some((f) => f.startsWith('experiences/') && f.endsWith('.md'))).toBe(true);
+    const t = await readTrust(storage);
+    expect(t.accepted).toBe(1);
+    expect(t.rejected).toBe(0);
+  });
+
+  it('review --reject-all 拒绝候选:inbox 清空、trust.rejected 增加', async () => {
+    await writeInboxItem(storage, inboxItem());
+
+    const code = await runLearn(['learn', 'review', '--reject-all'], { lessonDeps: { llm: happyLlm(), jev: v2Jev(), config: reviewLearn() } });
+
+    expect(code).toBe(0);
+    expect(await listInbox(storage)).toEqual([]);
+    expect((await storage.list()).some((f) => f.startsWith('experiences/') && f.endsWith('.md'))).toBe(false);
+    const t = await readTrust(storage);
+    expect(t.accepted).toBe(0);
+    expect(t.rejected).toBe(1);
+  });
+
+  it('why 输出 inbox 候选的标题、质量与证据', async () => {
+    await writeInboxItem(storage, inboxItem());
+
+    const code = await runLearn(['learn', 'why', 'inbox_abc123']);
+
+    expect(code).toBe(0);
+    const output = lines.join('\n');
+    expect(output).toContain('脚本退出应该用 set -e');
+    expect(output).toContain('specific=0.9');
+    expect(output).toContain('脚本退出应该用 set -e');
+  });
+
+  it('trust --level 2 显式设置信任等级', async () => {
+    const code = await runLearn(['learn', 'trust', '--level', '2']);
+
+    expect(code).toBe(0);
+    expect(lines.join('\n')).toContain('L2');
+    expect((await readTrust(storage)).level).toBe(2);
   });
 });

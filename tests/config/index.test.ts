@@ -89,7 +89,7 @@ describe('config(设计 §10.2)', () => {
 
   it('learn 默认值 + 老配置补全 + 部分覆盖不丢其它字段', async () => {
     expect(defaultConfig().learn).toEqual({
-      mode: 'auto',
+      mode: 'review',
       autoMigrate: true,
       quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },

@@ -1,5 +1,5 @@
 /** 模型端点配置读取:从 ~/.trove/config.json 的 llm/jev 段读取,缺配置时明确报错而非静默失败。 */
-import { defaultLearnConfig, type Config, type LearnConfig } from '../../config.js';
+import { defaultLearnConfig, normalizeLearnMode, type Config, type LearnConfig } from '../../config.js';
 
 export interface LlmConfig {
   baseUrl: string;
@@ -46,12 +46,12 @@ export function readJevConfig(config?: Pick<Config, 'jev'>): JevConfig {
   return { apiKey, model, ...(config?.jev?.baseUrl ? { baseUrl: config.jev.baseUrl } : {}) };
 }
 
-/** 读取 v2 学习配置:缺省补默认,quality 数值钳制到 [0,1],非法 mode 回退 shadow。 */
+/** 读取 v2 学习配置:缺省补默认,quality 数值钳制到 [0,1],非法 mode 白名单兜底 review。 */
 export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
   const d = defaultLearnConfig();
   const l = (config?.learn ?? {}) as Partial<LearnConfig>;
   return {
-    mode: l.mode === 'shadow' ? 'shadow' : 'auto',
+    mode: normalizeLearnMode(l.mode),
     autoMigrate: l.autoMigrate !== false,
     quality: {
       autoAccept: clamp01(l.quality?.autoAccept, d.quality.autoAccept),

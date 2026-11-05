@@ -68,8 +68,8 @@ export interface LearnQualityConfig {
 }
 
 export interface LearnConfig {
-  /** shadow=只计算并写审计;auto=达阈值写记忆 */
-  mode: 'shadow' | 'auto';
+  /** off=关闭;shadow=只计算并写审计;review=经验进 inbox 人工审;auto=达阈值直接写 */
+  mode: 'off' | 'shadow' | 'review' | 'auto';
   /** 正式学习前自动把老 v1 记忆迁移为 v2 schema;默认开启 */
   autoMigrate: boolean;
   quality: LearnQualityConfig;
@@ -79,11 +79,18 @@ export interface LearnConfig {
 /** learn 默认值,`defaultConfig` 与 `readLearnConfig` 共用,避免重复字面量。 */
 export function defaultLearnConfig(): LearnConfig {
   return {
-    mode: 'auto',
+    mode: 'review',
     autoMigrate: true,
     quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
     jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
   };
+}
+
+const LEARN_MODES: ReadonlyArray<LearnConfig['mode']> = ['off', 'shadow', 'review', 'auto'];
+
+/** 白名单兜底 review:非法/未知 mode 一律回退 review,不静默改成会直接写盘的 auto。 */
+export function normalizeLearnMode(v: unknown): LearnConfig['mode'] {
+  return (LEARN_MODES as readonly unknown[]).includes(v) ? (v as LearnConfig['mode']) : 'review';
 }
 
 export interface Config {
@@ -171,7 +178,7 @@ export function normalizeLearn(learn: unknown): LearnConfig {
   const q = (l.quality ?? {}) as Record<string, unknown>;
   const j = (l.jev ?? {}) as Record<string, unknown>;
   return {
-    mode: l.mode === 'shadow' ? 'shadow' : 'auto',
+    mode: normalizeLearnMode(l.mode),
     autoMigrate: l.autoMigrate !== false,
     quality: {
       autoAccept: num(q.autoAccept, d.quality.autoAccept),

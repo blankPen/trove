@@ -11,7 +11,7 @@ export interface DecisionReason {
 export interface DecisionRecord {
   at: string;
   session: string;
-  stage: 'triage' | 'screen' | 'identity' | 'quality' | 'adjudicate' | 'skip';
+  stage: 'triage' | 'screen' | 'identity' | 'quality' | 'adjudicate' | 'skip' | 'review';
   gate?: 'A' | 'B' | 'C';
   decision: string;
   source: DecisionSource;

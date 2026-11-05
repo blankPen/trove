@@ -24,6 +24,9 @@ import type { DecisionRecord, DecisionReason, DecisionSource } from './decisions
 import type { LlmProvider } from './llm.js';
 import type { JevProvider } from './jev.js';
 import type { StorageAdapter } from './storage.js';
+import { readTrust } from './trust.js';
+import { writeInboxItem, newInboxId } from './inbox.js';
+import type { InboxItem } from './inbox.js';
 
 export interface V2RunDeps {
   llm: LlmProvider;
@@ -38,6 +41,8 @@ export interface V2RunResult {
   diff?: MemoryDiff;
   shadow: boolean;
   skipReason?: string;
+  /** review 模式本次新写入 inbox 的候选数(待审)。 */
+  pending?: number;
 }
 
 const ACCEPT_SCHEMA: Record<string, unknown> = {
@@ -52,7 +57,7 @@ export async function runLessonPipelineV2(
   _opts: { force?: boolean } = {},
 ): Promise<V2RunResult> {
   const now = deps.now ?? (() => new Date());
-  const shadow = deps.learn.mode !== 'auto';
+  const shadow = deps.learn.mode === 'shadow';
   const events = await deps.loadEvents(sessionId);
 
   // 1. 会话选择(进行中 → skip)
@@ -156,6 +161,16 @@ export async function runLessonPipelineV2(
   // 7. 逐候选:contract → 证据 → Gate B → 质量/LLM 裁决
   const gateBResults = await gateway.screenCandidates(candidates.map((c) => ({ type: c.type, title: c.title, content: c.content, evidence: c.evidence })));
   const accepted: MemoryCandidateV2[] = [];
+  // review 模式 L0/L1 的经验候选先进 inbox,由人 accept 后再走 Gate C(信任升级只在人工 review 后触发)。
+  const inboxCandidates: Array<{ c: MemoryCandidateV2; source: DecisionSource; q?: QualityScore }> = [];
+  const trust = await readTrust(deps.storage, now);
+  const route = (c: MemoryCandidateV2, source: DecisionSource, q?: QualityScore): void => {
+    if (deps.learn.mode === 'review' && c.type.startsWith('experiences/') && trust.level < 2) {
+      inboxCandidates.push({ c, source, q });
+    } else {
+      accepted.push(c);
+    }
+  };
   let evidencePassed = 0;
   for (let i = 0; i < candidates.length; i++) {
     const c = candidates[i]!;
@@ -179,7 +194,7 @@ export async function runLessonPipelineV2(
       if (gateB.source === 'heuristic') {
         const ok = await llmQualityAdjudicate(c, deps.llm);
         emit({ stage: 'adjudicate', decision: ok ? 'accept' : 'reject', source: 'llm', candidate: { type: c.type, title: c.title } });
-        if (ok) { c.confidence = gateB.confidence; c.sourceTrajectories = [trajId]; accepted.push(c); }
+        if (ok) { c.confidence = gateB.confidence; c.sourceTrajectories = [trajId]; route(c, 'llm'); }
         continue;
       }
 
@@ -194,7 +209,7 @@ export async function runLessonPipelineV2(
         c.confidence = gateB.confidence;
         c.sourceTrajectories = [trajId];
         emit({ stage: 'quality', decision: 'quality_auto', source: 'heuristic', reasons: qualityReasons(q), candidate: { type: c.type, title: c.title } });
-        accepted.push(c);
+        route(c, 'heuristic', q);
         continue;
       }
       // escalate → LLM 质量裁决
@@ -204,22 +219,42 @@ export async function runLessonPipelineV2(
         c.quality = q;
         c.confidence = gateB.confidence;
         c.sourceTrajectories = [trajId];
-        accepted.push(c);
+        route(c, 'llm', q);
       }
     } catch (e) {
       emit({ stage: 'quality', decision: `candidate_error:${(e as Error).message}`, source: 'heuristic', candidate: { type: c.type, title: c.title } });
     }
   }
 
-  // 8. Gate C 合并 → ops
+  // 8. 写 inbox(人类 review 队列)→ Gate C 合并 → ops
+  for (const ic of inboxCandidates) {
+    const item: InboxItem = {
+      id: newInboxId(now()),
+      session: eventSession,
+      type: ic.c.type,
+      title: ic.c.title,
+      content: ic.c.content,
+      evidence: ic.c.evidence,
+      ...(ic.q ? { quality: ic.q } : {}),
+      ...(ic.c.confidence !== undefined ? { confidence: ic.c.confidence } : {}),
+      trajectoryId: trajId,
+      promptVersion: 'exp-v3',
+      createdAt: now().toISOString(),
+    };
+    await writeInboxItem(deps.storage, item);
+    emit({ stage: 'review', decision: 'inbox', source: ic.source, reasons: ic.q ? qualityReasons(ic.q) : [], candidate: { type: ic.c.type, title: ic.c.title } });
+  }
+
   const existing = await loadExistingForGate(deps.storage);
   const ops = await mergeMemoriesV2(accepted, existing, { gateway, llm: deps.llm, learn: deps.learn });
+  const inboxOps: MemoryOp[] = inboxCandidates.map(({ c }) => ({ op: 'skip', type: c.type, title: c.title, reason: 'inbox' }));
+  const allOps = [...ops, ...inboxOps];
 
   const evidenceCoverage = candidates.length ? evidencePassed / candidates.length : 1;
   const v2 = { shadow, candidates: candidates.map((c) => ({ type: c.type, title: c.title })), evidenceCoverage };
 
   if (shadow) {
-    const skipOps: MemoryOp[] = ops.map((op) => ({ op: 'skip', type: op.type, title: op.op === 'append' ? op.path : op.title, reason: `shadow:${op.op}` }));
+    const skipOps: MemoryOp[] = allOps.map((op) => ({ op: 'skip', type: op.type, title: op.op === 'append' ? op.path : op.title, reason: `shadow:${op.op}` }));
     const diff = { ...buildMemoryDiff(skipOps, { sessionId, project }), v2 };
     // 只落 .shadow.json:不占「已学习」标记,切 auto 后同一会话仍可真正补学。
     await deps.storage.write(`audit/${sessionId}.shadow.json`, JSON.stringify(diff, null, 2));
@@ -227,11 +262,11 @@ export async function runLessonPipelineV2(
     return { diff, shadow: true };
   }
 
-  await applyOperations(ops, { storage: deps.storage, now: deps.now, source: sessionId });
-  const diff = { ...buildMemoryDiff(ops, { sessionId, project }), v2 };
+  await applyOperations(allOps, { storage: deps.storage, now: deps.now, source: sessionId });
+  const diff = { ...buildMemoryDiff(allOps, { sessionId, project }), v2 };
   await writeMemoryDiff(diff, deps.storage);
   await decisionTail;
-  return { diff, shadow: false };
+  return { diff, shadow: false, pending: inboxCandidates.length };
 }
 
 function qualityReasons(q: QualityScore): DecisionReason[] {

@@ -58,7 +58,7 @@ const EXPERIENCE = {
   evidence: [{ seq: 1, quote: 'git push 报错 Permission denied' }],
 };
 
-function learn(mode: 'shadow' | 'auto'): LearnConfig {
+function learn(mode: LearnConfig['mode']): LearnConfig {
   return { mode, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } };
 }
 
@@ -97,7 +97,7 @@ function llmFor(memories: unknown[]): MockLlm {
   });
 }
 
-function deps(mode: 'shadow' | 'auto', llm: MockLlm, jev: JevProvider): V2RunDeps {
+function deps(mode: LearnConfig['mode'], llm: MockLlm, jev: JevProvider): V2RunDeps {
   return { llm, jev, storage, learn: learn(mode), loadEvents: async () => events, now: () => now };
 }
 
@@ -316,5 +316,61 @@ describe('runLessonPipelineV2(端到端)', () => {
 
     expect(r.skipReason).toBeUndefined();
     expect(r.diff?.summary.adds).toBe(1);
+  });
+});
+
+describe('runLessonPipelineV2(review/auto 路由)', () => {
+  it('review 模式 L0:experiences 进 inbox 不落记忆,audit 记 inbox skip + review 决策', async () => {
+    const r = await runLessonPipelineV2('sess-1', deps('review', llmFor([EXPERIENCE]), jevAllHigh()));
+
+    expect(r.shadow).toBe(false);
+    expect(r.pending).toBe(1);
+    const files = await storage.list();
+    expect(files.some((f) => f.startsWith('.trove/inbox/') && f.endsWith('.json'))).toBe(true);
+    expect(files.some((f) => f.startsWith('experiences/') && f.endsWith('.md') && !f.includes('/.'))).toBe(false);
+
+    expect(await storage.exists('audit/sess-1.json')).toBe(true);
+    const audit = JSON.parse((await storage.read('audit/sess-1.json'))!);
+    expect(audit.operations.skips.some((s: { reason: string }) => s.reason === 'inbox')).toBe(true);
+
+    const decisions = await readDecisions(storage);
+    expect(decisions.some((d) => d.stage === 'review' && d.decision === 'inbox')).toBe(true);
+  });
+
+  it('review 模式 trust.level=2:experiences 直接写记忆', async () => {
+    await storage.write('.trove/trust.json', JSON.stringify({ level: 2, accepted: 0, rejected: 0, since: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z' }));
+    const r = await runLessonPipelineV2('sess-1', deps('review', llmFor([EXPERIENCE]), jevAllHigh()));
+
+    expect(r.pending).toBe(0);
+    expect(r.diff?.summary.adds).toBe(1);
+    const files = await storage.list();
+    expect(files.some((f) => f.startsWith('experiences/') && f.endsWith('.md') && !f.includes('/.'))).toBe(true);
+  });
+
+  it('review 模式 preferences 直接写(低风险,不阻塞)', async () => {
+    const pref = { type: 'preferences/coding_style', title: 'shell 脚本统一 set -e', content: '用户偏好 shell 脚本统一使用 set -e', evidence: [{ seq: 1, quote: 'git push 报错 Permission denied' }] };
+    const prefLlm = new MockLlm((_p, _s, task) => {
+      switch (task) {
+        case 'learn:summarize':
+          return { topic: 'x', intent: 'x', outcome: 'success', keySteps: [], hasError: false, hasCorrection: false, hasWorkflow: false };
+        case 'learn:classify':
+          return { preferences: true, entities: false, experiences: false, events: false, resources: false };
+        case 'learn:trajectory':
+          return { task: 't', outcome: 'success', reusableSignals: [] };
+        case 'learn:extract':
+          return { memories: [pref] };
+        case 'learn:triage': return { decision: 'accept' };
+        case 'learn:quality': return { decision: 'accept' };
+        case 'learn:identity': return { decision: 'add' };
+        case 'learn:merge': return { content: 'x' };
+        default: throw new Error(`unexpected task ${task}`);
+      }
+    });
+    const r = await runLessonPipelineV2('sess-1', deps('review', prefLlm, jevAllHigh()));
+
+    expect(r.pending).toBe(0);
+    expect(r.diff?.summary.adds).toBe(1);
+    const files = await storage.list();
+    expect(files.some((f) => f.startsWith('preferences/') && f.endsWith('.md') && !f.includes('/.'))).toBe(true);
   });
 });

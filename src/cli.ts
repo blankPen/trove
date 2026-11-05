@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { hostname } from 'node:os';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { Command, CommanderError } from 'commander';
-import { confirm, text } from '@clack/prompts';
+import { confirm, select, text } from '@clack/prompts';
 import pc from 'picocolors';
 import { trovePaths, type TrovePaths } from './paths.js';
 import { loadConfig, resolveRawSync, saveConfig, type Config, type RemoteConfig } from './config.js';
@@ -59,13 +60,27 @@ import { silentProgress } from './progress.js';
 import { formatDiff, readLatestDiff, readSessionDiff, readShadowDiff } from './core/lessons/audit.js';
 import { LocalStorageAdapter } from './core/lessons/storage.js';
 import { refreshSidecars } from './core/lessons/sidecar.js';
-import { runLessonExtraction, learnPendingBatch, learnRecentBatch } from './core/lessons/learn.js';
+import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
 import { learnClaudeMemo } from './core/lessons/memo.js';
 import { learnRecentMatters } from './core/lessons/recent.js';
 import { enqueueLearn, readLearnQueue } from './core/lessons/queue.js';
 import { planMigration, applyMigration, rollbackMigration } from './core/lessons/migrate.js';
+import { readLearnConfig } from './core/lessons/config.js';
+import { JevDecisionGateway } from './core/lessons/gateway.js';
+import {
+  acceptInboxItem,
+  listInbox,
+  readInboxItem,
+  rejectInboxItem,
+  updateInboxItem,
+} from './core/lessons/inbox.js';
+import type { InboxItem } from './core/lessons/inbox.js';
+import { readTrust, writeTrust } from './core/lessons/trust.js';
+import type { TrustLevel } from './core/lessons/trust.js';
+import { readDecisions } from './core/lessons/decisions.js';
+import { parseMemory } from './core/lessons/memory.js';
 import {
   daemonState,
   daemonLog,
@@ -801,6 +816,192 @@ async function cmdLearnRecent(
   out(formatDiff(outcome.diff!));
 }
 
+function formatInboxLine(it: InboxItem): string {
+  const q = it.quality
+    ? ` · 质量 ${it.quality.specific}/${it.quality.actionable}/${it.quality.transferable}/${it.quality.evidence}/${it.quality.non_duplicate}`
+    : '';
+  const ev = it.evidence[0]?.quote ? ` · 「${it.evidence[0].quote.slice(0, 60)}」` : '';
+  return `${it.id} · ${it.type} · ${it.title}${q} · ${it.session}${ev}`;
+}
+
+async function printTrust(storage: LocalStorageAdapter, out: (l: string) => void): Promise<void> {
+  const t = await readTrust(storage);
+  out(`信任等级 L${t.level} · 接受 ${t.accepted} · 拒绝 ${t.rejected} · 起始 ${t.since}`);
+}
+
+/** 用 $EDITOR(无则 vi)编辑正文,返回「是否接受」;取消编辑保持原样返回 false。 */
+async function editInboxItem(storage: LocalStorageAdapter, it: InboxItem, out: (l: string) => void): Promise<boolean> {
+  const tmp = join(tmpdir(), `trove-inbox-${it.id}.md`);
+  await writeFile(tmp, it.content, 'utf8');
+  const editor = process.env.EDITOR || process.env.VISUAL || 'vi';
+  const r = spawnSync(editor, [tmp], { stdio: 'inherit' });
+  const edited = await readFile(tmp, 'utf8').catch(() => it.content);
+  await rm(tmp, { force: true }).catch(() => {});
+  if (r.error || edited === it.content) return false;
+  await updateInboxItem(storage, it.id, { content: edited });
+  out('正文已更新,重新确认:');
+  const ok = await select({
+    message: '编辑后是否接受?',
+    options: [
+      { value: 'accept', label: 'accept 接受' },
+      { value: 'reject', label: 'reject 拒绝' },
+    ],
+  });
+  return ok === 'accept';
+}
+
+async function cmdLearnReview(
+  paths: ReturnType<typeof trovePaths>,
+  lessonDeps: LessonProviderDeps | undefined,
+  out: (l: string) => void,
+  interactive: boolean,
+  opts: { acceptAll?: boolean; rejectAll?: boolean; session?: string; json?: boolean },
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const config = lessonDeps?.config ?? (await loadConfig(paths.config));
+  const learn = readLearnConfig(config);
+  const items = await listInbox(storage, opts.session ? { session: opts.session } : undefined);
+
+  if (opts.json) {
+    out(JSON.stringify(items, null, 2));
+    return;
+  }
+  if (items.length === 0) {
+    out('暂无待审候选(inbox 为空)');
+    return;
+  }
+
+  const { llm, jev } = resolveProviders({ ...lessonDeps, config });
+  const gateway = new JevDecisionGateway({ jev, learn, llm });
+
+  if (opts.acceptAll) {
+    for (const it of items) {
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn });
+      out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
+    }
+    await printTrust(storage, out);
+    return;
+  }
+  if (opts.rejectAll) {
+    for (const it of items) {
+      await rejectInboxItem(storage, it.id);
+      out(`已拒绝: ${it.title}`);
+    }
+    await printTrust(storage, out);
+    return;
+  }
+
+  if (!interactive) {
+    out(`待审 ${items.length} 条,前 ${Math.min(5, items.length)} 条摘要:`);
+    for (const it of items.slice(0, 5)) out(`  ${formatInboxLine(it)}`);
+    out('用 trove learn review 交互处理,或 --accept-all / --reject-all 批量处理');
+    return;
+  }
+
+  for (const it of items) {
+    out(formatInboxLine(it));
+    const action = await select({
+      message: `${it.type} · ${it.title}`,
+      options: [
+        { value: 'accept', label: 'accept 接受' },
+        { value: 'edit', label: 'edit 编辑' },
+        { value: 'reject', label: 'reject 拒绝' },
+        { value: 'skip', label: 'skip 跳过' },
+        { value: 'quit', label: 'quit 退出' },
+      ],
+    });
+    if (isCancel(action) || action === 'quit') break;
+    if (action === 'accept') {
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn });
+      out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
+    } else if (action === 'reject') {
+      await rejectInboxItem(storage, it.id);
+      out(`已拒绝: ${it.title}`);
+    } else if (action === 'edit') {
+      if (await editInboxItem(storage, it, out)) {
+        const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn });
+        out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
+      }
+    }
+    // skip: 不处理,继续下一条
+  }
+  await printTrust(storage, out);
+}
+
+async function cmdLearnWhy(
+  paths: ReturnType<typeof trovePaths>,
+  id: string | undefined,
+  out: (l: string) => void,
+): Promise<void> {
+  if (!id) {
+    out('用法: trove learn why <inbox-id | memory-id | session-id>');
+    return;
+  }
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+
+  const item = await readInboxItem(storage, id);
+  if (item) {
+    out(`inbox 候选: ${item.id}`);
+    out(`类型: ${item.type} · 标题: ${item.title} · 会话: ${item.session}`);
+    if (item.quality) {
+      out(`质量: specific=${item.quality.specific} actionable=${item.quality.actionable} transferable=${item.quality.transferable} evidence=${item.quality.evidence} non_duplicate=${item.quality.non_duplicate}`);
+    }
+    for (const e of item.evidence) out(`证据: ${e.quote}${e.path ? ` (${e.path}:${e.line ?? '-'})` : ''}`);
+    out(`正文:\n${item.content}`);
+    return;
+  }
+
+  for (const f of await storage.list()) {
+    if (f.split('/').some((seg) => seg.startsWith('.'))) continue;
+    const text = await storage.read(f);
+    if (text === null) continue;
+    const mem = parseMemory(text);
+    if (!mem || mem.id !== id) continue;
+    out(`记忆: ${f} · status=${mem.status} · version=${mem.version} · promptVersion=${mem.promptVersion ?? '-'}`);
+    if (mem.quality) {
+      out(`质量: specific=${mem.quality.specific} actionable=${mem.quality.actionable} transferable=${mem.quality.transferable} evidence=${mem.quality.evidence} non_duplicate=${mem.quality.non_duplicate}`);
+    }
+    for (const e of mem.evidence) out(`证据: ${e.quote}${e.path ? ` (${e.path}:${e.line ?? '-'})` : ''}`);
+    const session = mem.evidence[0]?.session;
+    if (session) {
+      const decisions = await readDecisions(storage, { session });
+      if (decisions.length) {
+        out(`会话 ${session} 的决策记录:`);
+        for (const d of decisions) out(`  [${d.at}] ${d.stage} ${d.decision} (${d.source})`);
+      }
+    }
+    return;
+  }
+
+  const decisions = await readDecisions(storage, { session: id });
+  if (decisions.length) {
+    out(`会话 ${id} 的决策记录:`);
+    for (const d of decisions) out(`[${d.at}] ${d.stage} ${d.decision} (${d.source})`);
+    return;
+  }
+  out(`找不到 ${id}(既不是 inbox id、记忆 id,也不是会话 id)`);
+}
+
+async function cmdLearnTrust(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  level: string | undefined,
+): Promise<void> {
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  if (level === undefined) {
+    await printTrust(storage, out);
+    return;
+  }
+  const n = Number(level);
+  if (!Number.isInteger(n) || n < 0 || n > 3) {
+    out('用法: trove learn trust --level <0-3>');
+    return;
+  }
+  const cur = await readTrust(storage);
+  await writeTrust(storage, { ...cur, level: n as TrustLevel, updatedAt: new Date().toISOString() });
+  out(`信任等级已设为 L${n}(仅人为设置)`);
+}
+
 async function cmdStatus(
   paths: ReturnType<typeof trovePaths>,
   createRemote: (config: RemoteConfig) => RemoteStore,
@@ -1462,17 +1663,28 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   program
     .command('learn')
     .description('经验提取与审计查看')
-    .argument('[sessionId]', '对单会话跑提取流水线(缺省需配合 --list)')
+    .argument('[sessionId]', '会话 id,或子命令:migrate / review / why / trust(缺省需配合 --list)')
+    .argument('[arg]', 'review/why/trust 的附加参数(why 的记忆 id 等)')
     .option('--list', '查看最近一次提取的审计 diff')
-    .option('--session <id>', '配合 --list 指定会话')
+    .option('--session <id>', '配合 --list 或 review 指定会话')
     .option('--force', '即使已提取过也强制重跑')
     .option('-n, --recent <n>', '按最近优先提取 n 个未学习会话')
     .option('--apply', '配合 migrate:实际执行迁移(默认 dry-run)')
     .option('--rollback <dir>', '配合 migrate:从备份目录恢复')
+    .option('--accept-all', '配合 review:接受全部待审候选')
+    .option('--reject-all', '配合 review:拒绝全部待审候选')
+    .option('--json', '配合 review:输出待审列表 JSON')
+    .option('--level <n>', '配合 trust:显式设置信任等级(0-3)')
     .action(
-      async (sessionId: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string; apply?: boolean; rollback?: string }) => {
+      async (sessionId: string | undefined, arg: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string; apply?: boolean; rollback?: string; acceptAll?: boolean; rejectAll?: boolean; json?: boolean; level?: string }) => {
         if (sessionId === 'migrate') {
           await cmdLearnMigrate(paths, out, opts);
+        } else if (sessionId === 'review') {
+          await cmdLearnReview(paths, deps.lessonDeps, out, interactive, opts);
+        } else if (sessionId === 'why') {
+          await cmdLearnWhy(paths, arg, out);
+        } else if (sessionId === 'trust') {
+          await cmdLearnTrust(paths, out, opts.level);
         } else if (opts.list) {
           await cmdLearnList(paths, opts.session, out);
         } else if (opts.recent !== undefined) {
@@ -1481,15 +1693,15 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
             err('用法: trove learn -n <正整数>');
             return;
           }
-          const config = await loadConfig(paths.config);
+          const config = deps.lessonDeps?.config ?? (await loadConfig(paths.config));
           out(`准备提取最近 ${n} 个未学习会话...`);
           const summary = await learnRecentBatch(paths.vault, n, { ...deps.lessonDeps, config }, { log: (l) => out(l) });
           out(pc.green(summary));
         } else if (sessionId) {
-          const config = await loadConfig(paths.config);
+          const config = deps.lessonDeps?.config ?? (await loadConfig(paths.config));
           await cmdLearnExtract(paths, sessionId, { ...deps.lessonDeps, config }, out, opts.force === true);
         } else {
-          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>]');
+          err('用法: trove learn <session-id> | trove learn -n <数量> | trove learn --list [--session <id>] | trove learn review|why|trust');
         }
       },
     );

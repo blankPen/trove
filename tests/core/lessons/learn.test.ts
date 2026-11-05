@@ -75,7 +75,7 @@ async function writeIndex(sessions: Array<{ harness: string; session: string; ev
 }
 
 /** v2 单轨配置。 */
-function learnCfg(mode: 'auto' | 'shadow') {
+function learnCfg(mode: 'auto' | 'shadow' | 'off' | 'review') {
   return { learn: { mode, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } };
 }
 
@@ -354,6 +354,15 @@ describe('learn 入口(v2 单轨编排)', () => {
     const note2 = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto') }, 10);
     expect(note2).toBeUndefined();
   });
+
+  it('learnPendingBatch off 模式打印关闭提示,不动队列', async () => {
+    await enqueueLearn(join(vault, 'learn-queue.json'), ['claude-code:s-1']);
+
+    const note = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: v2Llm(), jev: v2Jev(), config: learnCfg('off') }, 10);
+
+    expect(note).toBe('learn 已关闭（learn.mode=off）');
+    expect(await readLearnQueue(join(vault, 'learn-queue.json'))).toEqual(['claude-code:s-1']);
+  });
 });
 
 describe('learnRecentBatch 手动批量学习', () => {
@@ -433,5 +442,16 @@ describe('learnRecentBatch 手动批量学习', () => {
     expect(note).toContain('共 1');
     expect(await storage.read('audit/claude-code:s-1.json')).not.toBeNull();
     expect(await storage.read('audit/claude-code:s-2.json')).toBeNull();
+  });
+
+  it('learnRecentBatch off 模式打印关闭提示,不触碰索引', async () => {
+    const e1 = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', e1);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: e1 }]);
+
+    const note = await learnRecentBatch(vault, 10, { llm: v2Llm(), jev: v2Jev(), config: learnCfg('off') });
+
+    expect(note).toBe('learn 已关闭（learn.mode=off）');
+    expect(await storage.read('audit/claude-code:s-1.json')).toBeNull();
   });
 });

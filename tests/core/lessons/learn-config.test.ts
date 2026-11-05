@@ -6,7 +6,7 @@ import type { LearnConfig } from '../../../src/config.js';
 const learn = (partial: Partial<LearnConfig>) => ({ learn: partial }) as never;
 
 describe('readLearnConfig(v2 单轨学习配置)', () => {
-  it('缺省返回默认值(auto 模式 + autoMigrate)', () => {
+  it('缺省返回默认值(review 模式 + autoMigrate)', () => {
     expect(readLearnConfig()).toEqual(defaultLearnConfig());
     expect(readLearnConfig(undefined)).toEqual(defaultLearnConfig());
   });
@@ -26,12 +26,15 @@ describe('readLearnConfig(v2 单轨学习配置)', () => {
     expect(got.jev).toEqual({ maxCallsPerSession: 8, timeoutMs: 2000 });
   });
 
-  it('mode 只认 auto/shadow,其余按默认 auto 处理;quality 数值 clamp 到 [0,1]', () => {
+  it('mode 只认 off/shadow/review/auto,其余兜底 review;quality 数值 clamp 到 [0,1]', () => {
     const got = readLearnConfig(
       learn({ mode: 'bogus' as never, quality: { autoAccept: 1.5, reviewFloor: -0.2, evidenceMin: 3 } }),
     );
-    expect(got.mode).toBe('auto');
+    expect(got.mode).toBe('review');
+    expect(readLearnConfig(learn({ mode: 'off' })).mode).toBe('off');
     expect(readLearnConfig(learn({ mode: 'shadow' })).mode).toBe('shadow');
+    expect(readLearnConfig(learn({ mode: 'review' })).mode).toBe('review');
+    expect(readLearnConfig(learn({ mode: 'auto' })).mode).toBe('auto');
     expect(got.quality).toEqual({ autoAccept: 1, reviewFloor: 0, evidenceMin: 1 });
   });
 

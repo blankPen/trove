@@ -37,6 +37,8 @@ export interface ExtractionOutcome {
   skipReason?: string;
   /** v2 shadow 模式:已跑流水线但只写审计/决策,未写记忆。 */
   shadow?: boolean;
+  /** review 模式本次新写入 inbox 的候选数(待审)。 */
+  pending?: number;
 }
 
 /** 从统一索引解析单会话的 canonical 事件;裸 session 错配多个 harness 时报歧义。 */
@@ -65,7 +67,7 @@ export async function loadSessionEvents(vaultRoot: string, sessionId: string): P
   return events;
 }
 
-function resolveProviders(deps: LessonProviderDeps): { llm: LlmProvider; jev: JevProvider } {
+export function resolveProviders(deps: LessonProviderDeps): { llm: LlmProvider; jev: JevProvider } {
   // 懒构造:LLM/Jev 配置缺失时由调用方决定跳过还是报错,不拖垮无关命令与 daemon。
   const usagePath = deps.usagePath ?? trovePaths(deps.env?.TROVE_HOME).usageLog;
   const llm = deps.llm ?? new DeepSeekLlm(readLlmConfig(deps.config), { onUsage: createUsageSink(usagePath) });
@@ -83,6 +85,7 @@ export async function runLessonExtraction(
   await ensureLessonsLayout(vaultRoot);
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
   const learn = readLearnConfig(deps.config);
+  if (learn.mode === 'off') return { skipReason: 'disabled' };
   await autoMigrateLessons(vaultRoot, storage, learn, (m) => console.warn(m));
   // 幂等键 = audit/<sessionId>.json:已提取过默认跳过,force 强制重跑(配合 merge 层幂等不翻倍)。
   if (!opts.force && (await storage.exists(`audit/${sessionId}.json`))) {
@@ -119,7 +122,7 @@ export async function runLessonExtraction(
       )
       .catch(() => {});
   }
-  return { diff: out.diff, skipReason: out.skipReason, shadow: out.shadow };
+  return { diff: out.diff, skipReason: out.skipReason, shadow: out.shadow, pending: out.pending };
 }
 
 /**
@@ -136,6 +139,11 @@ export async function learnPendingBatch(
   const ids = await readLearnQueue(queuePath);
   if (ids.length === 0) return undefined;
 
+  if (readLearnConfig(deps.config).mode === 'off') {
+    opts.log?.('learn 已关闭（learn.mode=off）');
+    return 'learn 已关闭（learn.mode=off）';
+  }
+
   let providers: { llm: LlmProvider; jev: JevProvider };
   try {
     providers = resolveProviders(deps);
@@ -149,6 +157,7 @@ export async function learnPendingBatch(
   let extracted = 0;
   let skipped = 0;
   let failed = 0;
+  let pendingTotal = 0;
   for (const key of candidates) {
     try {
       const outcome = await runLessonExtraction(vaultRoot, key, { llm: providers.llm, jev: providers.jev, now: deps.now, config: deps.config });
@@ -160,8 +169,10 @@ export async function learnPendingBatch(
         opts.log?.(`会话 ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计`);
       } else {
         extracted++;
+        pendingTotal += outcome.pending ?? 0;
         const d = outcome.diff?.summary;
-        opts.log?.(`会话 ${key} 提取完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}`);
+        const pending = outcome.pending ? ` · 待审 ${outcome.pending}` : '';
+        opts.log?.(`会话 ${key} 提取完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}${pending}`);
       }
     } catch (e) {
       failed++;
@@ -174,7 +185,8 @@ export async function learnPendingBatch(
 
   await removeLearn(queuePath, candidates);
   const remaining = (await readLearnQueue(queuePath)).length;
-  return `经验提取:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 待办 ${remaining}`;
+  const pendingPart = pendingTotal > 0 ? ` · 待审 ${pendingTotal}` : '';
+  return `经验提取:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 待办 ${remaining}${pendingPart}`;
 }
 
 /** 从统一索引按 startedAt 降序取最多 limit 个「未学习」会话 key(harness:session)。 */
@@ -216,6 +228,11 @@ export async function learnRecentBatch(
   deps: LessonProviderDeps = {},
   opts: { log?: (line: string) => void } = {},
 ): Promise<string> {
+  if (readLearnConfig(deps.config).mode === 'off') {
+    opts.log?.('learn 已关闭（learn.mode=off）');
+    return 'learn 已关闭（learn.mode=off）';
+  }
+
   const keys = await recentUnlearnedKeys(vaultRoot, limit, deps.config);
   if (keys.length === 0) return '没有可学习的会话(都已学习或索引为空)';
 
@@ -225,6 +242,7 @@ export async function learnRecentBatch(
   let extracted = 0;
   let skipped = 0;
   let failed = 0;
+  let pendingTotal = 0;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]!;
     try {
@@ -237,8 +255,10 @@ export async function learnRecentBatch(
         opts.log?.(`[${i + 1}/${keys.length}] ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计`);
       } else {
         extracted++;
+        pendingTotal += outcome.pending ?? 0;
         const d = outcome.diff?.summary;
-        opts.log?.(`[${i + 1}/${keys.length}] ${key} 完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}`);
+        const pending = outcome.pending ? ` · 待审 ${outcome.pending}` : '';
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} 完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}${pending}`);
       }
     } catch (e) {
       failed++;
@@ -247,5 +267,6 @@ export async function learnRecentBatch(
       opts.log?.(`[${i + 1}/${keys.length}] ${key} 失败:${msg}`);
     }
   }
-  return `经验提取完成:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 共 ${keys.length} 个会话`;
+  const pendingPart = pendingTotal > 0 ? ` · 待审 ${pendingTotal}` : '';
+  return `经验提取完成:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 共 ${keys.length} 个会话${pendingPart}`;
 }

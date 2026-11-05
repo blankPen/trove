@@ -91,7 +91,8 @@ export async function applyMigration(
   }
   const now = opts.now ?? (() => new Date());
   const lessonsDir = libraryLessonsDir(opts.vaultRoot);
-  const backupDir = join(dirname(lessonsDir), '..', 'backups', `lessons-${now().toISOString().replace(/[:.]/g, '-')}`);
+  // 备份放在 vault 之外(与 vault 平级),避免回滚时把备份本身也扫进 lessons。
+  const backupDir = join(dirname(opts.vaultRoot), 'backups', `lessons-${now().toISOString().replace(/[:.]/g, '-')}`);
   await mkdir(dirname(backupDir), { recursive: true });
   await cp(lessonsDir, backupDir, { recursive: true });
   await writeFile(
@@ -140,17 +141,21 @@ export async function rollbackMigration(vaultRoot: string, backupDir: string): P
   return count;
 }
 
-/** 非 shadow 模式、autoMigrate 开启时,正式学习前自动迁移一次;失败只警告,不阻断学习。 */
+/** 非 shadow/off 模式、autoMigrate 开启时,正式学习前自动迁移一次;失败只警告,不阻断学习。 */
 export async function autoMigrateLessons(
   vaultRoot: string,
   storage: StorageAdapter,
   learn: LearnConfig,
   warn: (msg: string) => void,
 ): Promise<void> {
-  if (learn.mode === 'shadow' || !learn.autoMigrate) return;
+  if (learn.mode === 'shadow' || learn.mode === 'off' || !learn.autoMigrate) return;
   if (await storage.exists(MARKER)) return;
   const plan = await planMigration(storage);
-  if (plan.items.length === 0) return;
+  if (plan.items.length === 0) {
+    // 无旧文件也落标记,避免每次 learn 都重扫全库;失败不写 marker(下次重试)。
+    await storage.write(MARKER, JSON.stringify({ at: new Date().toISOString(), count: 0, backupDir: null }, null, 2));
+    return;
+  }
   try {
     await applyMigration(storage, plan, { vaultRoot });
   } catch (e) {

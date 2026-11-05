@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { libraryLessonsDir } from '../../../src/core/layout.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
-import { planMigration, applyMigration, migrateLessons, rollbackMigration } from '../../../src/core/lessons/migrate.js';
+import { planMigration, applyMigration, migrateLessons, rollbackMigration, autoMigrateLessons } from '../../../src/core/lessons/migrate.js';
 import { parseMemory, renderMemory } from '../../../src/core/lessons/memory.js';
 
 let vault: string;
@@ -110,6 +110,48 @@ describe('applyMigration', () => {
     expect(manifest.files).toEqual(['experiences/old.md']);
     // 备份目录里的原文件仍是迁移前内容
     expect(await readFile(join(r.backupDir!, 'experiences/old.md'), 'utf8')).not.toContain('id:');
+  });
+
+  it('备份目录落在 vault 之外(dirname(vault)/backups)', async () => {
+    await storage.write('experiences/old.md', v1File('experiences/debug_pattern', '旧标题'));
+
+    const r = await applyMigration(storage, await planMigration(storage, () => now), { vaultRoot: vault, now: () => now });
+
+    expect(r.backupDir).toBe(join(vault, '..', 'backups', `lessons-2026-02-01T00-00-00-000Z`));
+  });
+});
+
+describe('autoMigrateLessons', () => {
+  const learn = (mode: 'auto' | 'review' | 'shadow' | 'off' = 'review') => ({
+    mode,
+    autoMigrate: true,
+    quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
+    jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+  });
+
+  it('无旧文件也落标记 count:0,避免反复重扫', async () => {
+    await autoMigrateLessons(vault, storage, learn(), () => {});
+
+    expect(await storage.exists('.trove/migrated-v2.json')).toBe(true);
+    const marker = JSON.parse((await storage.read('.trove/migrated-v2.json'))!);
+    expect(marker.count).toBe(0);
+    expect(marker.backupDir).toBeNull();
+  });
+
+  it('有旧文件则迁移并落标记;shadow/off 模式不迁移', async () => {
+    await storage.write('experiences/old.md', v1File('experiences/debug_pattern', '旧标题'));
+    await autoMigrateLessons(vault, storage, learn(), () => {});
+    expect((await parseMemory((await storage.read('experiences/old.md'))!))!.id).toBeTruthy();
+
+    // 另一处 shadow/off 不迁移
+    const vault2 = await mkdtemp(join(tmpdir(), 'lessons-migrate-'));
+    const storage2 = new LocalStorageAdapter(libraryLessonsDir(vault2));
+    await storage2.write('experiences/old.md', v1File('experiences/debug_pattern', '旧标题'));
+    await autoMigrateLessons(vault2, storage2, learn('shadow'), () => {});
+    expect(await storage2.exists('.trove/migrated-v2.json')).toBe(false);
+    await autoMigrateLessons(vault2, storage2, learn('off'), () => {});
+    expect(await storage2.exists('.trove/migrated-v2.json')).toBe(false);
+    await rm(vault2, { recursive: true, force: true });
   });
 });
 

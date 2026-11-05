@@ -92,21 +92,27 @@ describe('文件写入与索引更新(Stage 7)', () => {
     expect(overview).toContain('`experiences/`: 经验库（5 个文件）');
   });
 
-  it('add 带 source:frontmatter 写入来源会话而非 null', async () => {
+  it('add 无 meta 也落 v2:补 id/kind/status/version', async () => {
     await applyOperations([add('experiences/gotcha', '标题', 'experiences/g.md', '正文')], { storage, source: 'claude-code:705a6169' });
 
     const file = await storage.read('experiences/g.md');
-    expect(file).toContain('source: "claude-code:705a6169"');
+    expect(file).toMatch(/^id: "exp_/m);
+    expect(file).toContain('kind: experience');
+    expect(file).toContain('status: active');
+    expect(file).toContain('version: 1');
+    expect(file).not.toContain('source:');
   });
 
-  it('patch 带 source:保留来源会话而非回退为 null', async () => {
+  it('patch 无 meta 补 v2 且版本递增、保留 created_at', async () => {
     const t = new Date('2026-01-01T00:00:00Z');
-    await applyOperations([add('experiences/gotcha', '标题', 'experiences/g.md', '旧内容')], { storage, now: () => t, source: 'claude-code:705a6169' });
+    await applyOperations([add('experiences/gotcha', '标题', 'experiences/g.md', '旧内容')], { storage, now: () => t });
 
-    await applyOperations([{ op: 'patch', type: 'experiences/gotcha', path: 'experiences/g.md', title: '标题', content: '新内容', before: '旧内容' }], { storage, now: () => t, source: 'claude-code:705a6169' });
+    await applyOperations([{ op: 'patch', type: 'experiences/gotcha', path: 'experiences/g.md', title: '标题', content: '新内容', before: '旧内容' }], { storage, now: () => t });
 
     const file = await storage.read('experiences/g.md');
-    expect(file).toContain('source: "claude-code:705a6169"');
+    expect(file).toContain('新内容');
+    expect(file).toContain('version: 2');
+    expect(file).toContain('created_at: "2026-01-01T00:00:00.000Z"');
   });
 
   it('add 带 supersedePath:旧文件移入 archive 并标记 superseded_by,INDEX 替换行', async () => {

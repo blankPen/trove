@@ -99,13 +99,15 @@ describe('applyOperations · v2 meta', () => {
     expect(index).toContain('experiences/g-new.md');
   });
 
-  it('无 meta 的 v1 add 行为不变(仍走 renderFrontmatter,无 id/kind)', async () => {
+  it('无 meta 的 add 也落 v2(补 id/kind/status/version)', async () => {
     await applyOperations([{ op: 'add', type: 'experiences/gotcha', path: 'experiences/g.md', title: '标题', content: '正文', evidence: [1] }], { storage, now: () => t0 });
     const text = await storage.read('experiences/g.md');
     expect(text).toContain('type: experiences/gotcha');
-    expect(text).toContain('source: null');
-    expect(text).not.toContain('id:');
-    expect(text).not.toContain('kind:');
+    expect(text).toMatch(/^id: "exp_/m);
+    expect(text).toContain('kind: experience');
+    expect(text).toContain('status: active');
+    expect(text).toContain('version: 1');
+    expect(text).not.toContain('source:');
   });
 
   it('add 经验类正文追加 ## 证据 段(quote 可溯源,仅一段)', async () => {
@@ -162,6 +164,8 @@ describe('applyOperations · v2 meta', () => {
     );
     const archived = await storage.read('archive/events/2026-01-01-decided-a.md');
     expect(archived).toContain('status: 这是正文内容');
-    expect(archived).not.toContain('status: superseded');
+    // v2 归档:仅 frontmatter 的 status 标 superseded,正文 status: 行不动
+    expect(archived).toContain('status: superseded');
+    expect(archived).not.toContain('status: active');
   });
 });

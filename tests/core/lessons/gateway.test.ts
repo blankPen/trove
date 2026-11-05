@@ -7,8 +7,8 @@ import type { LearnConfig } from '../../../src/config.js';
 import type { SessionSummary } from '../../../src/core/lessons/analyze.js';
 
 const learn = (over: Partial<LearnConfig> = {}): LearnConfig => ({
-  v2: true,
   mode: 'auto',
+  autoMigrate: true,
   quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
   jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
   ...over,

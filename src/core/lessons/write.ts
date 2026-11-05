@@ -1,11 +1,10 @@
-/** 阶段 7:把阶段 6 的操作落盘为 .md 文件,并同步 INDEX.md 与 .overview.md。 */
+/** 阶段 7:把阶段 6 的操作落盘为 .md 文件,并同步 INDEX.md 与 .overview.md。所有写盘统一走 v2 schema。 */
 import type { MemoryOp, MemoryMeta } from './merge.js';
 import type { StorageAdapter } from './storage.js';
-import { renderFrontmatter } from './frontmatter.js';
 import { appendEvidenceSection, stripEvidenceSection } from './contract.js';
 import { INDEX_TEMPLATE } from './layout.js';
 import { touchSidecars } from './sidecar.js';
-import { parseMemory, renderMemory } from './memory.js';
+import { newMemoryId, inferKind, idPrefix, parseMemory, renderMemory } from './memory.js';
 import type { EvidenceRef, MemoryV2 } from './memory.js';
 
 export interface WriteDeps {
@@ -38,11 +37,7 @@ export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise
 
   for (const op of ops) {
     if (op.op === 'add') {
-      if (op.meta) {
-        await deps.storage.write(op.path, renderV2File(op, now()));
-      } else {
-        await deps.storage.write(op.path, renderFile(op.type, op.title, op.content, { createdAt: now(), updatedAt: now() }, deps.source));
-      }
+      await deps.storage.write(op.path, renderV2File(op, now()));
       res.added.push(op.path);
       const archive = op.archivePath ?? op.supersedePath;
       if (archive && archive !== op.path && (await archiveFile(archive, op.path, deps.storage))) {
@@ -50,12 +45,7 @@ export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise
       }
     } else if (op.op === 'patch') {
       const existing = await deps.storage.read(op.path);
-      if (op.meta) {
-        await deps.storage.write(op.path, renderV2Patch(op, existing, now()));
-      } else {
-        const createdAt = existing ? (extractField(existing, 'created_at') ?? now()) : now();
-        await deps.storage.write(op.path, renderFile(op.type, op.title, op.content, { createdAt, updatedAt: now() }, deps.source));
-      }
+      await deps.storage.write(op.path, renderV2Patch(op, existing, now()));
       res.updated.push(op.path);
     } else if (op.op === 'append') {
       const existing = (await deps.storage.read(op.path)) ?? '';
@@ -72,13 +62,23 @@ export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise
   return res;
 }
 
-function renderFile(type: string, title: string, content: string, o: { createdAt: string; updatedAt: string }, source?: string): string {
-  return renderFrontmatter({ type, title, tags: deriveTags(type), createdAt: o.createdAt, updatedAt: o.updatedAt, source }) + '\n' + content + '\n';
+/** 无 meta 的旧调用方(memo/recent)自动补 v2 meta;有 meta 直接用。 */
+function metaOf(op: Extract<MemoryOp, { op: 'add' | 'patch' }>, existing: string | null): MemoryMeta {
+  if (op.meta) return op.meta;
+  const old = existing ? parseMemory(existing) : null;
+  return {
+    id: old?.id || newMemoryId(idPrefix(op.type)),
+    kind: inferKind(op.type),
+    status: 'active',
+    version: op.op === 'add' ? 1 : (old?.version ?? 0) + 1,
+    evidence: [],
+    promptVersion: 'legacy',
+  };
 }
 
 /** v2 add:用 renderMemory 渲染(含 id/kind/status/version/quality/evidence),仍走 INDEX/sidecar。 */
 function renderV2File(op: Extract<MemoryOp, { op: 'add' }>, nowIso: string): string {
-  const meta = op.meta!;
+  const meta = metaOf(op, null);
   const mem: MemoryV2 = {
     id: meta.id,
     kind: meta.kind,
@@ -111,7 +111,7 @@ function v2Body(type: string, content: string, evidence: EvidenceRef[]): string 
 
 /** v2 patch:保留旧 id/created_at,version 递增,证据合并去重。 */
 function renderV2Patch(op: Extract<MemoryOp, { op: 'patch' }>, existing: string | null, nowIso: string): string {
-  const meta = op.meta!;
+  const meta = metaOf(op, existing);
   const old = existing ? parseMemory(existing) : null;
   const evidence = dedupeEvidence([...(old?.evidence ?? []), ...(meta.evidence ?? [])]);
   const mem: MemoryV2 = {

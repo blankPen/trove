@@ -89,8 +89,8 @@ describe('config(设计 §10.2)', () => {
 
   it('learn 默认值 + 老配置补全 + 部分覆盖不丢其它字段', async () => {
     expect(defaultConfig().learn).toEqual({
-      v2: false,
-      mode: 'shadow',
+      mode: 'auto',
+      autoMigrate: true,
       quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
     });
@@ -103,14 +103,23 @@ describe('config(设计 §10.2)', () => {
 
     // 部分覆盖:缺的字段补默认,已填的保留
     const partial = defaultConfig();
-    partial.learn = { v2: true, mode: 'auto', quality: { autoAccept: 0.9 } } as Config['learn'];
+    partial.learn = { mode: 'auto', autoMigrate: false, quality: { autoAccept: 0.9 } } as Config['learn'];
     await saveConfig(cfg, partial);
     expect((await loadConfig(cfg)).learn).toEqual({
-      v2: true,
       mode: 'auto',
+      autoMigrate: false,
       quality: { autoAccept: 0.9, reviewFloor: 0.6, evidenceMin: 0.8 },
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
     });
+  });
+
+  it('老配置里的 learn.v2 字段被忽略,不再读', async () => {
+    const withV2 = defaultConfig() as unknown as { learn: Record<string, unknown> };
+    withV2.learn.v2 = true;
+    await saveConfig(cfg, withV2 as never);
+    const back = await loadConfig(cfg);
+    expect(back.learn).toEqual(defaultConfig().learn);
+    expect((back.learn as Record<string, unknown>).v2).toBeUndefined();
   });
 
   it('文件不存在时 loadConfig 返回默认配置', async () => {

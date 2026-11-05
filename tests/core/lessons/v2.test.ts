@@ -59,7 +59,7 @@ const EXPERIENCE = {
 };
 
 function learn(mode: 'shadow' | 'auto'): LearnConfig {
-  return { v2: true, mode, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } };
+  return { mode, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } };
 }
 
 function jevAllHigh(): JevProvider {

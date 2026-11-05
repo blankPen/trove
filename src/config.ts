@@ -68,10 +68,10 @@ export interface LearnQualityConfig {
 }
 
 export interface LearnConfig {
-  /** v2 两阶段质量流水线;默认 false,先 shadow 观察 */
-  v2: boolean;
   /** shadow=只计算并写审计;auto=达阈值写记忆 */
   mode: 'shadow' | 'auto';
+  /** 正式学习前自动把老 v1 记忆迁移为 v2 schema;默认开启 */
+  autoMigrate: boolean;
   quality: LearnQualityConfig;
   jev: { maxCallsPerSession: number; timeoutMs: number };
 }
@@ -79,8 +79,8 @@ export interface LearnConfig {
 /** learn 默认值,`defaultConfig` 与 `readLearnConfig` 共用,避免重复字面量。 */
 export function defaultLearnConfig(): LearnConfig {
   return {
-    v2: false,
-    mode: 'shadow',
+    mode: 'auto',
+    autoMigrate: true,
     quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
     jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
   };
@@ -171,8 +171,8 @@ export function normalizeLearn(learn: unknown): LearnConfig {
   const q = (l.quality ?? {}) as Record<string, unknown>;
   const j = (l.jev ?? {}) as Record<string, unknown>;
   return {
-    v2: l.v2 === true,
-    mode: l.mode === 'auto' ? 'auto' : 'shadow',
+    mode: l.mode === 'shadow' ? 'shadow' : 'auto',
+    autoMigrate: l.autoMigrate !== false,
     quality: {
       autoAccept: num(q.autoAccept, d.quality.autoAccept),
       reviewFloor: num(q.reviewFloor, d.quality.reviewFloor),

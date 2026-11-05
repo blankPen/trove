@@ -5,7 +5,7 @@ import { buildFilename, getMemoryType, slugify } from './schema.js';
 import type { LearnConfig } from '../../config.js';
 import type { DecisionGateway, CandidateForGate, ExistingForGate } from './gateway.js';
 import type { EvidenceRef, MemoryKind, MemoryStatus, QualityScore } from './memory.js';
-import { inferKind, newMemoryId } from './memory.js';
+import { idPrefix, inferKind, newMemoryId } from './memory.js';
 
 export interface ExistingMemory {
   type: string;
@@ -246,16 +246,4 @@ function bigrams(s: string): Set<string> {
   const out = new Set<string>();
   for (let i = 0; i < chars.length - 1; i++) out.add(chars[i]! + chars[i + 1]!);
   return out;
-}
-
-function idPrefix(type: string): string {
-  switch (type.split('/')[0]) {
-    case 'experiences': return 'exp_';
-    case 'preferences': return 'pref_';
-    case 'entities': return 'ent_';
-    case 'events': return 'evt_';
-    case 'resources': return 'res_';
-    case 'trajectories': return 'traj_';
-    default: return 'mem_';
-  }
 }

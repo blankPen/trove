@@ -51,8 +51,8 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
   const d = defaultLearnConfig();
   const l = (config?.learn ?? {}) as Partial<LearnConfig>;
   return {
-    v2: l.v2 === true,
-    mode: l.mode === 'auto' ? 'auto' : 'shadow',
+    mode: l.mode === 'shadow' ? 'shadow' : 'auto',
+    autoMigrate: l.autoMigrate !== false,
     quality: {
       autoAccept: clamp01(l.quality?.autoAccept, d.quality.autoAccept),
       reviewFloor: clamp01(l.quality?.reviewFloor, d.quality.reviewFloor),

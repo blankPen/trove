@@ -5,7 +5,7 @@ import type { MemoryCandidateV2 } from '../../../src/core/lessons/extract.js';
 import type { DecisionGateway, IdentityResult, ExistingForGate } from '../../../src/core/lessons/gateway.js';
 import type { LearnConfig } from '../../../src/config.js';
 
-const learn: LearnConfig = { v2: true, mode: 'auto', quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } };
+const learn: LearnConfig = { mode: 'auto', autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } };
 
 const evidence = [{ session: 's1', seq: 1, quote: '足够长的引用内容' }];
 

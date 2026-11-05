@@ -9,7 +9,7 @@ import { buildMemoryDiff, writeMemoryDiff } from '../../../src/core/lessons/audi
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 import type { MemoryOp } from '../../../src/core/lessons/merge.js';
 import { MockLlm } from '../../../src/core/lessons/llm.js';
-import { MockJev } from '../../../src/core/lessons/jev.js';
+import type { JevProvider } from '../../../src/core/lessons/jev.js';
 import type { Event } from '../../../src/core/events/schema.js';
 
 let base: string;
@@ -80,21 +80,50 @@ async function writeSession(harness: string, session: string, events: Event[]): 
   await writeFile(join(libraryDir(trovePaths(base).vault), 'index.json'), JSON.stringify(index, null, 2) + '\n', 'utf8');
 }
 
-/** 按 schema 的 properties 键区分返回的 stage 结果。 */
-function happyLlm(): MockLlm {
-  return new MockLlm((_prompt, schema) => {
-    const props = (schema.properties ?? {}) as Record<string, unknown>;
-    if ('keySteps' in props) return { topic: '调试脚本', intent: '修复脚本退出码', outcome: 'success', keySteps: ['改用 set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
-    if ('experiences' in props) return { preferences: false, entities: false, experiences: true, events: false, resources: false };
-    if ('memories' in props) return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: 'shell 脚本退出时应使用 set -e', slug: 'set-e', evidence: [1] }] };
-    if ('conflict' in props) return { conflict: false };
-    if ('content' in props) return { content: 'merged' };
-    return {};
-  });
+/** v2 全高分 Jev:score 通过、keepCalls 全 0.95,走通 Gate A/B/C。 */
+function v2Jev(): JevProvider {
+  return {
+    async score() { return { taskSuccess: 1, meanScore: 1 }; },
+    async keepCalls(_s: unknown, q: Record<string, unknown>): Promise<Record<string, number>> {
+      return Object.fromEntries(Object.keys(q).map((k) => [k, 0.95]));
+    },
+  };
 }
 
-function mockJev(): MockJev {
-  return new MockJev(() => ({ taskSuccess: 1, meanScore: 1 }));
+/** 经验类五段式正文,通过契约 lint。 */
+const EXPERIENCE_CONTENT = [
+  '## 适用场景',
+  'shell 脚本需要失败立即中断的调试场景',
+  '',
+  '## 做法',
+  '在脚本开头运行 `set -e`',
+  '',
+  '## 验证',
+  '后续命令出错时脚本立即退出',
+  '',
+  '## 边界与反例',
+  '不适用于需要忽略单个命令失败的场景',
+].join('\n');
+
+/** v2 单轨 LLM:按 task 路由,单经验。 */
+function happyLlm(): MockLlm {
+  return new MockLlm((_p, _s, task) => {
+    switch (task) {
+      case 'learn:summarize':
+        return { topic: '调试脚本', intent: '修复脚本退出码', outcome: 'success', keySteps: ['改用 set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
+      case 'learn:classify':
+        return { preferences: false, entities: false, experiences: true, events: false, resources: false };
+      case 'learn:trajectory':
+        return { task: '调试脚本退出码', outcome: 'success', reusableSignals: ['用 set -e 立即中断'] };
+      case 'learn:extract':
+        return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: EXPERIENCE_CONTENT, slug: 'set-e', evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }] }] };
+      case 'learn:triage': return { decision: 'accept' };
+      case 'learn:quality': return { decision: 'accept' };
+      case 'learn:identity': return { decision: 'add' };
+      case 'learn:merge': return { content: '脚本退出应该用 set -e' };
+      default: throw new Error(`unexpected task ${task}`);
+    }
+  });
 }
 
 /** 端到端会话:含调试错误、`改成` 纠正、明确编码偏好三种信号。 */
@@ -141,31 +170,36 @@ function chatEvents(session: string): Event[] {
   ];
 }
 
-/** 端到端 mock:分类同时开偏好与经验;memories 按提示词里的类别标签返回对应记忆。 */
+/** v2 端到端 mock:分类同开偏好与经验;extract 按提示词里的类别标签返回对应记忆。 */
 function richLlm(): MockLlm {
-  return new MockLlm((prompt, schema) => {
-    const props = (schema.properties ?? {}) as Record<string, unknown>;
-    if ('keySteps' in props) {
-      return { topic: '调试脚本', intent: '修复脚本退出码并固化偏好', outcome: 'success', keySteps: ['改用 set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
+  return new MockLlm((prompt, _s, task) => {
+    switch (task) {
+      case 'learn:summarize':
+        return { topic: '调试脚本', intent: '修复脚本退出码并固化偏好', outcome: 'success', keySteps: ['改用 set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
+      case 'learn:classify':
+        return { preferences: true, entities: false, experiences: true, events: false, resources: false };
+      case 'learn:trajectory':
+        return { task: '调试脚本退出码', outcome: 'success', reusableSignals: ['用 set -e 立即中断'] };
+      case 'learn:extract':
+        if (prompt.includes('「偏好」')) {
+          return { memories: [{ type: 'preferences/coding_style', title: 'shell 脚本统一使用 set -e', content: '用户偏好:shell 脚本统一使用 set -e 让错误立即中断', evidence: [{ seq: 2, quote: '以后所有 shell 脚本都用 set -e' }] }] };
+        }
+        return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: EXPERIENCE_CONTENT, slug: 'set-e', evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }] }] };
+      case 'learn:triage': return { decision: 'accept' };
+      case 'learn:quality': return { decision: 'accept' };
+      case 'learn:identity': return { decision: 'add' };
+      case 'learn:merge': return { content: 'shell 脚本统一使用 set -e 让错误立即中断' };
+      default: throw new Error(`unexpected task ${task}`);
     }
-    if ('experiences' in props) {
-      return { preferences: true, entities: false, experiences: true, events: false, resources: false };
-    }
-    if ('memories' in props) {
-      if (prompt.includes('「偏好」')) {
-        return { memories: [{ type: 'preferences/coding_style', title: 'shell 脚本统一使用 set -e', content: '用户偏好:shell 脚本统一使用 set -e 让错误立即中断', slug: 'set-e-style', evidence: [2] }] };
-      }
-      return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: 'shell 脚本退出时应使用 set -e 让错误立即中断', slug: 'set-e', evidence: [1] }] };
-    }
-    if ('conflict' in props) return { conflict: false };
-    if ('content' in props) return { content: 'merged' };
-    return {};
   });
 }
 
 /** 纯闲聊 mock:摘要返回 trivial,阶段 4 由模型跳过。 */
 function chatLlm(): MockLlm {
-  return new MockLlm(() => ({ topic: '闲聊', intent: '聊天', outcome: 'trivial', keySteps: [], hasError: false, hasCorrection: false, hasWorkflow: false }));
+  return new MockLlm((_p, _s, task) => {
+    if (task === 'learn:summarize') return { topic: '闲聊', intent: '聊天', outcome: 'trivial', keySteps: [], hasError: false, hasCorrection: false, hasWorkflow: false };
+    throw new Error(`unexpected task ${task}`);
+  });
 }
 
 describe('trove learn --list(Stage 8 查看命令)', () => {
@@ -215,10 +249,10 @@ describe('trove learn --list(Stage 8 查看命令)', () => {
 });
 
 describe('trove learn <session-id>(Stage 9 单会话提取命令)', () => {
-  it('用例 9-1:注入 mock 提供方,对单会话跑通全链路并输出审计摘要', async () => {
+  it('用例 9-1:注入 mock 提供方,对单会话跑通 v2 全链路并输出审计摘要', async () => {
     await writeSession('claude-code', 's-1', sampleEvents('s-1'));
 
-    const code = await runLearn(['learn', 's-1'], { lessonDeps: { llm: happyLlm(), jev: mockJev() } });
+    const code = await runLearn(['learn', 's-1'], { lessonDeps: { llm: happyLlm(), jev: v2Jev() } });
 
     expect(code).toBe(0);
     const output = lines.join('\n');
@@ -231,7 +265,7 @@ describe('全局端到端验收(端到端-1..4)', () => {
   it('端到端-1:调试错误+用户纠正+明确偏好 → debug_pattern(add)+preference(add),审计完整,索引一致', async () => {
     await writeSession('claude-code', 'e2e-1', richEvents('e2e-1'));
 
-    const code = await runLearn(['learn', 'e2e-1'], { lessonDeps: { llm: richLlm(), jev: mockJev() } });
+    const code = await runLearn(['learn', 'e2e-1'], { lessonDeps: { llm: richLlm(), jev: v2Jev() } });
 
     expect(code).toBe(0);
     const output = lines.join('\n');
@@ -246,17 +280,18 @@ describe('全局端到端验收(端到端-1..4)', () => {
     expect(files).toContain('.overview.md');
     expect(files).toContain('memory_diff.json');
     expect(files).toContain('audit/e2e-1.json');
+    expect(files.some((f) => f.startsWith('trajectories/'))).toBe(true);
   });
 
   it('端到端-2:纯闲聊会话由模型摘要判 trivial 跳过,落 skipped 标记,不产生记忆文件', async () => {
     await writeSession('claude-code', 'e2e-2', chatEvents('e2e-2'));
 
-    const code = await runLearn(['learn', 'e2e-2'], { lessonDeps: { llm: chatLlm(), jev: mockJev() } });
+    const code = await runLearn(['learn', 'e2e-2'], { lessonDeps: { llm: chatLlm(), jev: v2Jev() } });
 
     expect(code).toBe(0);
     expect(lines.join('\n')).toContain('会话未达提取阈值,跳过: trivial');
     // 只留骨架文件 + 跳过标记;无记忆文件、memory_diff 或成功审计
-    const SKELETON = new Set(['INDEX.md', '.overview.md', 'README.md', 'audit/e2e-2.skipped.json']);
+    const SKELETON = new Set(['INDEX.md', '.overview.md', 'README.md', '.trove/decisions.jsonl', 'audit/e2e-2.skipped.json']);
     const extra = (await storage.list()).filter((f) => !SKELETON.has(f));
     expect(extra).toEqual([]);
     expect(await storage.exists('memory_diff.json')).toBe(false);
@@ -265,7 +300,7 @@ describe('全局端到端验收(端到端-1..4)', () => {
 
   it('端到端-3:同一会话默认第二次跳过,已学习不再重复;--force 重跑则 merge 层幂等不翻倍', async () => {
     await writeSession('claude-code', 'e2e-3', richEvents('e2e-3'));
-    const deps = { lessonDeps: { llm: richLlm(), jev: mockJev() } };
+    const deps = { lessonDeps: { llm: richLlm(), jev: v2Jev() } };
 
     expect(await runLearn(['learn', 'e2e-3'], deps)).toBe(0);
     const files1 = (await storage.list()).sort();
@@ -275,18 +310,21 @@ describe('全局端到端验收(端到端-1..4)', () => {
     expect(await runLearn(['learn', 'e2e-3'], deps)).toBe(0);
     expect(lines.join('\n')).toContain('该会话已提取过,跳过');
 
-    // --force 重跑:merge 层幂等,add 跳过 / patch 记为更新,文件集不翻倍
+    // --force 重跑:debug_pattern(add)同路径幂等跳过、coding_style(patch)记为更新,文件不翻倍
     lines.length = 0;
     expect(await runLearn(['learn', 'e2e-3', '--force'], deps)).toBe(0);
     expect(lines.join('\n')).toContain('本次新增 0 条、更新 1 条、追加 0 条、跳过 0 条');
-    expect((await storage.list()).sort()).toEqual(files1);
     expect((await storage.list()).filter((f) => f.startsWith('experiences/debug-'))).toEqual(['experiences/debug-set-e.md']);
+    expect((await storage.list()).filter((f) => f.startsWith('preferences/coding_style'))).toEqual(['preferences/coding_style.md']);
+    // 会话审计只落一份成功记录(不重复)
+    expect((await storage.list()).filter((f) => f === 'audit/e2e-3.json')).toHaveLength(1);
+    expect(files1).toContain('audit/e2e-3.json');
   });
 
   it('端到端-4:L0 INDEX → L1 overview → L2 详情三级可读,INDEX 行路径指向真实文件', async () => {
     await writeSession('claude-code', 'e2e-4', richEvents('e2e-4'));
 
-    expect(await runLearn(['learn', 'e2e-4'], { lessonDeps: { llm: richLlm(), jev: mockJev() } })).toBe(0);
+    expect(await runLearn(['learn', 'e2e-4'], { lessonDeps: { llm: richLlm(), jev: v2Jev() } })).toBe(0);
 
     const index = await storage.read('INDEX.md');
     expect(index).not.toBeNull();
@@ -329,7 +367,7 @@ describe('trove learn -n(批量学习最近会话)', () => {
     await mkdir(lib, { recursive: true });
     await writeFile(join(lib, 'index.json'), JSON.stringify({ v: 1, generatedAt: new Date().toISOString(), hash: '', sessions: sessionsMap, skills: {} }, null, 2) + '\n', 'utf8');
 
-    const code = await runLearn(['learn', '-n', '1'], { lessonDeps: { llm: happyLlm(), jev: mockJev() } });
+    const code = await runLearn(['learn', '-n', '1'], { lessonDeps: { llm: happyLlm(), jev: v2Jev() } });
 
     expect(code).toBe(0);
     const output = lines.join('\n');

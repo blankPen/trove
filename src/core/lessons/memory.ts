@@ -62,6 +62,19 @@ export function newMemoryId(prefix: string, now?: Date, random: () => number = M
   return prefix + time + rnd;
 }
 
+/** 由 type 一级目录前缀推断 id 前缀;未知前缀按通用 mem_ 兜底。 */
+export function idPrefix(type: string): string {
+  switch (type.split('/')[0]) {
+    case 'experiences': return 'exp_';
+    case 'preferences': return 'pref_';
+    case 'entities': return 'ent_';
+    case 'events': return 'evt_';
+    case 'resources': return 'res_';
+    case 'trajectories': return 'traj_';
+    default: return 'mem_';
+  }
+}
+
 /** 由 type 一级目录前缀推断 kind;未知前缀按经验处理(旧文件的兜底)。 */
 export function inferKind(type: string): MemoryKind {
   const prefix = type.split('/')[0];

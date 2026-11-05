@@ -65,6 +65,7 @@ import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/les
 import { learnClaudeMemo } from './core/lessons/memo.js';
 import { learnRecentMatters } from './core/lessons/recent.js';
 import { enqueueLearn, readLearnQueue } from './core/lessons/queue.js';
+import { planMigration, applyMigration, rollbackMigration } from './core/lessons/migrate.js';
 import {
   daemonState,
   daemonLog,
@@ -710,6 +711,27 @@ async function cmdLearnList(
     ? (await readSessionDiff(storage, sessionId)) ?? (await readShadowDiff(storage, sessionId))
     : await readLatestDiff(storage);
   out(diff ? formatDiff(diff) : sessionId ? `无会话 ${sessionId} 的提取记录` : '尚无提取记录');
+}
+
+async function cmdLearnMigrate(
+  paths: ReturnType<typeof trovePaths>,
+  out: (l: string) => void,
+  opts: { apply?: boolean; rollback?: string },
+): Promise<void> {
+  if (opts.rollback) {
+    const n = await rollbackMigration(paths.vault, opts.rollback);
+    out(`已回滚 ${n} 条记忆`);
+    return;
+  }
+  const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
+  const plan = await planMigration(storage);
+  if (opts.apply) {
+    const r = await applyMigration(storage, plan, { vaultRoot: paths.vault });
+    out(`已迁移 ${r.migrated} 条记忆(已 v2 ${r.alreadyV2} 条跳过),备份目录: ${r.backupDir}`);
+    return;
+  }
+  out(`待迁移 ${plan.items.length} 条、已 v2 ${plan.alreadyV2} 条、跳过(非记忆) ${plan.skipped.length} 条`);
+  for (const p of plan.skipped.slice(0, 5)) out(`  跳过: ${p}`);
 }
 
 async function cmdLearnExtract(
@@ -1445,9 +1467,13 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .option('--session <id>', '配合 --list 指定会话')
     .option('--force', '即使已提取过也强制重跑')
     .option('-n, --recent <n>', '按最近优先提取 n 个未学习会话')
+    .option('--apply', '配合 migrate:实际执行迁移(默认 dry-run)')
+    .option('--rollback <dir>', '配合 migrate:从备份目录恢复')
     .action(
-      async (sessionId: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string }) => {
-        if (opts.list) {
+      async (sessionId: string | undefined, opts: { list?: boolean; session?: string; force?: boolean; recent?: string; apply?: boolean; rollback?: string }) => {
+        if (sessionId === 'migrate') {
+          await cmdLearnMigrate(paths, out, opts);
+        } else if (opts.list) {
           await cmdLearnList(paths, opts.session, out);
         } else if (opts.recent !== undefined) {
           const n = Number(opts.recent);

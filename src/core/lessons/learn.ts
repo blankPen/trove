@@ -14,10 +14,10 @@ import type { LlmProvider } from './llm.js';
 import { createUsageSink } from './usage.js';
 import { TypeSafeJevScorer } from './jev.js';
 import type { JevProvider } from './jev.js';
-import { buildLessonGraph } from './graph.js';
 import { runLessonPipelineV2 } from './v2.js';
 import type { MemoryDiff } from './audit.js';
 import { readLearnQueue, removeLearn } from './queue.js';
+import { autoMigrateLessons } from './migrate.js';
 
 export interface LessonProviderDeps {
   llm?: LlmProvider;
@@ -82,54 +82,22 @@ export async function runLessonExtraction(
 ): Promise<ExtractionOutcome> {
   await ensureLessonsLayout(vaultRoot);
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  const learn = readLearnConfig(deps.config);
+  await autoMigrateLessons(vaultRoot, storage, learn, (m) => console.warn(m));
   // 幂等键 = audit/<sessionId>.json:已提取过默认跳过,force 强制重跑(配合 merge 层幂等不翻倍)。
   if (!opts.force && (await storage.exists(`audit/${sessionId}.json`))) {
     return { skipReason: 'already_learned' };
   }
   const { llm, jev } = resolveProviders(deps);
-  const learn = readLearnConfig(deps.config);
-  if (learn.v2) {
-    const out = await runLessonPipelineV2(sessionId, {
-      llm,
-      jev,
-      storage,
-      learn,
-      loadEvents: (id) => loadSessionEvents(vaultRoot, id),
-      now: deps.now,
-    }).catch((e) => {
-      // 与 v1 同口径:模型重试后仍输出非 JSON → 当跳过忽略,不记失败。
-      if (e instanceof LlmParseError) return null;
-      throw e;
-    });
-    if (out === null) {
-      await storage
-        .write(
-          `audit/${sessionId}.skipped.json`,
-          JSON.stringify({ session_id: sessionId, reason: 'llm_parse_failed', at: new Date().toISOString() }, null, 2),
-        )
-        .catch(() => {});
-      return { skipReason: 'llm_parse_failed' };
-    }
-    // 与 v1 同口径:非「进行中」的跳过落标记,避免反复重跑。
-    if (out.skipReason && out.skipReason !== 'in_progress') {
-      await storage
-        .write(
-          `audit/${sessionId}.skipped.json`,
-          JSON.stringify({ session_id: sessionId, reason: out.skipReason, at: new Date().toISOString() }, null, 2),
-        )
-        .catch(() => {});
-    }
-    return { diff: out.diff, skipReason: out.skipReason, shadow: out.shadow };
-  }
-  const graph = buildLessonGraph({
+  const out = await runLessonPipelineV2(sessionId, {
     llm,
     jev,
     storage,
+    learn,
     loadEvents: (id) => loadSessionEvents(vaultRoot, id),
     now: deps.now,
-  });
-  const out = await graph.invoke({ sessionId }).catch((e) => {
-    // 模型重试后仍输出非 JSON:当跳过忽略,不记失败;落 skipped 标记阻止反复重跑。
+  }).catch((e) => {
+    // 模型重试后仍输出非 JSON → 当跳过忽略,不记失败。
     if (e instanceof LlmParseError) return null;
     throw e;
   });
@@ -142,20 +110,16 @@ export async function runLessonExtraction(
       .catch(() => {});
     return { skipReason: 'llm_parse_failed' };
   }
-  if (out.skip) {
-    // 只在「进行中」豁免:会话尚未结束,等结束后重新进入候选;其余跳过(摘要 trivial/无分类/Jev 低分)落标记,避免反复分析。
-    if (out.skip.reason !== 'in_progress') {
-      // 落盘失败不视为提取失败:最多下次再分析一次,不误报 .failed。
-      await storage
-        .write(
-          `audit/${sessionId}.skipped.json`,
-          JSON.stringify({ session_id: sessionId, reason: out.skip.reason, at: new Date().toISOString() }, null, 2),
-        )
-        .catch(() => {});
-    }
-    return { skipReason: out.skip.reason };
+  // 非「进行中」的跳过落标记,避免反复重跑。
+  if (out.skipReason && out.skipReason !== 'in_progress') {
+    await storage
+      .write(
+        `audit/${sessionId}.skipped.json`,
+        JSON.stringify({ session_id: sessionId, reason: out.skipReason, at: new Date().toISOString() }, null, 2),
+      )
+      .catch(() => {});
   }
-  return { diff: out.diff };
+  return { diff: out.diff, skipReason: out.skipReason, shadow: out.shadow };
 }
 
 /**

@@ -5,8 +5,8 @@ import type { LearnConfig } from '../../../src/config.js';
 
 const learn = (partial: Partial<LearnConfig>) => ({ learn: partial }) as never;
 
-describe('readLearnConfig(v2 学习配置)', () => {
-  it('缺省返回默认值', () => {
+describe('readLearnConfig(v2 单轨学习配置)', () => {
+  it('缺省返回默认值(auto 模式 + autoMigrate)', () => {
     expect(readLearnConfig()).toEqual(defaultLearnConfig());
     expect(readLearnConfig(undefined)).toEqual(defaultLearnConfig());
   });
@@ -17,25 +17,34 @@ describe('readLearnConfig(v2 学习配置)', () => {
   });
 
   it('部分覆盖保留用户值,缺字段补默认', () => {
-    const got = readLearnConfig(learn({ v2: true, mode: 'auto', quality: { autoAccept: 0.9 } }));
-    expect(got.v2).toBe(true);
+    const got = readLearnConfig(learn({ mode: 'auto', quality: { autoAccept: 0.9 } }));
     expect(got.mode).toBe('auto');
+    expect(got.autoMigrate).toBe(true);
     expect(got.quality.autoAccept).toBe(0.9);
     expect(got.quality.reviewFloor).toBe(0.6);
     expect(got.quality.evidenceMin).toBe(0.8);
     expect(got.jev).toEqual({ maxCallsPerSession: 8, timeoutMs: 2000 });
   });
 
-  it('非法 mode 回退 shadow,quality 数值 clamp 到 [0,1]', () => {
+  it('mode 只认 auto/shadow,其余按默认 auto 处理;quality 数值 clamp 到 [0,1]', () => {
     const got = readLearnConfig(
       learn({ mode: 'bogus' as never, quality: { autoAccept: 1.5, reviewFloor: -0.2, evidenceMin: 3 } }),
     );
-    expect(got.mode).toBe('shadow');
+    expect(got.mode).toBe('auto');
+    expect(readLearnConfig(learn({ mode: 'shadow' })).mode).toBe('shadow');
     expect(got.quality).toEqual({ autoAccept: 1, reviewFloor: 0, evidenceMin: 1 });
   });
 
-  it('v2 仅当显式 true 才开', () => {
-    expect(readLearnConfig(learn({ v2: false })).v2).toBe(false);
-    expect(readLearnConfig(learn({})).v2).toBe(false);
+  it('autoMigrate 默认 true,显式 false 保留', () => {
+    expect(readLearnConfig(learn({ autoMigrate: false })).autoMigrate).toBe(false);
+    expect(readLearnConfig(learn({})).autoMigrate).toBe(true);
+  });
+
+  it('老配置里的 v2 字段被忽略,不再读', () => {
+    const raw = { learn: { v2: true, mode: 'shadow', autoMigrate: false } } as never;
+    const got = readLearnConfig(raw);
+    expect(got.mode).toBe('shadow');
+    expect(got.autoMigrate).toBe(false);
+    expect((got as Record<string, unknown>).v2).toBeUndefined();
   });
 });

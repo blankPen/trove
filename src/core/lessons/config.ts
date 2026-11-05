@@ -1,5 +1,5 @@
 /** 模型端点配置读取:从 ~/.trove/config.json 的 llm/jev 段读取,缺配置时明确报错而非静默失败。 */
-import type { Config } from '../../config.js';
+import { defaultLearnConfig, type Config, type LearnConfig } from '../../config.js';
 
 export interface LlmConfig {
   baseUrl: string;
@@ -44,4 +44,33 @@ export function readJevConfig(config?: Pick<Config, 'jev'>): JevConfig {
     throw new Error(`缺少 Jev 配置:${missing.join('、')};请用 trove config set jev.apiKey/jev.model 写入 ~/.trove/config.json`);
   }
   return { apiKey, model, ...(config?.jev?.baseUrl ? { baseUrl: config.jev.baseUrl } : {}) };
+}
+
+/** 读取 v2 学习配置:缺省补默认,quality 数值钳制到 [0,1],非法 mode 回退 shadow。 */
+export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
+  const d = defaultLearnConfig();
+  const l = (config?.learn ?? {}) as Partial<LearnConfig>;
+  return {
+    v2: l.v2 === true,
+    mode: l.mode === 'auto' ? 'auto' : 'shadow',
+    quality: {
+      autoAccept: clamp01(l.quality?.autoAccept, d.quality.autoAccept),
+      reviewFloor: clamp01(l.quality?.reviewFloor, d.quality.reviewFloor),
+      evidenceMin: clamp01(l.quality?.evidenceMin, d.quality.evidenceMin),
+    },
+    jev: {
+      maxCallsPerSession: nonNeg(l.jev?.maxCallsPerSession, d.jev.maxCallsPerSession),
+      timeoutMs: nonNeg(l.jev?.timeoutMs, d.jev.timeoutMs),
+    },
+  };
+}
+
+function clamp01(v: unknown, fallback: number): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+  return n < 0 ? 0 : n > 1 ? 1 : n;
+}
+
+function nonNeg(v: unknown, fallback: number): number {
+  const n = typeof v === 'number' && Number.isFinite(v) ? v : fallback;
+  return n < 0 ? 0 : n;
 }

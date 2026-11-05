@@ -37,10 +37,10 @@ const DEFS: MemoryTypeSchema[] = [
   { key: 'entities/tool', category: 'entities', filename: 'entities/tools/{name}.md', mergeOp: 'patch', extractionPrompt: ex('工具'), mergePrompt: merge('工具') },
   { key: 'entities/tech', category: 'entities', filename: 'entities/tech/{name}.md', mergeOp: 'patch', extractionPrompt: ex('技术栈'), mergePrompt: merge('技术栈') },
   // 经验 4 类(debug/gotcha/correction 独立 add;workflow 合并 patch)
-  { key: 'experiences/debug_pattern', category: 'experiences', filename: 'experiences/debug-{slug}.md', mergeOp: 'add', extractionPrompt: ex('调试模式(错误现象→根因→解法)') },
-  { key: 'experiences/workflow', category: 'experiences', filename: 'experiences/workflow-{slug}.md', mergeOp: 'patch', extractionPrompt: ex('操作流程'), mergePrompt: merge('操作流程') },
-  { key: 'experiences/gotcha', category: 'experiences', filename: 'experiences/gotcha-{slug}.md', mergeOp: 'add', extractionPrompt: ex('陷阱坑') },
-  { key: 'experiences/correction', category: 'experiences', filename: 'experiences/correction-{slug}.md', mergeOp: 'add', extractionPrompt: ex('纠正教训(用户纠正了 AI 什么)') },
+  { key: 'experiences/debug_pattern', category: 'experiences', filename: 'experiences/debug-{slug}.md', mergeOp: 'add', extractionPrompt: '按「错误现象→根因→修复→边界」四步:错误现象给出可搜索的错误串/日志原文;根因说明触发机制;修复给出可执行命令或代码;边界说明适用前提与不适用场景。证据须含错误原文与修复命令。' },
+  { key: 'experiences/workflow', category: 'experiences', filename: 'experiences/workflow-{slug}.md', mergeOp: 'patch', extractionPrompt: '按「触发→前置条件→步骤→验证→失败分支」:触发说明何时执行,前置条件列出所需环境,步骤给出工具/命令,验证给出可观察结果,失败分支给出常见失败与兜底。证据至少一条成功命令/工具结果。', mergePrompt: merge('操作流程') },
+  { key: 'experiences/gotcha', category: 'experiences', filename: 'experiences/gotcha-{slug}.md', mergeOp: 'add', extractionPrompt: '按「触发条件→为什么踩(机制)→规避动作」:触发条件说明何时中招,机制说明根因,规避动作给出 DON\'T(不要做什么)与 DO(该做什么)。证据须含踩坑错误原文。' },
+  { key: 'experiences/correction', category: 'experiences', filename: 'experiences/correction-{slug}.md', mergeOp: 'add', extractionPrompt: '按「用户纠正了什么→AI 原来错在哪→正确做法→以后何时应用」:记录用户纠正的原话、AI 被纠正前的错误说法、正确做法、以及以后何时应用这条纠正。证据须含用户纠正原话与修正验证。' },
   // 决策 1 类(add 独立,不合并)
   { key: 'events/decision', category: 'events', filename: 'events/YYYY-MM-DD-decided-{slug}.md', mergeOp: 'add', extractionPrompt: ex('决策(用户拍板的方向/取舍)') },
   // 资源 3 类(append 追加,不去重)

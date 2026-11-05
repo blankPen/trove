@@ -43,6 +43,14 @@ describe('现有记忆加载(Stage 9 前置)', () => {
       renderFrontmatter({ type: 'experiences/gotcha', title: '已归档的坑' }) + '\n旧正文\n',
     );
     await store.write(
+      'trajectories/sess-1.md',
+      renderFrontmatter({ type: 'trajectories/raw', title: '原始轨迹' }) + '\n轨迹正文\n',
+    );
+    await store.write(
+      '.trove/notes.md',
+      renderFrontmatter({ type: 'events/decision', title: '内部笔记' }) + '\n内部正文\n',
+    );
+    await store.write(
       'preferences/writing_style.md',
       renderFrontmatter({ type: 'preferences/writing_style', title: '写作风格' }) + '\n正文\n',
     );

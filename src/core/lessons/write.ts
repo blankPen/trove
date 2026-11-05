@@ -1,9 +1,12 @@
 /** 阶段 7:把阶段 6 的操作落盘为 .md 文件,并同步 INDEX.md 与 .overview.md。 */
-import type { MemoryOp } from './merge.js';
+import type { MemoryOp, MemoryMeta } from './merge.js';
 import type { StorageAdapter } from './storage.js';
 import { renderFrontmatter } from './frontmatter.js';
+import { appendEvidenceSection, stripEvidenceSection } from './contract.js';
 import { INDEX_TEMPLATE } from './layout.js';
 import { touchSidecars } from './sidecar.js';
+import { parseMemory, renderMemory } from './memory.js';
+import type { EvidenceRef, MemoryV2 } from './memory.js';
 
 export interface WriteDeps {
   storage: StorageAdapter;
@@ -35,15 +38,24 @@ export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise
 
   for (const op of ops) {
     if (op.op === 'add') {
-      await deps.storage.write(op.path, renderFile(op.type, op.title, op.content, { createdAt: now(), updatedAt: now() }, deps.source));
+      if (op.meta) {
+        await deps.storage.write(op.path, renderV2File(op, now()));
+      } else {
+        await deps.storage.write(op.path, renderFile(op.type, op.title, op.content, { createdAt: now(), updatedAt: now() }, deps.source));
+      }
       res.added.push(op.path);
-      if (op.supersedePath && (await archiveFile(op.supersedePath, op.path, deps.storage))) {
-        res.archived.push(op.supersedePath);
+      const archive = op.archivePath ?? op.supersedePath;
+      if (archive && archive !== op.path && (await archiveFile(archive, op.path, deps.storage))) {
+        res.archived.push(archive);
       }
     } else if (op.op === 'patch') {
       const existing = await deps.storage.read(op.path);
-      const createdAt = existing ? (extractField(existing, 'created_at') ?? now()) : now();
-      await deps.storage.write(op.path, renderFile(op.type, op.title, op.content, { createdAt, updatedAt: now() }, deps.source));
+      if (op.meta) {
+        await deps.storage.write(op.path, renderV2Patch(op, existing, now()));
+      } else {
+        const createdAt = existing ? (extractField(existing, 'created_at') ?? now()) : now();
+        await deps.storage.write(op.path, renderFile(op.type, op.title, op.content, { createdAt, updatedAt: now() }, deps.source));
+      }
       res.updated.push(op.path);
     } else if (op.op === 'append') {
       const existing = (await deps.storage.read(op.path)) ?? '';
@@ -62,6 +74,78 @@ export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise
 
 function renderFile(type: string, title: string, content: string, o: { createdAt: string; updatedAt: string }, source?: string): string {
   return renderFrontmatter({ type, title, tags: deriveTags(type), createdAt: o.createdAt, updatedAt: o.updatedAt, source }) + '\n' + content + '\n';
+}
+
+/** v2 add:用 renderMemory 渲染(含 id/kind/status/version/quality/evidence),仍走 INDEX/sidecar。 */
+function renderV2File(op: Extract<MemoryOp, { op: 'add' }>, nowIso: string): string {
+  const meta = op.meta!;
+  const mem: MemoryV2 = {
+    id: meta.id,
+    kind: meta.kind,
+    type: op.type,
+    title: op.title,
+    tags: deriveTags(op.type),
+    scope: 'global',
+    status: meta.status,
+    version: meta.version,
+    confidence: meta.confidence,
+    quality: meta.quality,
+    evidence: meta.evidence,
+    sourceTrajectories: meta.sourceTrajectories,
+    supersedes: meta.supersedes,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    useCount: 0,
+    helpfulCount: 0,
+    promptVersion: meta.promptVersion,
+    body: v2Body(op.type, op.content, meta.evidence),
+  };
+  return renderMemory(mem);
+}
+
+/** 经验类正文补 `## 证据` 段(先删旧段避免重复);非经验类原样返回。 */
+function v2Body(type: string, content: string, evidence: EvidenceRef[]): string {
+  if (!type.startsWith('experiences/')) return content;
+  return appendEvidenceSection(stripEvidenceSection(content), evidence);
+}
+
+/** v2 patch:保留旧 id/created_at,version 递增,证据合并去重。 */
+function renderV2Patch(op: Extract<MemoryOp, { op: 'patch' }>, existing: string | null, nowIso: string): string {
+  const meta = op.meta!;
+  const old = existing ? parseMemory(existing) : null;
+  const evidence = dedupeEvidence([...(old?.evidence ?? []), ...(meta.evidence ?? [])]);
+  const mem: MemoryV2 = {
+    id: old?.id || meta.id,
+    kind: meta.kind,
+    type: op.type,
+    title: op.title,
+    tags: deriveTags(op.type),
+    scope: old?.scope ?? 'global',
+    status: meta.status,
+    version: (old?.version ?? 0) + 1,
+    confidence: meta.confidence,
+    quality: meta.quality,
+    evidence,
+    sourceTrajectories: meta.sourceTrajectories,
+    supersedes: meta.supersedes,
+    createdAt: old?.createdAt || (existing ? (extractField(existing, 'created_at') ?? nowIso) : nowIso),
+    updatedAt: nowIso,
+    useCount: old?.useCount ?? 0,
+    helpfulCount: old?.helpfulCount ?? 0,
+    promptVersion: meta.promptVersion,
+    body: v2Body(op.type, op.content, evidence),
+  };
+  return renderMemory(mem);
+}
+
+function dedupeEvidence(refs: EvidenceRef[]): EvidenceRef[] {
+  const seen = new Set<string>();
+  return refs.filter((r) => {
+    const k = `${r.session}:${r.seq}`;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
 }
 
 function deriveTags(type: string): string[] {
@@ -84,8 +168,11 @@ async function archiveFile(oldPath: string, newPath: string, storage: StorageAda
 function withSupersededBy(text: string, newPath: string): string {
   const closing = text.indexOf('\n---');
   if (closing === -1) return text;
+  const front = text.slice(0, closing);
+  const back = text.slice(closing);
   const line = `\nsuperseded_by: ${JSON.stringify(newPath)}`;
-  return text.slice(0, closing) + line + text.slice(closing);
+  // v2 归档同时把 status 改为 superseded;只在 frontmatter 块内替换,不误改正文 status: 行。
+  return front.replace(/^status: .*$/m, 'status: superseded') + line + back;
 }
 
 function extractField(text: string, key: string): string | undefined {
@@ -103,7 +190,8 @@ async function updateIndex(ops: MemoryOp[], storage: StorageAdapter): Promise<vo
   let text = (await storage.read('INDEX.md')) ?? INDEX_TEMPLATE;
   for (const op of ops) {
     if (op.op === 'add') {
-      if (op.supersedePath) text = removeIndexRow(text, op.supersedePath);
+      const archive = op.archivePath ?? op.supersedePath;
+      if (archive) text = removeIndexRow(text, archive);
       text = addIndexRow(text, op);
     } else if (op.op === 'patch') {
       text = patchIndexRow(text, op);

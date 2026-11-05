@@ -26,6 +26,7 @@ describe('lessons 目录骨架', () => {
     const entries = await walk(root);
     expect(entries).toEqual([
       '.overview.md',
+      '.trove',
       'INDEX.md',
       'archive',
       'archive/entities',
@@ -33,6 +34,7 @@ describe('lessons 目录骨架', () => {
       'archive/experiences',
       'archive/preferences',
       'archive/resources',
+      'archive/trajectories',
       'entities',
       'entities/organizations',
       'entities/people',
@@ -46,6 +48,7 @@ describe('lessons 目录骨架', () => {
       'resources/docs',
       'resources/links',
       'resources/repos',
+      'trajectories',
     ]);
 
     const index = await readFile(join(root, 'INDEX.md'), 'utf8');
@@ -61,6 +64,6 @@ describe('lessons 目录骨架', () => {
     await ensureLessonsLayout(vault);
     await ensureLessonsLayout(vault);
     const root = join(vault, 'library/lessons');
-    expect(await walk(root)).toHaveLength(21);
+    expect(await walk(root)).toHaveLength(24);
   });
 });

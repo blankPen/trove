@@ -30,7 +30,7 @@ export interface ParsedFrontmatter {
 }
 
 /** 切分 frontmatter 块与正文;不是合法 frontmatter 返回 null。 */
-function splitFrontmatter(text: string): { block: string; body: string } | null {
+export function splitFrontmatter(text: string): { block: string; body: string } | null {
   if (!text.startsWith('---')) return null;
   const firstNewline = text.indexOf('\n');
   if (firstNewline === -1) return null;

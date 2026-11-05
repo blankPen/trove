@@ -13,6 +13,7 @@ const SUBDIRS = [
   'entities/tech',
   'experiences',
   'events',
+  'trajectories',
   'resources/docs',
   'resources/repos',
   'resources/links',
@@ -21,6 +22,8 @@ const SUBDIRS = [
   'archive/experiences',
   'archive/events',
   'archive/resources',
+  'archive/trajectories',
+  '.trove',
 ];
 
 export const INDEX_TEMPLATE = [

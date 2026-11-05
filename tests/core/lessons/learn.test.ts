@@ -8,6 +8,7 @@ import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 import { libraryDir, libraryLessonsDir, safeSessionName } from '../../../src/core/layout.js';
 import { MockLlm, LlmParseError } from '../../../src/core/lessons/llm.js';
 import { MockJev } from '../../../src/core/lessons/jev.js';
+import type { JevProvider } from '../../../src/core/lessons/jev.js';
 import type { Event } from '../../../src/core/events/schema.js';
 
 let vault: string;
@@ -279,6 +280,84 @@ describe('learn 入口(Stage 9 编排接入)', () => {
     // 队列已空 → 第二轮不再触碰该坏会话
     const note2 = await learnPendingBatch(vault, join(vault, 'learn-queue.json'), { llm: happyLlm(), jev: mockJev() }, 10);
     expect(note2).toBeUndefined();
+  });
+});
+
+describe('runLessonExtraction · v2 路由', () => {
+  function v2Jev(): JevProvider {
+    return {
+      async score() { return { taskSuccess: 1, meanScore: 1 }; },
+      async keepCalls(_s: unknown, q: Record<string, { instructions: string }>): Promise<Record<string, number>> {
+        return Object.fromEntries(Object.keys(q).map((k) => [k, 0.95]));
+      },
+    };
+  }
+
+  function v2Llm(): MockLlm {
+    return new MockLlm((_p, _s, task) => {
+      switch (task) {
+        case 'learn:summarize':
+          return { topic: '脚本退出码', intent: '修复脚本退出码', outcome: 'success', keySteps: ['set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
+        case 'learn:classify':
+          return { preferences: false, entities: false, experiences: true, events: false, resources: false };
+        case 'learn:trajectory':
+          return { task: '调试脚本退出码', outcome: 'success', reusableSignals: ['用 set -e 立即中断'] };
+        case 'learn:extract':
+          return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: '## 适用场景\nshell 脚本需要失败即中断的场景\n\n## 做法\n在脚本开头运行 `set -e`\n\n## 验证\n后续命令出错时脚本立即退出\n\n## 边界与反例\n不适用于需要忽略单个命令失败的场景', evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }] }] };
+        default:
+          throw new Error(`unexpected task ${task}`);
+      }
+    });
+  }
+
+  const v2Learn = (mode: 'auto' | 'shadow') => ({ learn: { v2: true, mode, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } });
+
+  it('learn.v2=true 且 auto → 走 v2 流水线,写带 quality/kind 的记忆', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: v2Llm(), jev: v2Jev(), config: v2Learn('auto') });
+
+    expect(outcome.skipReason).toBeUndefined();
+    expect(outcome.shadow).toBe(false);
+    expect(outcome.diff?.summary.adds).toBe(1);
+    const files = await storage.list();
+    const memPath = files.find((f) => f.startsWith('experiences/') && !f.startsWith('experiences/.'));
+    expect(memPath).toBeTruthy();
+    const text = await storage.read(memPath!);
+    expect(text).toContain('kind: experience');
+    expect(text).toContain('quality:');
+    expect(files.some((f) => f.startsWith('trajectories/'))).toBe(true);
+    expect(await storage.read('audit/s-1.json')).not.toBeNull();
+  });
+
+  it('learn.v2=true 且 shadow → 只写审计与决策,不写记忆/轨迹', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: v2Llm(), jev: v2Jev(), config: v2Learn('shadow') });
+
+    expect(outcome.shadow).toBe(true);
+    const files = await storage.list();
+    expect(files.some((f) => f.startsWith('experiences/') && !f.startsWith('experiences/.'))).toBe(false);
+    expect(files.some((f) => f.startsWith('trajectories/'))).toBe(false);
+    expect(await storage.read('audit/s-1.json')).not.toBeNull();
+  });
+
+  it('v2 下 LLM 抛 LlmParseError → skipReason llm_parse_failed 且写 skipped 标记', async () => {
+    const ev = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', ev);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
+
+    const parseFailingLlm = new MockLlm(() => { throw new LlmParseError('LLM 返回无法解析为 JSON:xxx'); });
+    const outcome = await runLessonExtraction(vault, 's-1', { llm: parseFailingLlm, jev: v2Jev(), config: v2Learn('auto') });
+
+    expect(outcome.skipReason).toBe('llm_parse_failed');
+    expect(await storage.read('audit/s-1.skipped.json')).not.toBeNull();
+    expect(await storage.read('audit/s-1.failed.json')).toBeNull();
+    expect(await storage.read('audit/s-1.json')).toBeNull();
   });
 });
 

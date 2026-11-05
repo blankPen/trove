@@ -53,7 +53,7 @@ interface Row {
   score: number;
 }
 
-const SKIP_DIRS = new Set(['archive', 'audit']);
+const SKIP_DIRS = new Set(['archive', 'audit', 'trajectories', '.trove']);
 const SKIP_FILES = new Set(['INDEX.md', 'README.md']);
 
 async function walk(root: string, rel = ''): Promise<string[]> {

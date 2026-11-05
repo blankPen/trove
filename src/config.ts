@@ -57,6 +57,35 @@ export interface DaemonConfig {
   learnBatch: number;
 }
 
+/** v2 学习质量门限(0..1)。 */
+export interface LearnQualityConfig {
+  /** 总质量分 ≥ 该值且五维达标 → 自动接受 */
+  autoAccept: number;
+  /** 总质量分 ≥ 该值 → 升级人工/LLM 裁决 */
+  reviewFloor: number;
+  /** 证据分硬门:低于该值直接拒绝 */
+  evidenceMin: number;
+}
+
+export interface LearnConfig {
+  /** v2 两阶段质量流水线;默认 false,先 shadow 观察 */
+  v2: boolean;
+  /** shadow=只计算并写审计;auto=达阈值写记忆 */
+  mode: 'shadow' | 'auto';
+  quality: LearnQualityConfig;
+  jev: { maxCallsPerSession: number; timeoutMs: number };
+}
+
+/** learn 默认值,`defaultConfig` 与 `readLearnConfig` 共用,避免重复字面量。 */
+export function defaultLearnConfig(): LearnConfig {
+  return {
+    v2: false,
+    mode: 'shadow',
+    quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
+    jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+  };
+}
+
 export interface Config {
   device: DeviceConfig;
   remote: RemoteConfig;
@@ -67,6 +96,8 @@ export interface Config {
   llm?: { baseUrl: string; model: string; apiKey: string };
   /** Jev 打分端点;baseUrl 缺省用官方端点,可指向代理/镜像绕过区域限制 */
   jev?: { apiKey: string; model: string; baseUrl?: string };
+  /** v2 学习流水线配置;老配置缺字段时深合并补默认 */
+  learn: LearnConfig;
 }
 
 /** 命令行显式开关优先;否则取配置;老配置文件缺省按开启。 */
@@ -98,6 +129,7 @@ export function defaultConfig(
     },
     sync: { raw: true },
     daemon: { intervalSeconds: 300, since: '7d', startOnInit: true, learnIntervalSeconds: 60, learnBatch: 3 },
+    learn: defaultLearnConfig(),
   };
 }
 
@@ -116,7 +148,7 @@ export async function loadConfig(path: string): Promise<Config> {
   } catch {
     throw new Error(`配置文件损坏,无法解析 JSON: ${path}`);
   }
-  // 老配置没有 sync / daemon 字段:按默认补齐
+  // 老配置没有 sync / daemon / learn 字段:按默认补齐
   return {
     ...parsed,
     remote: normalizeRemote(parsed.remote),
@@ -128,7 +160,33 @@ export async function loadConfig(path: string): Promise<Config> {
       learnIntervalSeconds: parsed.daemon?.learnIntervalSeconds ?? 60,
       learnBatch: parsed.daemon?.learnBatch ?? 3,
     },
+    learn: normalizeLearn(parsed.learn),
   };
+}
+
+/** 老配置的 learn 段深合并:缺字段补默认、部分覆盖不丢、数值保持原样(钳制交给 readLearnConfig)。 */
+export function normalizeLearn(learn: unknown): LearnConfig {
+  const d = defaultLearnConfig();
+  const l = (learn ?? {}) as Record<string, unknown>;
+  const q = (l.quality ?? {}) as Record<string, unknown>;
+  const j = (l.jev ?? {}) as Record<string, unknown>;
+  return {
+    v2: l.v2 === true,
+    mode: l.mode === 'auto' ? 'auto' : 'shadow',
+    quality: {
+      autoAccept: num(q.autoAccept, d.quality.autoAccept),
+      reviewFloor: num(q.reviewFloor, d.quality.reviewFloor),
+      evidenceMin: num(q.evidenceMin, d.quality.evidenceMin),
+    },
+    jev: {
+      maxCallsPerSession: num(j.maxCallsPerSession, d.jev.maxCallsPerSession),
+      timeoutMs: num(j.timeoutMs, d.jev.timeoutMs),
+    },
+  };
+}
+
+function num(v: unknown, fallback: number): number {
+  return typeof v === 'number' && Number.isFinite(v) ? v : fallback;
 }
 
 /**

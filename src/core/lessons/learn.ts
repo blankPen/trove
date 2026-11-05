@@ -8,13 +8,14 @@ import { trovePaths } from '../../paths.js';
 import { loadLibraryIndex, rebuildUnifiedIndex } from '../library/index-file.js';
 import { ensureLessonsLayout } from './layout.js';
 import { LocalStorageAdapter } from './storage.js';
-import { readLlmConfig, readJevConfig } from './config.js';
+import { readLlmConfig, readJevConfig, readLearnConfig } from './config.js';
 import { DeepSeekLlm, LlmParseError } from './llm.js';
 import type { LlmProvider } from './llm.js';
 import { createUsageSink } from './usage.js';
 import { TypeSafeJevScorer } from './jev.js';
 import type { JevProvider } from './jev.js';
 import { buildLessonGraph } from './graph.js';
+import { runLessonPipelineV2 } from './v2.js';
 import type { MemoryDiff } from './audit.js';
 import { readLearnQueue, removeLearn } from './queue.js';
 
@@ -27,13 +28,15 @@ export interface LessonProviderDeps {
   env?: Record<string, string | undefined>;
   /** token 用量台账路径;缺省 ~/.trove/usage.jsonl。 */
   usagePath?: string;
-  /** 模型端点配置(~/.trove/config.json 的 llm/jev 段);缺省由调用方注入。 */
-  config?: Pick<Config, 'llm' | 'jev'>;
+  /** 模型端点配置(~/.trove/config.json 的 llm/jev 段)与 learn 段;缺省由调用方注入。 */
+  config?: Pick<Config, 'llm' | 'jev' | 'learn'>;
 }
 
 export interface ExtractionOutcome {
   diff?: MemoryDiff;
   skipReason?: string;
+  /** v2 shadow 模式:已跑流水线但只写审计/决策,未写记忆。 */
+  shadow?: boolean;
 }
 
 /** 从统一索引解析单会话的 canonical 事件;裸 session 错配多个 harness 时报歧义。 */
@@ -84,6 +87,40 @@ export async function runLessonExtraction(
     return { skipReason: 'already_learned' };
   }
   const { llm, jev } = resolveProviders(deps);
+  const learn = readLearnConfig(deps.config);
+  if (learn.v2) {
+    const out = await runLessonPipelineV2(sessionId, {
+      llm,
+      jev,
+      storage,
+      learn,
+      loadEvents: (id) => loadSessionEvents(vaultRoot, id),
+      now: deps.now,
+    }).catch((e) => {
+      // 与 v1 同口径:模型重试后仍输出非 JSON → 当跳过忽略,不记失败。
+      if (e instanceof LlmParseError) return null;
+      throw e;
+    });
+    if (out === null) {
+      await storage
+        .write(
+          `audit/${sessionId}.skipped.json`,
+          JSON.stringify({ session_id: sessionId, reason: 'llm_parse_failed', at: new Date().toISOString() }, null, 2),
+        )
+        .catch(() => {});
+      return { skipReason: 'llm_parse_failed' };
+    }
+    // 与 v1 同口径:非「进行中」的跳过落标记,避免反复重跑。
+    if (out.skipReason && out.skipReason !== 'in_progress') {
+      await storage
+        .write(
+          `audit/${sessionId}.skipped.json`,
+          JSON.stringify({ session_id: sessionId, reason: out.skipReason, at: new Date().toISOString() }, null, 2),
+        )
+        .catch(() => {});
+    }
+    return { diff: out.diff, skipReason: out.skipReason, shadow: out.shadow };
+  }
   const graph = buildLessonGraph({
     llm,
     jev,
@@ -150,10 +187,13 @@ export async function learnPendingBatch(
   let failed = 0;
   for (const key of candidates) {
     try {
-      const outcome = await runLessonExtraction(vaultRoot, key, { llm: providers.llm, jev: providers.jev, now: deps.now });
+      const outcome = await runLessonExtraction(vaultRoot, key, { llm: providers.llm, jev: providers.jev, now: deps.now, config: deps.config });
       if (outcome.skipReason) {
         skipped++;
         opts.log?.(`会话 ${key} 未达阈值,跳过:${outcome.skipReason}`);
+      } else if (outcome.shadow) {
+        extracted++;
+        opts.log?.(`会话 ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计`);
       } else {
         extracted++;
         const d = outcome.diff?.summary;
@@ -216,10 +256,13 @@ export async function learnRecentBatch(
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]!;
     try {
-      const outcome = await runLessonExtraction(vaultRoot, key, { llm, jev, now: deps.now });
+      const outcome = await runLessonExtraction(vaultRoot, key, { llm, jev, now: deps.now, config: deps.config });
       if (outcome.skipReason) {
         skipped++;
         opts.log?.(`[${i + 1}/${keys.length}] ${key} 未达阈值,跳过:${outcome.skipReason}`);
+      } else if (outcome.shadow) {
+        extracted++;
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计`);
       } else {
         extracted++;
         const d = outcome.diff?.summary;

@@ -87,6 +87,32 @@ describe('config(设计 §10.2)', () => {
     });
   });
 
+  it('learn 默认值 + 老配置补全 + 部分覆盖不丢其它字段', async () => {
+    expect(defaultConfig().learn).toEqual({
+      v2: false,
+      mode: 'shadow',
+      quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 },
+      jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+    });
+
+    // 老配置没有 learn 字段 → 补默认
+    const legacy = defaultConfig() as unknown as Record<string, unknown>;
+    delete legacy['learn'];
+    await saveConfig(cfg, legacy as never);
+    expect((await loadConfig(cfg)).learn).toEqual(defaultConfig().learn);
+
+    // 部分覆盖:缺的字段补默认,已填的保留
+    const partial = defaultConfig();
+    partial.learn = { v2: true, mode: 'auto', quality: { autoAccept: 0.9 } } as Config['learn'];
+    await saveConfig(cfg, partial);
+    expect((await loadConfig(cfg)).learn).toEqual({
+      v2: true,
+      mode: 'auto',
+      quality: { autoAccept: 0.9, reviewFloor: 0.6, evidenceMin: 0.8 },
+      jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
+    });
+  });
+
   it('文件不存在时 loadConfig 返回默认配置', async () => {
     const c = await loadConfig(cfg);
     expect(c.device.id).toMatch(UUID_RE);

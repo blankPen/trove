@@ -76,6 +76,26 @@ export function IconUsage(p: P) {
   );
 }
 
+/** Inbox:一个收件托盘 */
+export function IconInbox(p: P) {
+  return (
+    <Base {...p}>
+      <path d="M3 13.5 5 5h14l2 8.5" />
+      <path d="M3 13.5h5l2 3h4l2-3h5" />
+      <path d="M5 19h14" />
+    </Base>
+  );
+}
+
+/** 健康:一条脉搏线 */
+export function IconHealth(p: P) {
+  return (
+    <Base {...p}>
+      <path d="M3 12h4l2.5-6 4 12 2.5-6H21" />
+    </Base>
+  );
+}
+
 /** 刷新 */
 export function IconRefresh(p: P) {
   return (

@@ -69,6 +69,20 @@ export async function listMemoryFiles(storage: StorageAdapter): Promise<MemoryFi
   return out;
 }
 
+/** 轨迹文件:trajectories/ 下能解析为记忆的文件(生命周期之外的独立层)。 */
+export async function listTrajectoryFiles(storage: StorageAdapter): Promise<MemoryFile[]> {
+  const out: MemoryFile[] = [];
+  for (const path of await storage.list('trajectories')) {
+    if (!path.endsWith('.md') || path.split('/').some((s) => s.startsWith('.'))) continue;
+    const text = await storage.read(path);
+    if (text === null) continue;
+    const memory = parseMemory(text);
+    if (!memory) continue;
+    out.push({ path, text, memory });
+  }
+  return out;
+}
+
 /** 统计 stale 记忆数(只读 frontmatter,不跑 curator)。 */
 export async function countStaleMemories(storage: StorageAdapter): Promise<number> {
   const files = await listMemoryFiles(storage);
@@ -198,15 +212,11 @@ async function curateTrajectories(
   }
 
   const groups = new Map<string, TrajectoryFile[]>();
-  for (const path of await storage.list('trajectories')) {
-    if (!path.endsWith('.md') || path.split('/').some((s) => s.startsWith('.'))) continue;
-    const text = await storage.read(path);
-    if (text === null) continue;
-    const mem = parseMemory(text);
-    if (!mem) continue;
+  for (const f of await listTrajectoryFiles(storage)) {
+    const mem = f.memory;
     if (referenced.has(mem.id)) continue; // 被引用:保留
     if (!Number.isFinite(Date.parse(mem.updatedAt))) continue; // 无时间:不动
-    const item: TrajectoryFile = { path, text, id: mem.id, updatedAt: mem.updatedAt, scope: mem.scope };
+    const item: TrajectoryFile = { path: f.path, text: f.text, id: mem.id, updatedAt: mem.updatedAt, scope: mem.scope };
     const key = projectOf(mem.scope);
     const group = groups.get(key);
     if (group) group.push(item);

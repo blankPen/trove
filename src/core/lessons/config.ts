@@ -91,6 +91,7 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
       gateTopK: nonNeg(l.embedding?.gateTopK, d.embedding.gateTopK),
       recallTopK: nonNeg(l.embedding?.recallTopK, d.embedding.recallTopK),
       rrfK: nonNeg(l.embedding?.rrfK, d.embedding.rrfK),
+      minScore: clamp01(l.embedding?.minScore, d.embedding.minScore),
     },
   };
 }

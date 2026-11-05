@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { pullLibrary } from '../../../src/core/library/sync.js';
 import { emptyState } from '../../../src/core/state.js';
 import type { IndexShard } from '../../../src/core/library/schema.js';
@@ -222,10 +223,12 @@ describe('pullLibrary 分片悬空容错', () => {
   });
 });
 
-describe('pullLibrary 下载校验失败清理', () => {
-  it('会话文件 hash 不符时抛错且不留临时文件', async () => {
+describe('pullLibrary 下载校验失败容错', () => {
+  it('会话文件 hash 不符时跳过并继续,索引不引用缺失条目', async () => {
     const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-hash-'));
     const remote = new MemoryRemote();
+    const bad = 'sessions/claude-code/bad/dev1.jsonl';
+    remote.files.set(`library/${bad}`, Buffer.from('bad-body'));
     remote.files.set(`library/${REL}`, Buffer.from('remote'));
     const shard: IndexShard = {
       v: 1,
@@ -233,10 +236,17 @@ describe('pullLibrary 下载校验失败清理', () => {
       mapper: 'claude-code',
       updatedAt: '2026-10-23T00:00:00.000Z',
       sessions: {
+        'claude-code:bad': {
+          device: 'dev1',
+          path: bad,
+          hash: '0'.repeat(64),
+          events: 1,
+          rawSources: [],
+        },
         'claude-code:s1': {
           device: 'dev1',
           path: REL,
-          hash: '0'.repeat(64),
+          hash: sha('remote'),
           events: 1,
           rawSources: [],
         },
@@ -245,11 +255,30 @@ describe('pullLibrary 下载校验失败清理', () => {
     };
     await remote.writeJson('library/index/dev1.json', shard);
 
-    await expect(
-      pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() }),
-    ).rejects.toThrow(/校验失败/);
+    const r = await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state: emptyState() });
 
-    const dir = dirname(join(vault, 'library', ...REL.split('/')));
-    expect((await readdir(dir)).filter((n) => n.includes('.tmp-'))).toEqual([]);
+    // 坏文件被跳过,好文件照常拉取
+    expect(r.downloaded).toBe(1);
+    expect(await readFile(join(vault, 'library', ...REL.split('/')), 'utf8')).toBe('remote');
+    expect(existsSync(join(vault, 'library', ...bad.split('/')))).toBe(false);
+    // 分片在文件之后落盘,并剔除本地缺失的条目
+    const local = JSON.parse(
+      await readFile(join(vault, 'library', 'index', 'dev1.json'), 'utf8'),
+    ) as IndexShard;
+    expect(Object.keys(local.sessions)).toEqual(['claude-code:s1']);
+    const dir = dirname(join(vault, 'library', ...bad.split('/')));
+    expect((await readdir(dir).catch(() => [])).filter((n) => n.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('拉取中断时不落分片,索引不会引用未下载文件', async () => {
+    const { vault, remote } = await setup(null);
+    const shardAbs = join(vault, 'library', 'index', 'dev1.json');
+    vi.spyOn(remote, 'readFile').mockRejectedValue(new Error('network down'));
+
+    await expect(
+      pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state: emptyState() }),
+    ).rejects.toThrow('network down');
+
+    expect(existsSync(shardAbs)).toBe(false);
   });
 });

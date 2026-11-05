@@ -19,8 +19,17 @@ describe('search tokenize', () => {
   });
 
   it('混合查询用 AND 连接', () => {
-    expect(toFtsQuery('COS 签名')).toBe('cos AND "签名"');
+    expect(toFtsQuery('COS 签名')).toBe('"cos" AND "签名"');
     expect(hasQueryTokens('  ')).toBe(false);
+  });
+
+  it('命令/路径里的 - 用引号包住,避免 FTS5 语法错误', () => {
+    expect(toFtsQuery('finish --discard')).toBe('"finish" AND "--discard" AND "discard"');
+  });
+
+  it('剥离中文疑问词,自然语言问句仍能命中实体', () => {
+    expect(toFtsQuery('DoubaoWork 是什么')).toBe('"doubaowork" AND "doubao" AND "work"');
+    expect(toFtsQuery('豆包办公是什么')).toBe('"豆包 包办 办公"');
   });
 
   it('识别单字中文查询（需要降级）', () => {

@@ -33,6 +33,8 @@ export interface SearchHybridConfig {
   modelCache?: string;
   recallTopK?: number;
   rrfK?: number;
+  /** 向量召回最低余弦相似度;缺省不过滤。 */
+  minScore?: number;
 }
 
 export interface SessionSearchResult {
@@ -126,6 +128,7 @@ async function hybridSearch(
       vectors,
       recallTopK: hybrid.recallTopK,
       rrfK: hybrid.rrfK,
+      minScore: hybrid.minScore,
     });
   } finally {
     vectors.close();

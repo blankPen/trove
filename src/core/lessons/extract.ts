@@ -174,12 +174,14 @@ export async function extractMemoriesV2(
   events: Event[],
   deps: ExtractDeps,
 ): Promise<MemoryCandidateV2[]> {
-  const out: MemoryCandidateV2[] = [];
-  for (const category of Object.keys(TYPES_BY_CATEGORY) as (keyof Classification)[]) {
-    if (!classification[category]) continue;
-    out.push(...(await extractCategoryV2(category, summary, events, deps)));
-  }
-  return out;
+  // 分类之间互不依赖,并发提取;单类 prompt 已含全量事件,串行会成倍放大延迟
+  const categories = (Object.keys(TYPES_BY_CATEGORY) as (keyof Classification)[]).filter(
+    (category) => classification[category],
+  );
+  const batches = await Promise.all(
+    categories.map((category) => extractCategoryV2(category, summary, events, deps)),
+  );
+  return batches.flat();
 }
 
 async function extractCategoryV2(

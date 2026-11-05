@@ -92,4 +92,27 @@ describe('searchLessonsHybrid', () => {
     index.close();
     vectors.close();
   });
+
+  it('minScore 过滤低相似度向量结果,避免短问句硬凑', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-hybrid-'));
+    dirs.push(vault);
+    await seedMem(vault, 'experiences/a.md', 'exp_a', '本地向量索引', 'bge-small-zh 的 512 维向量。');
+    await seedMem(vault, 'experiences/b.md', 'exp_b', '飞书文档同步', '对象存储归档与拉取。');
+    const index = await LessonsIndex.build(vault);
+    const vectors = VectorIndex.open(join(vault, 'vectors.sqlite'));
+    vectors.upsert('exp_a', 'experiences/a.md', 'global', new Float32Array([1, 0]));
+    vectors.upsert('exp_b', 'experiences/b.md', 'global', new Float32Array([0, 1]));
+    const embedder: Embedder = { dims: 2, encode: async () => [new Float32Array([1, 0])] };
+    // FTS 不命中的 query,结果全部来自向量
+    const q = '完全不存在的字面';
+
+    const all = await searchLessonsHybrid(vault, q, { query: q }, { index, embedder, vectors, recallTopK: 5 });
+    const filtered = await searchLessonsHybrid(vault, q, { query: q }, { index, embedder, vectors, recallTopK: 5, minScore: 0.5 });
+
+    expect(all.map((h) => h.path)).toEqual(expect.arrayContaining(['experiences/a.md', 'experiences/b.md']));
+    expect(filtered.map((h) => h.path)).toEqual(['experiences/a.md']);
+
+    index.close();
+    vectors.close();
+  });
 });

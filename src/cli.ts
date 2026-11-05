@@ -65,7 +65,7 @@ import { refreshSidecars } from './core/lessons/sidecar.js';
 import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders, migrateJsonQueue, enqueueLearnSessions } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
 import { JobQueue } from './core/lessons/jobs.js';
-import { getEmbedder } from './core/lessons/embedding.js';
+import { ensureEmbeddingModel, getEmbedder } from './core/lessons/embedding.js';
 import { VectorIndex } from './core/lessons/vector-index.js';
 import { syncVectorIndex } from './core/lessons/vector-sync.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
@@ -522,6 +522,7 @@ async function hybridSearchConfig(paths: ReturnType<typeof trovePaths>): Promise
       modelCache: paths.modelCache,
       recallTopK: learn.embedding.recallTopK,
       rrfK: learn.embedding.rrfK,
+      minScore: learn.embedding.minScore,
     };
   } catch {
     return undefined;
@@ -879,7 +880,7 @@ async function cmdLearnExtract(
   const outcome = await runLessonExtraction(
     paths.vault,
     sessionId,
-    { ...lessonDeps, usagePath: paths.usageLog },
+    { ...lessonDeps, usagePath: paths.usageLog, onStage: (l) => out(l) },
     { force },
   );
   if (outcome.skipReason === 'already_learned') {
@@ -1597,12 +1598,40 @@ function daemonRuntime(
   lessonDeps: LessonProviderDeps | undefined,
   learnIntervalSeconds: number,
   learnBatch: number,
+  config: Config,
 ): DaemonRuntime {
   const intervalSeconds = Math.max(5, Number(opts.interval) || 300);
   return {
     paths,
     intervalSeconds,
     since: opts.since,
+    ensureDeps: async (progress) => {
+      const learn = readLearnConfig(config);
+      if (!learn.embedding.enabled) return '向量检索已禁用(learn.embedding.enabled=false),跳过模型下载';
+      const model = learn.embedding.model;
+      progress.phase('模型', `检查 ${model}`);
+      let lastPct = -10;
+      let lastAt = 0;
+      const ok = await ensureEmbeddingModel(
+        { enabled: true, model, host: learn.embedding.host },
+        {
+          cacheDir: paths.modelCache,
+          onProgress: (p) => {
+            if (p.status === 'progress' && p.total) {
+              const pct = Math.floor(((p.loaded ?? 0) / p.total) * 100);
+              if (pct - lastPct >= 5 || Date.now() - lastAt > 3000) {
+                lastPct = pct;
+                lastAt = Date.now();
+                progress.item(p.file ?? p.name ?? model, p.loaded ?? 0, p.total);
+              }
+            } else if (p.status === 'done' && p.file) {
+              progress.item(p.file, 1, 1);
+            }
+          },
+        },
+      );
+      return ok ? `向量模型就绪: ${model}` : '向量模型不可用,检索降级纯 FTS5';
+    },
     runOnce: async (progress, signal) => {
       const { config, remote, adapters } = await loadRuntime(paths, createRemote, resolveAdapters);
       return sync({
@@ -2077,7 +2106,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           }
           const config = lessonDeps?.config ?? (await loadConfig(paths.config));
           out(`准备提取最近 ${n} 个未学习会话...`);
-          const summary = await learnRecentBatch(paths.vault, n, { ...lessonDeps, config }, { log: (l) => out(l) });
+          const summary = await learnRecentBatch(paths.vault, n, { ...lessonDeps, config, onStage: (l) => out(l) }, { log: (l) => out(l) });
           out(pc.green(summary));
         } else if (sessionId) {
           const config = lessonDeps?.config ?? (await loadConfig(paths.config));
@@ -2269,6 +2298,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
           lessonDeps,
           config.daemon.learnIntervalSeconds,
           config.daemon.learnBatch,
+          config,
         ),
         controller.signal,
       );

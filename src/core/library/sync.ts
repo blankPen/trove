@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { hashFile } from '../chunker.js';
@@ -183,6 +184,8 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
   const shards = (await remote.list('library/index')).filter((e) => e.type === 'file');
   progress.phase('library', `${shards.length} 个设备分片`);
 
+  // 分片是索引来源,必须最后落盘:先拉内容文件再写分片,中断时索引不会引用未下载的文件
+  const pendingShards: Array<{ abs: string; shard: IndexShard }> = [];
   let itemNo = 0;
   for (const shardEntry of shards) {
     throwIfAborted(opts.signal);
@@ -195,9 +198,7 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
     const isSelf = device === opts.deviceId;
     // 分片本身也要落地,统一索引才能离线重建;本机分片是权威,只在缺失时恢复
     const shardAbs = join(root, 'index', shardEntry.name);
-    if (!isSelf || (await localHash(shardAbs)) === null) {
-      await writeAtomic(shardAbs, JSON.stringify(shard, null, 2) + '\n');
-    }
+    const writeShard = !isSelf || (await localHash(shardAbs)) === null;
     const pulled = (state.library.pulled[device] ??= {});
 
     for (const entry of Object.values(shard.sessions)) {
@@ -225,7 +226,12 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
         await mkdir(dirname(abs), { recursive: true });
         await remote.readFile(remotePath, tmp);
         const got = await hashFile(tmp);
-        if (got !== entry.hash) throw new Error(`library 文件校验失败: ${entry.path}`);
+        if (got !== entry.hash) {
+          await unlink(tmp).catch(() => {});
+          // 分片可能陈旧或与远端对象不同步:跳过坏文件,不能中断整轮同步
+          console.warn(`[trove] 远端文件与分片 hash 不一致,已跳过: ${entry.path}`);
+          continue;
+        }
         await rename(tmp, abs);
       } catch (err) {
         await unlink(tmp).catch(() => {});
@@ -283,6 +289,7 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
         }
       }
     }
+    if (writeShard) pendingShards.push({ abs: shardAbs, shard });
   }
 
   // lessons:共享沉淀,没有设备分片。本地已有就不覆盖(本机内容可能是刚 learn 的新版本),
@@ -308,6 +315,14 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
     downloaded++;
     bytes += (await stat(target)).size;
     progress.item(rel, itemNo, remoteLessons.length, bytes);
+  }
+
+  // 内容文件全部落地后再写分片;剔除本地仍缺失的条目,统一索引不会指向不存在的文件
+  for (const { abs, shard } of pendingShards) {
+    const sessions = Object.fromEntries(
+      Object.entries(shard.sessions).filter(([, e]) => existsSync(join(root, ...e.path.split('/')))),
+    );
+    await writeAtomic(abs, JSON.stringify({ ...shard, sessions }, null, 2) + '\n');
   }
 
   await rebuildUnifiedIndex(vaultRoot);

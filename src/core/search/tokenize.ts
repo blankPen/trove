@@ -48,15 +48,19 @@ export function tokenizeText(text: string): string {
  * 构造 FTS5 MATCH 查询：中文段用 bigram 短语保留相邻关系，多段用 AND。
  * 例：飞书文档 → "飞书 书文 文档"；COS 签名 → cos AND "签名"
  */
+/** 中文疑问/语气词:自然语言问句里的这些词会让整段 bigram 短语必然落空,先剥离。 */
+const CJK_QUESTION_WORDS = /(是什么|为什么|怎么样|什么样|怎么|如何|哪些|哪个|吗|呢)/g;
+
 export function toFtsQuery(query: string): string {
   const terms: string[] = [];
-  for (const m of query.matchAll(TOKEN_RE)) {
+  for (const m of query.replace(CJK_QUESTION_WORDS, ' ').matchAll(TOKEN_RE)) {
     const token = m[0]!;
     if (CJK_RE.test(token)) {
       const bigrams = cjkBigrams(token);
       terms.push(`"${bigrams.join(' ')}"`);
     } else {
-      for (const t of asciiTokens(token)) terms.push(t);
+      // 双引号包住:路径/命令里的 - . / 会被 FTS5 当操作符(如 finish --discard)
+      for (const t of asciiTokens(token)) terms.push(`"${t.replace(/"/g, '""')}"`);
     }
   }
   return terms.join(' AND ');

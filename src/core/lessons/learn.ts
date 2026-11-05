@@ -1,5 +1,5 @@
 /** 阶段 9:经验提取的编排入口。把「选会话 → 跑流水线 → 批量跳过已审计」接到 CLI 与 daemon。 */
-import { readFile, rename, stat } from 'node:fs/promises';
+import { access, readFile, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Event } from '../events/schema.js';
 import type { Config } from '../../config.js';
@@ -38,6 +38,8 @@ export interface LessonProviderDeps {
   onWritten?: (diff: MemoryDiff) => Promise<void> | void;
   /** 记忆落盘后的向量增量同步(生产由 CLI 注入;测试不注入以免联网)。 */
   syncVectors?: () => Promise<void> | void;
+  /** 单会话阶段进度(手动 learn 用;daemon 不注入避免刷日志)。 */
+  onStage?: (line: string) => void;
 }
 
 export interface ExtractionOutcome {
@@ -116,6 +118,7 @@ export async function runLessonExtraction(
     now: deps.now,
     onWritten: deps.onWritten,
     syncVectors: deps.syncVectors,
+    onStage: deps.onStage,
   }).catch((e) => {
     // 模型重试后仍输出非 JSON → 当跳过忽略,不记失败。
     if (e instanceof LlmParseError) return null;
@@ -215,6 +218,15 @@ export async function migrateJsonQueue(jsonPath: string, queue: JobQueue, vaultR
   return n;
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 从统一索引按 startedAt 降序取最多 limit 个「未学习」会话 key(harness:session)。 */
 export async function recentUnlearnedKeys(
   vaultRoot: string,
@@ -228,7 +240,10 @@ export async function recentUnlearnedKeys(
     (b.startedAt ?? '') > (a.startedAt ?? '') ? 1 : -1,
   );
   const keys: string[] = [];
+  const root = libraryDir(vaultRoot);
   for (const s of entries) {
+    // 索引可能引用尚未落地的远端文件(同步中断/分片悬空):跳过,避免学习时 ENOENT
+    if (!(await pathExists(join(root, ...s.canonical.path.split('/'))))) continue;
     const key = `${s.harness}:${s.session}`;
     // 已成功(.json)或已失败(.failed.json)都算已处理;双形式兜底历史裸 session 落盘。
     // .shadow.json 是 shadow 观察轮的审计:仅 shadow 模式算已处理,auto 忽略以真正补学。
@@ -271,22 +286,39 @@ export async function learnRecentBatch(
   let pendingTotal = 0;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]!;
+    const started = Date.now();
+    const took = (): string => `${((Date.now() - started) / 1000).toFixed(1)}s`;
+    opts.log?.(`[${i + 1}/${keys.length}] ${key} 开始`);
     try {
-      const outcome = await runLessonExtraction(vaultRoot, key, { llm, jev, now: deps.now, config: deps.config });
+      const outcome = await runLessonExtraction(vaultRoot, key, {
+        llm,
+        jev,
+        now: deps.now,
+        config: deps.config,
+        onWritten: deps.onWritten,
+        syncVectors: deps.syncVectors,
+        onStage: deps.onStage,
+      });
       if (outcome.skipReason) {
         skipped++;
-        opts.log?.(`[${i + 1}/${keys.length}] ${key} 未达阈值,跳过:${outcome.skipReason}`);
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} 未达阈值,跳过:${outcome.skipReason} · ${took()}`);
       } else if (outcome.shadow) {
         extracted++;
-        opts.log?.(`[${i + 1}/${keys.length}] ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计`);
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计 · ${took()}`);
       } else {
         extracted++;
         pendingTotal += outcome.pending ?? 0;
         const d = outcome.diff?.summary;
         const pending = outcome.pending ? ` · 待审 ${outcome.pending}` : '';
-        opts.log?.(`[${i + 1}/${keys.length}] ${key} 完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}${pending}`);
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} 完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}${pending} · ${took()}`);
       }
     } catch (e) {
+      // 文件在候选筛选后消失/未落地:不写 failed 标记,同步补齐后还能补学
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        skipped++;
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} 文件缺失,跳过(未标记失败)`);
+        continue;
+      }
       failed++;
       const msg = (e as Error).message;
       await storage.write(`audit/${key}.failed.json`, JSON.stringify({ session_id: key, error: msg, at: new Date().toISOString() }, null, 2)).catch(() => {});

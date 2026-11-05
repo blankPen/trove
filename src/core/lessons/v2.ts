@@ -42,6 +42,8 @@ export interface V2RunDeps {
   onWritten?: (diff: MemoryDiff) => Promise<void> | void;
   /** 记忆落盘后的向量增量同步;失败静默(向量是可选增强,不阻断学习)。 */
   syncVectors?: () => Promise<void> | void;
+  /** 阶段进度(手动 learn 用):每完成一个阶段输出一行带耗时;daemon 不注入避免刷日志。 */
+  onStage?: (line: string) => void;
 }
 
 export interface V2RunResult {
@@ -65,7 +67,15 @@ export async function runLessonPipelineV2(
 ): Promise<V2RunResult> {
   const now = deps.now ?? (() => new Date());
   const shadow = deps.learn.mode === 'shadow';
+  // 阶段计时:从上一阶段结束算起,让用户看到时间花在哪
+  let stageAt = Date.now();
+  const stage = (label: string): void => {
+    const at = Date.now();
+    deps.onStage?.(`  ${label} · ${((at - stageAt) / 1000).toFixed(1)}s`);
+    stageAt = at;
+  };
   const events = await deps.loadEvents(sessionId);
+  stage('读取会话');
 
   // 1. 会话选择(进行中 → skip)
   const sel = selectSession(events, now());
@@ -110,6 +120,7 @@ export async function runLessonPipelineV2(
 
   // 2.5 Jev 快速压缩:真实长会话在进入 LLM 前压缩;摘要/分类/轨迹/提取/证据/Gate A 全用这一份压缩事件。
   const compacted = await compactEvents(selected, deps.jev);
+  stage(`压缩 ${selected.length}→${compacted.length} 条事件`);
   if (compacted.length === 0) {
     emit({ stage: 'skip', decision: 'no_content', source: 'heuristic' });
     await decisionTail;
@@ -124,6 +135,7 @@ export async function runLessonPipelineV2(
     return { shadow, skipReason: 'trivial' };
   }
   const classification = await classifySession(summary, deps.llm);
+  stage('摘要/分类');
   if (!anyCategory(classification)) {
     emit({ stage: 'skip', decision: 'no_category', source: 'llm' });
     await decisionTail;
@@ -148,15 +160,19 @@ export async function runLessonPipelineV2(
   }
   if (gateA.decision === 'escalate') {
     const accept = await llmTriageAdjudicate(digest, deps.llm);
+    stage('Gate A 分诊(LLM 裁决)');
     emit({ stage: 'adjudicate', gate: 'A', decision: accept ? 'accept' : 'reject', source: 'llm' });
     if (!accept) {
       await decisionTail;
       return { shadow, skipReason: 'triage_rejected' };
     }
+  } else {
+    stage('Gate A 分诊');
   }
 
   // 5. 轨迹:auto 落盘(轨迹是记忆,shadow 不写)
   const facts = await extractTrajectoryFacts(summary, compacted, { llm: deps.llm });
+  stage('轨迹');
   const trajId = newMemoryId('traj_');
   if (!shadow) {
     await writeTrajectory(deps.storage, { id: trajId, session: eventSession, project, summary, facts, events: compacted, createdAt: now().toISOString() });
@@ -164,10 +180,12 @@ export async function runLessonPipelineV2(
 
   // 6. 提取(与证据校验共用同一份 compacted 事件)
   const candidates = await extractMemoriesV2(summary, classification, compacted, { llm: deps.llm });
+  stage(`提取 ${candidates.length} 条候选`);
   for (const c of candidates) c.scope = inferScope(c.type, project);
 
   // 7. 逐候选:contract → 证据 → Gate B → 质量/LLM 裁决
   const gateBResults = await gateway.screenCandidates(candidates.map((c) => ({ type: c.type, title: c.title, content: c.content, evidence: c.evidence })));
+  stage('Gate B 筛选');
   const accepted: MemoryCandidateV2[] = [];
   // review 模式 L0/L1 的经验候选先进 inbox,由人 accept 后再走 Gate C(信任升级只在人工 review 后触发)。
   const inboxCandidates: Array<{ c: MemoryCandidateV2; source: DecisionSource; q?: QualityScore }> = [];
@@ -233,6 +251,7 @@ export async function runLessonPipelineV2(
       emit({ stage: 'quality', decision: `candidate_error:${(e as Error).message}`, source: 'heuristic', candidate: { type: c.type, title: c.title } });
     }
   }
+  stage('质量裁决');
 
   // 8. 写 inbox(人类 review 队列)→ Gate C 合并 → ops
   for (const ic of inboxCandidates) {
@@ -256,6 +275,7 @@ export async function runLessonPipelineV2(
 
   const existing = await loadExistingForGate(deps.storage);
   const ops = await mergeMemoriesV2(accepted, existing, { gateway, llm: deps.llm, learn: deps.learn });
+  stage('Gate C 合并');
   const capacityResult = applyCapacity(ops, existing, deps.learn.capacity ?? DEFAULT_CAPACITY);
   for (const { op } of capacityResult.rejected) {
     emit({ stage: 'quality', decision: 'capacity_exceeded', source: 'heuristic', candidate: { type: op.type, title: op.title } });
@@ -276,6 +296,7 @@ export async function runLessonPipelineV2(
   }
 
   await applyOperations(allOps, { storage: deps.storage, now: deps.now, source: sessionId });
+  stage('写盘');
   const diff = { ...buildMemoryDiff(allOps, { sessionId, project }), v2 };
   await deps.onWritten?.(diff);
   void Promise.resolve(deps.syncVectors?.()).catch(() => {});

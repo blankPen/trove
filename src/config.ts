@@ -92,6 +92,8 @@ export interface LearnEmbeddingConfig {
   recallTopK: number;
   /** RRF 融合常数 k。 */
   rrfK: number;
+  /** 向量召回最低余弦相似度;低于此值不进入融合,避免短问句硬凑无关结果。 */
+  minScore: number;
 }
 
 export interface LearnConfig {
@@ -127,7 +129,7 @@ export function defaultLearnConfig(): LearnConfig {
     jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
     lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
     capacity: { ...DEFAULT_CAPACITY },
-    embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60 },
+    embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60, minScore: 0.6 },
   };
 }
 
@@ -260,6 +262,7 @@ export function normalizeLearn(learn: unknown): LearnConfig {
       gateTopK: num(e.gateTopK, d.embedding.gateTopK),
       recallTopK: num(e.recallTopK, d.embedding.recallTopK),
       rrfK: num(e.rrfK, d.embedding.rrfK),
+      minScore: num(e.minScore, d.embedding.minScore),
     },
   };
 }

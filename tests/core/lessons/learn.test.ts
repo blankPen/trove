@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch, recentUnlearnedKeys, hashSessionContent, enqueueLearnSessions, migrateJsonQueue, resolveProviders } from '../../../src/core/lessons/learn.js';
+import { defaultLearnConfig } from '../../../src/config.js';
 import { JobQueue } from '../../../src/core/lessons/jobs.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 import { libraryDir, libraryLessonsDir, safeSessionName } from '../../../src/core/layout.js';
@@ -14,13 +15,18 @@ import type { Event } from '../../../src/core/events/schema.js';
 
 let vault: string;
 let storage: LocalStorageAdapter;
+const prevTroveHome = process.env.TROVE_HOME;
 
 beforeEach(async () => {
   vault = await mkdtemp(join(tmpdir(), 'lessons-learn-'));
+  // 隔离用量台账:否则 learnPendingBatch 会读真实 ~/.trove/usage.jsonl 的当日预算
+  process.env.TROVE_HOME = join(vault, 'trove-home');
   storage = new LocalStorageAdapter(libraryLessonsDir(vault));
 });
 
 afterEach(async () => {
+  if (prevTroveHome === undefined) delete process.env.TROVE_HOME;
+  else process.env.TROVE_HOME = prevTroveHome;
   await rm(vault, { recursive: true, force: true });
 });
 
@@ -77,7 +83,7 @@ async function writeIndex(sessions: Array<{ harness: string; session: string; ev
 
 /** v2 单轨配置。 */
 function learnCfg(mode: 'auto' | 'shadow' | 'off' | 'review') {
-  return { learn: { mode, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } };
+  return { learn: { ...defaultLearnConfig(), mode } };
 }
 
 /** 直接入队(绕过会话文件哈希),contentHash 用 key 推导,便于断言唯一键去重。 */
@@ -488,6 +494,39 @@ describe('learnRecentBatch 手动批量学习', () => {
     expect(await recentUnlearnedKeys(vault, 10, learnCfg('auto'))).toEqual(['claude-code:s-1']);
   });
 
+  it('recentUnlearnedKeys:跳过索引中本地文件缺失的会话(同步未完成)', async () => {
+    const e1 = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', e1);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: e1, startedAt: '2026-01-01T00:00:00.000Z' },
+      // s-2 只在索引里,本地没有 jsonl(远端还没拉下来)
+      { harness: 'claude-code', session: 's-2', events: e1, startedAt: '2026-02-01T00:00:00.000Z' },
+    ]);
+
+    expect(await recentUnlearnedKeys(vault, 10, learnCfg('auto'))).toEqual(['claude-code:s-1']);
+  });
+
+  it('批量学习写盘后触发向量同步(每个会话一次)', async () => {
+    const e1 = sampleEvents('s-1');
+    const e2 = sampleEvents('s-2');
+    await writeSession('claude-code', 's-1', e1);
+    await writeSession('claude-code', 's-2', e2);
+    await writeIndex([
+      { harness: 'claude-code', session: 's-1', events: e1, startedAt: '2026-01-01T00:00:00.000Z' },
+      { harness: 'claude-code', session: 's-2', events: e2, startedAt: '2026-02-01T00:00:00.000Z' },
+    ]);
+    let calls = 0;
+
+    await learnRecentBatch(
+      vault,
+      10,
+      { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto'), syncVectors: () => { calls++; } },
+      { log: () => {} },
+    );
+
+    expect(calls).toBe(2);
+  });
+
   it('按 startedAt 降序取最近 N 个未学习会话,超出部分不学', async () => {
     const e1 = sampleEvents('s-1');
     const e2 = sampleEvents('s-2');
@@ -507,8 +546,9 @@ describe('learnRecentBatch 手动批量学习', () => {
     expect(await storage.read('audit/claude-code:s-3.json')).not.toBeNull();
     expect(await storage.read('audit/claude-code:s-2.json')).not.toBeNull();
     expect(await storage.read('audit/claude-code:s-1.json')).toBeNull();
-    expect(logs[0]).toMatch(/^\[1\/2\] claude-code:s-3/);
-    expect(logs[1]).toMatch(/^\[2\/2\] claude-code:s-2/);
+    const starts = logs.filter((l) => l.includes(' 开始'));
+    expect(starts[0]).toMatch(/^\[1\/2\] claude-code:s-3/);
+    expect(starts[1]).toMatch(/^\[2\/2\] claude-code:s-2/);
   });
 
   it('跳过已学习与已失败会话(双形式兜底裸 session 历史记录)', async () => {

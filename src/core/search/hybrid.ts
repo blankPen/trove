@@ -32,6 +32,8 @@ export interface HybridDeps {
   vectors: VectorIndex | null;
   recallTopK?: number;
   rrfK?: number;
+  /** 向量最低余弦相似度;低于此值不进入融合(短问句常出现无相关内容却硬凑)。 */
+  minScore?: number;
 }
 
 /** 向量缺失/失败一律回退 FTS，绝不阻断检索。 */
@@ -50,7 +52,10 @@ export async function searchLessonsHybrid(
   try {
     const [qv] = await deps.embedder.encode([q]);
     if (!qv) return fts;
-    vecPaths = deps.vectors.search(qv, deps.recallTopK ?? 10).map((h) => ({ id: h.path }));
+    vecPaths = deps.vectors
+      .search(qv, deps.recallTopK ?? 10)
+      .filter((h) => deps.minScore === undefined || h.score >= deps.minScore)
+      .map((h) => ({ id: h.path }));
   } catch {
     return fts;
   }

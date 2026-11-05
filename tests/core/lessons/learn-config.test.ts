@@ -85,9 +85,10 @@ describe('readLearnConfig(v2 单轨学习配置)', () => {
       gateTopK: 5,
       recallTopK: 10,
       rrfK: 60,
+      minScore: 0.6,
     });
     const got = readLearnConfig(
-      learn({ embedding: { enabled: false, model: 'Xenova/bge-m3', host: '', gateTopK: -3, recallTopK: 0, rrfK: -1 } } as never),
+      learn({ embedding: { enabled: false, model: 'Xenova/bge-m3', host: '', gateTopK: -3, recallTopK: 0, rrfK: -1, minScore: -1 } } as never),
     );
     expect(got.embedding).toEqual({
       enabled: false,
@@ -96,6 +97,7 @@ describe('readLearnConfig(v2 单轨学习配置)', () => {
       gateTopK: 0,
       recallTopK: 0,
       rrfK: 0,
+      minScore: 0,
     });
   });
 });

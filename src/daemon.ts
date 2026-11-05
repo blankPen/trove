@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { open, readFile, rename, stat, unlink, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { isProcessAlive } from './core/lock.js';
+import { humanSize } from './format.js';
 import { execFileSync } from 'node:child_process';
 import type { Progress } from './progress.js';
 import type { SyncReport } from './core/sync.js';
@@ -32,6 +33,8 @@ export interface DaemonRuntime {
   learnTick?: () => Promise<string | undefined>;
   /** learn 循环间隔秒数;缺省等同 intervalSeconds。 */
   learnIntervalSeconds?: number;
+  /** 启动期依赖预热(向量模型):与同步循环并发,失败只记日志不阻断 daemon。 */
+  ensureDeps?: (progress: Progress) => Promise<string | undefined>;
 }
 
 export const isAlive = isProcessAlive;
@@ -130,6 +133,24 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/** 依赖下载进度:2s 一条,避免 90MB 模型把日志刷成上万行。 */
+function downloadProgress(paths: TrovePaths): Progress {
+  let last = 0;
+  return {
+    phase(name, detail) {
+      void daemonLog(paths, `[${name}]${detail ? ` ${detail}` : ''}`);
+    },
+    item(label, current, total) {
+      const now = Date.now();
+      if (now - last < 2000 && current < total) return;
+      last = now;
+      const pct = total > 0 ? ` ${Math.round((current / total) * 100)}%` : '';
+      const size = total > 0 ? ` · ${humanSize(current)}/${humanSize(total)}` : ` · ${humanSize(current)}`;
+      void daemonLog(paths, `[模型] ${label}${pct}${size}`);
+    },
+  };
+}
+
 /**
  * daemon 主循环:sync 与 learn 两个循环并发跑,共享 abort 信号;SIGTERM/abort 后清理 pid 退出。
  * sync 循环每轮状态写 daemon.status.json,供 `trove daemon status` 读取;learn 循环只写日志。
@@ -147,6 +168,17 @@ export async function runDaemon(runtime: DaemonRuntime, signal: AbortSignal): Pr
   };
   await writeDaemonStatus(paths, status);
   await daemonLog(paths, `daemon 启动 pid=${process.pid} interval=${intervalSeconds}s since=${since}`);
+
+  // 依赖预热不阻塞同步:模型下载可能几十秒到几分钟,同步循环先跑起来
+  if (runtime.ensureDeps) {
+    const progress = downloadProgress(paths);
+    void runtime.ensureDeps(progress).then(
+      (note) => {
+        if (note) void daemonLog(paths, note);
+      },
+      (e) => void daemonLog(paths, `依赖预热失败(不影响运行): ${(e as Error).message}`),
+    );
+  }
 
   try {
     const loops: Promise<void>[] = [syncLoop(runtime, status, signal)];

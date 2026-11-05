@@ -24,8 +24,20 @@ export type PipelineFn = (
 
 export interface GetEmbedderOpts {
   cacheDir?: string;
+  /** 首次下载进度(transformers.js progress_callback);已缓存时不触发。 */
+  onProgress?: (p: DownloadProgress) => void;
   /** 测试注入假 pipeline；缺省动态 import transformers.js（不联网测试不触发）。 */
   loadPipeline?: (cfg: EmbeddingConfig, cacheDir?: string) => Promise<PipelineFn>;
+}
+
+/** transformers.js 下载进度事件;total 未知时为 0。 */
+export interface DownloadProgress {
+  status: string;
+  name?: string;
+  file?: string;
+  loaded?: number;
+  total?: number;
+  progress?: number;
 }
 
 const MIN_CODEPOINTS = 8;
@@ -58,7 +70,9 @@ export async function getEmbedder(cfg: EmbeddingConfig, opts: GetEmbedderOpts = 
   if (!cfg.enabled) return null;
   let fn: PipelineFn;
   try {
-    fn = opts.loadPipeline ? await opts.loadPipeline(cfg, opts.cacheDir) : await loadRealPipeline(cfg, opts.cacheDir);
+    fn = opts.loadPipeline
+      ? await opts.loadPipeline(cfg, opts.cacheDir)
+      : await loadRealPipeline(cfg, opts.cacheDir, opts.onProgress);
   } catch {
     return null;
   }
@@ -82,13 +96,28 @@ export async function getEmbedder(cfg: EmbeddingConfig, opts: GetEmbedderOpts = 
   };
 }
 
-async function loadRealPipeline(cfg: EmbeddingConfig, cacheDir?: string): Promise<PipelineFn> {
+async function loadRealPipeline(
+  cfg: EmbeddingConfig,
+  cacheDir?: string,
+  onProgress?: (p: DownloadProgress) => void,
+): Promise<PipelineFn> {
   const { env, pipeline } = await import('@huggingface/transformers');
   if (cacheDir) env.cacheDir = cacheDir;
   env.allowRemoteModels = true;
   if (cfg.host) env.remoteHost = cfg.host;
-  const extractor = (await pipeline('feature-extraction', cfg.model, { dtype: 'q8' })) as unknown as PipelineFn;
+  const extractor = (await pipeline('feature-extraction', cfg.model, {
+    dtype: 'q8',
+    ...(onProgress ? { progress_callback: (p: DownloadProgress) => onProgress(p) } : {}),
+  })) as unknown as PipelineFn;
   return (texts, options) => extractor(texts, options);
+}
+
+/** daemon 启动期依赖预热:加载或下载模型;失败返回 false,调用方降级纯 FTS。 */
+export async function ensureEmbeddingModel(
+  cfg: EmbeddingConfig,
+  opts: GetEmbedderOpts = {},
+): Promise<boolean> {
+  return (await getEmbedder(cfg, opts)) !== null;
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

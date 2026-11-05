@@ -12,7 +12,7 @@ test('健康:记忆库体检概览', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: '分类分布' })).toBeVisible();
   await expect(page.getByRole('heading', { name: '使用信号' })).toBeVisible();
-  // 种子 vault 没有作业队列与向量索引
+  // 种子 vault 没有作业队列与检索索引
   await expect(page.getByText('还没有学习作业队列')).toBeVisible();
-  await expect(page.getByText('还没有向量索引')).toBeVisible();
+  await expect(page.getByText('还没有检索索引')).toBeVisible();
 });

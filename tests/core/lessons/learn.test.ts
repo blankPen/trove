@@ -506,7 +506,7 @@ describe('learnRecentBatch 手动批量学习', () => {
     expect(await recentUnlearnedKeys(vault, 10, learnCfg('auto'))).toEqual(['claude-code:s-1']);
   });
 
-  it('批量学习写盘后触发向量同步(每个会话一次)', async () => {
+  it('批量学习写盘后触发检索索引同步(每个会话一次)', async () => {
     const e1 = sampleEvents('s-1');
     const e2 = sampleEvents('s-2');
     await writeSession('claude-code', 's-1', e1);
@@ -520,7 +520,7 @@ describe('learnRecentBatch 手动批量学习', () => {
     await learnRecentBatch(
       vault,
       10,
-      { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto'), syncVectors: () => { calls++; } },
+      { llm: v2Llm(), jev: v2Jev(), config: learnCfg('auto'), syncIndex: () => { calls++; } },
       { log: () => {} },
     );
 

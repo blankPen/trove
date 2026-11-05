@@ -36,8 +36,8 @@ export interface LessonProviderDeps {
   config?: Pick<Config, 'llm' | 'jev' | 'learn'>;
   /** 记忆落盘后、审计写盘前的回调(runner 用来写崩溃恢复 checkpoint)。 */
   onWritten?: (diff: MemoryDiff) => Promise<void> | void;
-  /** 记忆落盘后的向量增量同步(生产由 CLI 注入;测试不注入以免联网)。 */
-  syncVectors?: () => Promise<void> | void;
+  /** 记忆落盘后的检索索引增量同步(生产由 CLI 注入;测试不注入以免加载模型)。 */
+  syncIndex?: () => Promise<void> | void;
   /** 单会话阶段进度(手动 learn 用;daemon 不注入避免刷日志)。 */
   onStage?: (line: string) => void;
 }
@@ -117,7 +117,7 @@ export async function runLessonExtraction(
     loadEvents: (id) => loadSessionEvents(vaultRoot, id),
     now: deps.now,
     onWritten: deps.onWritten,
-    syncVectors: deps.syncVectors,
+    syncIndex: deps.syncIndex,
     onStage: deps.onStage,
   }).catch((e) => {
     // 模型重试后仍输出非 JSON → 当跳过忽略,不记失败。
@@ -296,7 +296,7 @@ export async function learnRecentBatch(
         now: deps.now,
         config: deps.config,
         onWritten: deps.onWritten,
-        syncVectors: deps.syncVectors,
+        syncIndex: deps.syncIndex,
         onStage: deps.onStage,
       });
       if (outcome.skipReason) {

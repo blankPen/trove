@@ -40,8 +40,8 @@ export interface V2RunDeps {
   now?: () => Date;
   /** 记忆已落盘、审计未写前回调(diff 可用于崩溃恢复 checkpoint);shadow 不调用。 */
   onWritten?: (diff: MemoryDiff) => Promise<void> | void;
-  /** 记忆落盘后的向量增量同步;失败静默(向量是可选增强,不阻断学习)。 */
-  syncVectors?: () => Promise<void> | void;
+  /** 记忆落盘后的检索索引增量同步;失败静默(索引是可选增强,不阻断学习)。 */
+  syncIndex?: () => Promise<void> | void;
   /** 阶段进度(手动 learn 用):每完成一个阶段输出一行带耗时;daemon 不注入避免刷日志。 */
   onStage?: (line: string) => void;
 }
@@ -299,7 +299,7 @@ export async function runLessonPipelineV2(
   stage('写盘');
   const diff = { ...buildMemoryDiff(allOps, { sessionId, project }), v2 };
   await deps.onWritten?.(diff);
-  void Promise.resolve(deps.syncVectors?.()).catch(() => {});
+  void Promise.resolve(deps.syncIndex?.()).catch(() => {});
   await writeMemoryDiff(diff, deps.storage);
   await decisionTail;
   return { diff, shadow: false, pending: inboxCandidates.length };

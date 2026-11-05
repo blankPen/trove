@@ -20,7 +20,7 @@ export default function Health() {
     <>
       <TitleRow
         title="健康"
-        sub="记忆库体检:陈旧、归档、覆盖缺口、使用信号,以及作业与向量索引的现状。"
+        sub="记忆库体检:陈旧、归档、覆盖缺口、使用信号,以及作业与检索索引的现状。"
       />
 
       {health.error ? (
@@ -68,16 +68,16 @@ export default function Health() {
                 <div className="empty">还没有学习作业队列</div>
               )}
             </Panel>
-            <Panel title="向量索引" meta="本地检索" span={6}>
-              {h.vectors ? (
+            <Panel title="检索索引" meta="qmd 本地混合检索" span={6}>
+              {h.searchIndex ? (
                 <StatDl
                   rows={[
-                    ['条数', h.vectors.count],
-                    ...(h.vectors.model ? ([['模型', h.vectors.model]] as Array<[string, string | number]>) : []),
+                    ['文档', h.searchIndex.documents],
+                    ['待嵌入', h.searchIndex.needsEmbedding],
                   ]}
                 />
               ) : (
-                <div className="empty">还没有向量索引</div>
+                <div className="empty">还没有检索索引</div>
               )}
             </Panel>
           </div>

@@ -33,7 +33,7 @@ export interface DaemonRuntime {
   learnTick?: () => Promise<string | undefined>;
   /** learn 循环间隔秒数;缺省等同 intervalSeconds。 */
   learnIntervalSeconds?: number;
-  /** 启动期依赖预热(向量模型):与同步循环并发,失败只记日志不阻断 daemon。 */
+  /** 启动期依赖预热(检索索引与模型):与同步循环并发,失败只记日志不阻断 daemon。 */
   ensureDeps?: (progress: Progress) => Promise<string | undefined>;
 }
 

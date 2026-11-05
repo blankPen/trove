@@ -84,14 +84,11 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
       profileBytes: nonNeg(l.capacity?.profileBytes, d.capacity.profileBytes),
       entitiesPerType: nonNeg(l.capacity?.entitiesPerType, d.capacity.entitiesPerType),
     },
-    embedding: {
-      enabled: l.embedding?.enabled !== false,
-      model: strNonEmpty(l.embedding?.model, d.embedding.model),
-      host: strNonEmpty(l.embedding?.host, d.embedding.host),
-      gateTopK: nonNeg(l.embedding?.gateTopK, d.embedding.gateTopK),
-      recallTopK: nonNeg(l.embedding?.recallTopK, d.embedding.recallTopK),
-      rrfK: nonNeg(l.embedding?.rrfK, d.embedding.rrfK),
-      minScore: clamp01(l.embedding?.minScore, d.embedding.minScore),
+    search: {
+      enabled: l.search?.enabled !== false,
+      model: strNonEmpty(l.search?.model, d.search.model),
+      host: strNonEmpty(l.search?.host, d.search.host),
+      minScore: nonNeg(l.search?.minScore, d.search.minScore),
     },
   };
 }

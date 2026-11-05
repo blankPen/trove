@@ -1,4 +1,4 @@
-/** Memory Health:仓库健康的只读摘要 —— stale/重复/覆盖缺口/使用信号/作业与向量索引,不写任何文件。 */
+/** Memory Health:仓库健康的只读摘要 —— stale/重复/覆盖缺口/使用信号/作业与检索索引,不写任何文件。 */
 import { access } from 'node:fs/promises';
 import { libraryLessonsDir } from '../layout.js';
 import type { TrovePaths } from '../../paths.js';
@@ -9,7 +9,7 @@ import { parseMemory, qualityTotal } from './memory.js';
 import { readTrust } from './trust.js';
 import { listInbox } from './inbox.js';
 import { JobQueue } from './jobs.js';
-import { VectorIndex } from './vector-index.js';
+import { qmdIndexStatus } from '../search/qmd.js';
 
 export interface MemoryHealthUsage {
   retrieved: number;
@@ -38,7 +38,7 @@ export interface MemoryHealth {
   trustLevel: number;
   usage: MemoryHealthUsage;
   jobs?: { queued: number; running: number; retry: number; dead: number } | null;
-  vectors: { count: number; model?: string } | null;
+  searchIndex: { documents: number; needsEmbedding: number } | null;
 }
 
 export interface HealthMemoryMetrics {
@@ -144,7 +144,7 @@ export function summarizeUsageEvents(events: MemoryUsageEvent[], now: number): M
   return out;
 }
 
-/** 组装完整健康摘要;jobs/vectors 读缓存,缺失或失败返回 null(不报错)。 */
+/** 组装完整健康摘要;jobs/检索索引 读缓存,缺失或失败返回 null(不报错)。 */
 export async function buildMemoryHealth(
   paths: TrovePaths,
   now: () => number = Date.now,
@@ -165,7 +165,7 @@ export async function buildMemoryHealth(
     trustLevel: trust.level,
     usage: summarizeUsageEvents(usageEvents, now()),
     jobs: await readJobStats(paths),
-    vectors: await readVectorStats(paths),
+    searchIndex: await readSearchIndexStats(paths),
   };
 }
 
@@ -195,19 +195,11 @@ async function readJobStats(paths: TrovePaths): Promise<MemoryHealth['jobs']> {
   }
 }
 
-async function readVectorStats(paths: TrovePaths): Promise<MemoryHealth['vectors']> {
-  if (!(await exists(paths.vectorDb))) return null;
-  try {
-    const idx = VectorIndex.open(paths.vectorDb);
-    try {
-      const model = idx.getMeta('model');
-      return { count: idx.count(), ...(model ? { model } : {}) };
-    } finally {
-      idx.close();
-    }
-  } catch {
-    return null;
-  }
+async function readSearchIndexStats(paths: TrovePaths): Promise<MemoryHealth['searchIndex']> {
+  if (!(await exists(paths.qmdDb))) return null;
+  const status = await qmdIndexStatus(paths.vault, { dbPath: paths.qmdDb });
+  if (!status) return null;
+  return { documents: status.documents, needsEmbedding: status.needsEmbedding };
 }
 
 async function exists(path: string): Promise<boolean> {

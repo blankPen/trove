@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { hostname, tmpdir } from 'node:os';
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -23,7 +22,6 @@ import {
   listLessons,
   searchLessons,
   searchSessions,
-  type SearchHybridConfig,
 } from './core/search/service.js';
 import {
   formatLesson,
@@ -65,9 +63,8 @@ import { refreshSidecars } from './core/lessons/sidecar.js';
 import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders, migrateJsonQueue, enqueueLearnSessions } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
 import { JobQueue } from './core/lessons/jobs.js';
-import { ensureEmbeddingModel, getEmbedder } from './core/lessons/embedding.js';
-import { VectorIndex } from './core/lessons/vector-index.js';
-import { syncVectorIndex } from './core/lessons/vector-sync.js';
+import { qmdIndexStatus, syncQmdIndex } from './core/search/qmd.js';
+import type { QmdSearchConfig } from './core/search/qmd.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
 import { learnClaudeMemo } from './core/lessons/memo.js';
 import { learnRecentMatters } from './core/lessons/recent.js';
@@ -511,53 +508,40 @@ async function cmdWhoami(
   out(opts.json ? JSON.stringify(result, null, 2) : formatWhoami(result));
 }
 
-/** 从 learn.embedding 映射混合召回配置;配置不可读/关闭时返回 undefined(纯 FTS)。 */
-async function hybridSearchConfig(paths: ReturnType<typeof trovePaths>): Promise<SearchHybridConfig | undefined> {
+/** 从 learn.search 映射检索后端配置;配置不可读/关闭时返回 undefined(纯 FTS)。 */
+async function searchBackendConfig(paths: ReturnType<typeof trovePaths>): Promise<QmdSearchConfig | undefined> {
   try {
     const learn = readLearnConfig(await loadConfig(paths.config));
-    if (!learn.embedding.enabled) return undefined;
+    if (!learn.search.enabled) return undefined;
     return {
-      embedding: { enabled: true, model: learn.embedding.model, host: learn.embedding.host },
-      vectorDb: paths.vectorDb,
-      modelCache: paths.modelCache,
-      recallTopK: learn.embedding.recallTopK,
-      rrfK: learn.embedding.rrfK,
-      minScore: learn.embedding.minScore,
+      dbPath: paths.qmdDb,
+      model: learn.search.model,
+      host: learn.search.host,
+      minScore: learn.search.minScore,
     };
   } catch {
     return undefined;
   }
 }
 
-/** 生产学习写盘后的向量增量同步;任何失败静默(向量是可选增强,不阻断学习)。 */
-async function syncVectors(paths: ReturnType<typeof trovePaths>): Promise<void> {
+/** 生产学习写盘后的检索索引增量同步;任何失败静默(索引是可选增强,不阻断学习)。 */
+async function syncSearchIndex(paths: ReturnType<typeof trovePaths>): Promise<void> {
   try {
-    const learn = readLearnConfig(await loadConfig(paths.config));
-    if (!learn.embedding.enabled) return;
-    const vectors = VectorIndex.open(paths.vectorDb);
-    try {
-      const embedder = await getEmbedder(
-        { enabled: true, model: learn.embedding.model, host: learn.embedding.host },
-        { cacheDir: paths.modelCache },
-      );
-      if (!embedder) return;
-      vectors.setMeta('model', learn.embedding.model);
-      await syncVectorIndex(paths.vault, vectors, embedder);
-    } finally {
-      vectors.close();
-    }
+    const backend = await searchBackendConfig(paths);
+    if (!backend) return;
+    await syncQmdIndex(paths.vault, backend);
   } catch {
-    // 向量同步失败不阻断学习
+    // 索引同步失败不阻断学习
   }
 }
 
-/** 测试注入 lessonDeps 时不自动接向量同步(防联网);生产(undefined)才接。 */
-function withVectorSync(
+/** 测试注入 lessonDeps 时不自动接索引同步(防联网/防加载模型);生产(undefined)才接。 */
+function withIndexSync(
   lessonDeps: LessonProviderDeps | undefined,
   paths: ReturnType<typeof trovePaths>,
 ): LessonProviderDeps {
   if (lessonDeps) return lessonDeps;
-  return { syncVectors: () => syncVectors(paths) };
+  return { syncIndex: () => syncSearchIndex(paths) };
 }
 
 async function cmdLessonsSearch(
@@ -569,7 +553,7 @@ async function cmdLessonsSearch(
 ): Promise<void> {
   const since = opts.since ? (parseSince(opts.since, nowMs) ?? undefined) : undefined;
   const limit = Math.max(1, Math.min(50, Number(opts.limit) || 10));
-  const hybrid = await hybridSearchConfig(paths);
+  const backend = await searchBackendConfig(paths);
   const hits = await searchLessons(
     paths.vault,
     {
@@ -580,7 +564,7 @@ async function cmdLessonsSearch(
       limit,
       cwd: process.cwd(),
     },
-    hybrid,
+    backend,
   );
   out(
     opts.json
@@ -997,7 +981,7 @@ async function cmdLearnReview(
 
   if (opts.acceptAll) {
     for (const it of items) {
-      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncIndex });
       out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
     }
     await printTrust(storage, out);
@@ -1033,14 +1017,14 @@ async function cmdLearnReview(
     });
     if (isCancel(action) || action === 'quit') break;
     if (action === 'accept') {
-      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
+      const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncIndex });
       out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
     } else if (action === 'reject') {
       await rejectInboxItem(storage, it.id);
       out(`已拒绝: ${it.title}`);
     } else if (action === 'edit') {
       if (await editInboxItem(storage, it, out)) {
-        const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncVectors });
+        const r = await acceptInboxItem(storage, it.id, { gateway, llm, learn, afterWrite: lessonDeps?.syncIndex });
         out(`已接受: ${it.title}${r.paths.length ? ` → ${r.paths.join(', ')}` : '(重复,未新增)'}`);
       }
     }
@@ -1132,16 +1116,8 @@ async function cmdLearnStatus(
   const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
   const config = await loadConfig(paths.config);
   const learn = readLearnConfig(config);
-  let vectorCount = 0;
-  if (existsSync(paths.vectorDb)) {
-    try {
-      const v = VectorIndex.open(paths.vectorDb);
-      vectorCount = v.count();
-      v.close();
-    } catch {
-      // 索引损坏按 0 计,不阻断 status
-    }
-  }
+  const backend = await searchBackendConfig(paths);
+  const indexStatus = backend ? await qmdIndexStatus(paths.vault, backend) : null;
   try {
     const s = queue.stats();
     const dead = queue.listDead(5);
@@ -1157,8 +1133,9 @@ async function cmdLearnStatus(
             inboxPending: inbox.length,
             trust: trust.level,
             staleMemories,
-            vectors: vectorCount,
-            vectorModel: learn.embedding.enabled ? learn.embedding.model : null,
+            searchIndex: indexStatus?.documents ?? 0,
+            searchIndexPendingEmbed: indexStatus?.needsEmbedding ?? 0,
+            searchModel: learn.search.enabled ? learn.search.model : null,
           },
           null,
           2,
@@ -1171,7 +1148,7 @@ async function cmdLearnStatus(
         `队列: 待处理 ${s.queued} · 重试等待 ${s.retryWait} · 运行中 ${s.running} · 完成 ${s.done} · 跳过 ${s.skipped} · 死信 ${s.dead}`,
         `最老排队: ${s.oldestQueuedAt ? `${humanSpan(Date.now() - s.oldestQueuedAt)}前` : '-'} · p50 ${s.p50Ms ?? '-'}ms · p95 ${s.p95Ms ?? '-'}ms`,
         `inbox 待审 ${inbox.length} · 信任等级 L${trust.level} · stale 记忆 ${staleMemories}`,
-        `向量 ${vectorCount} · 模型 ${learn.embedding.enabled ? learn.embedding.model : '-'}`,
+        `检索索引 ${indexStatus?.documents ?? 0} 篇（待嵌入 ${indexStatus?.needsEmbedding ?? 0}）· 模型 ${learn.search.enabled ? learn.search.model : '-'}`,
       ].join('\n'),
     );
     for (const j of dead) out(`  失败: ${j.sessionKey} · ${j.errorClass ?? '-'} · ${j.lastError}`);
@@ -1266,16 +1243,15 @@ async function cmdDoctor(paths: ReturnType<typeof trovePaths>, out: (l: string) 
     push(`learn.db 可打开 —— ${(e as Error).message}`, false);
   }
 
-  if (!existsSync(paths.vectorDb)) {
-    push('向量索引尚未构建(纯 FTS 降级可用)', true);
+  const backend = await searchBackendConfig(paths);
+  if (!backend) {
+    push('检索后端已关闭(learn.search.enabled=false),纯 FTS 可用', true);
   } else {
-    try {
-      const v = VectorIndex.open(paths.vectorDb);
-      const n = v.count();
-      v.close();
-      push(`向量索引可打开(${n} 条)`, true);
-    } catch (e) {
-      push(`向量索引 —— ${(e as Error).message}`, false);
+    const status = await qmdIndexStatus(paths.vault, backend);
+    if (!status || status.documents === 0) {
+      push('qmd 检索索引尚未构建(纯 FTS 降级可用)', true);
+    } else {
+      push(`qmd 检索索引可打开(${status.documents} 篇 · 待嵌入 ${status.needsEmbedding})`, true);
     }
   }
 
@@ -1607,30 +1583,16 @@ function daemonRuntime(
     since: opts.since,
     ensureDeps: async (progress) => {
       const learn = readLearnConfig(config);
-      if (!learn.embedding.enabled) return '向量检索已禁用(learn.embedding.enabled=false),跳过模型下载';
-      const model = learn.embedding.model;
-      progress.phase('模型', `检查 ${model}`);
-      let lastPct = -10;
-      let lastAt = 0;
-      const ok = await ensureEmbeddingModel(
-        { enabled: true, model, host: learn.embedding.host },
-        {
-          cacheDir: paths.modelCache,
-          onProgress: (p) => {
-            if (p.status === 'progress' && p.total) {
-              const pct = Math.floor(((p.loaded ?? 0) / p.total) * 100);
-              if (pct - lastPct >= 5 || Date.now() - lastAt > 3000) {
-                lastPct = pct;
-                lastAt = Date.now();
-                progress.item(p.file ?? p.name ?? model, p.loaded ?? 0, p.total);
-              }
-            } else if (p.status === 'done' && p.file) {
-              progress.item(p.file, 1, 1);
-            }
-          },
-        },
-      );
-      return ok ? `向量模型就绪: ${model}` : '向量模型不可用,检索降级纯 FTS5';
+      if (!learn.search.enabled) return '检索后端已禁用(learn.search.enabled=false),跳过索引构建';
+      const backend = await searchBackendConfig(paths);
+      if (!backend) return '检索后端配置不可读,检索降级纯 FTS5';
+      progress.phase('索引', `检查 ${learn.search.model}`);
+      try {
+        const r = await syncQmdIndex(paths.vault, backend);
+        return `qmd 检索索引就绪: ${r.documents} 篇`;
+      } catch (e) {
+        return `qmd 检索索引构建失败(${(e as Error).message}),检索降级纯 FTS5`;
+      }
     },
     runOnce: async (progress, signal) => {
       const { config, remote, adapters } = await loadRuntime(paths, createRemote, resolveAdapters);
@@ -1737,7 +1699,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
   const err = deps.err ?? ((l: string) => console.error(l));
   const rawOut = deps.rawOut ?? ((s: string) => process.stdout.write(s));
   const paths = trovePaths(deps.base);
-  const lessonDeps = withVectorSync(deps.lessonDeps, paths);
+  const lessonDeps = withIndexSync(deps.lessonDeps, paths);
   const createRemote = deps.createRemote ?? defaultCreateRemote;
   const resolveAdapters = deps.resolveAdapters ?? defaultResolveAdapters;
   const now = deps.now ?? Date.now;
@@ -2026,7 +1988,7 @@ export async function run(argv: string[], deps: CliDeps = {}): Promise<number> {
     .description('启动 stdio MCP 服务(供 Claude Code / Codex / OpenCode 接入)')
     .action(async () => {
       const { runMcpServer } = await import('./mcp/server.js');
-      await runMcpServer({ vault: paths.vault, cacheDir: paths.cache, version: VERSION, now, hybrid: await hybridSearchConfig(paths) });
+      await runMcpServer({ vault: paths.vault, cacheDir: paths.cache, version: VERSION, now, backend: await searchBackendConfig(paths) });
     });
 
   const skillCmd = program.command('skill').description('安装/卸载 trove skill');

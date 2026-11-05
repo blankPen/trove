@@ -77,26 +77,20 @@ describe('readLearnConfig(v2 单轨学习配置)', () => {
     expect(got.capacity.entitiesPerType).toBe(200);
   });
 
-  it('embedding 缺省补默认,部分覆盖保留,负值钳 0,空 host 回退默认', () => {
-    expect(readLearnConfig().embedding).toEqual({
+  it('search 缺省补默认,部分覆盖保留,负值钳 0,空 host 回退默认', () => {
+    expect(readLearnConfig().search).toEqual({
       enabled: true,
-      model: 'Xenova/bge-small-zh-v1.5',
+      model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf',
       host: 'https://hf-mirror.com',
-      gateTopK: 5,
-      recallTopK: 10,
-      rrfK: 60,
-      minScore: 0.6,
+      minScore: 0,
     });
     const got = readLearnConfig(
-      learn({ embedding: { enabled: false, model: 'Xenova/bge-m3', host: '', gateTopK: -3, recallTopK: 0, rrfK: -1, minScore: -1 } } as never),
+      learn({ search: { enabled: false, model: 'Xenova/bge-m3', host: '', minScore: -1 } } as never),
     );
-    expect(got.embedding).toEqual({
+    expect(got.search).toEqual({
       enabled: false,
       model: 'Xenova/bge-m3',
       host: 'https://hf-mirror.com',
-      gateTopK: 0,
-      recallTopK: 0,
-      rrfK: 0,
       minScore: 0,
     });
   });

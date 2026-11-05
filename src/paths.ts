@@ -21,10 +21,8 @@ export interface TrovePaths {
   learnQueue: string;
   /** learn 作业队列 SQLite(不在 vault 内,不参与同步) */
   learnDb: string;
-  /** 向量索引 SQLite(本地可重建,不参与同步) */
-  vectorDb: string;
-  /** transformers.js 模型缓存目录 */
-  modelCache: string;
+  /** qmd 检索索引 SQLite(本地可重建,不参与同步) */
+  qmdDb: string;
 }
 
 /** 从 base 目录推导全部路径。默认 ~/.trove,可用 TROVE_HOME 覆盖;测试可注入临时 base。 */
@@ -45,7 +43,6 @@ export function trovePaths(
     daemonLog: join(base, 'logs', 'daemon.log'),
     learnQueue: join(base, 'learn-queue.json'),
     learnDb: join(base, 'cache', 'learn.db'),
-    vectorDb: join(base, 'cache', 'vectors.sqlite'),
-    modelCache: join(base, 'cache', 'models'),
+    qmdDb: join(base, 'cache', 'qmd.sqlite'),
   };
 }

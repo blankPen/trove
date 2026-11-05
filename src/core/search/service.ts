@@ -1,19 +1,17 @@
 /** 统一查询服务：CLI 与 MCP 共用，不在这里做输出格式化。 */
 import { existsSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import { computeLessonsSummary, type LessonsSummary } from '../../status.js';
 import { libraryLessonsDir } from '../layout.js';
 import { LocalStorageAdapter } from '../lessons/storage.js';
+import { parseFrontmatter, stripFrontmatter } from '../lessons/frontmatter.js';
 import { readMemoryUsage, recordMemoryUsageBatch, summarizeMemoryUsage } from '../lessons/memory-usage.js';
 import type { MemoryAction } from '../lessons/memory-usage.js';
 import { loadLibraryIndex } from '../library/index-file.js';
 import { LessonsIndex, resolveLessonPath, type LessonDoc, type LessonHit, type LessonQuery } from './lessons-index.js';
-import { applyUsageRanking } from './rank.js';
-import { searchLessonsHybrid } from './hybrid.js';
-import { getEmbedder } from '../lessons/embedding.js';
-import type { EmbeddingConfig } from '../lessons/embedding.js';
-import { VectorIndex } from '../lessons/vector-index.js';
+import { applyUsageRanking, clip, snippetAround } from './rank.js';
+import { closeQmdStore, searchQmd, type QmdHit, type QmdSearchConfig } from './qmd.js';
 import {
   SessionsIndex,
   type BuildStats,
@@ -26,16 +24,8 @@ export interface LessonResult extends LessonDoc {
   truncated: boolean;
 }
 
-/** 混合召回配置：由 CLI/MCP 从 learn.embedding 映射；缺省走纯 FTS。 */
-export interface SearchHybridConfig {
-  embedding: EmbeddingConfig;
-  vectorDb: string;
-  modelCache?: string;
-  recallTopK?: number;
-  rrfK?: number;
-  /** 向量召回最低余弦相似度;缺省不过滤。 */
-  minScore?: number;
-}
+/** 检索后端配置：由 CLI/MCP 从 learn.search 映射；缺省走纯 FTS。 */
+export type SearchBackendConfig = QmdSearchConfig;
 
 export interface SessionSearchResult {
   results: Awaited<ReturnType<SessionsIndex['search']>>['results'];
@@ -78,20 +68,32 @@ export async function getLessonsIndex(vaultRoot: string): Promise<LessonsIndex> 
   return index;
 }
 
-/** 测试/进程退出时释放内存索引。 */
+/** 测试/进程退出时释放内存索引与 qmd 句柄。 */
 export function closeSearchCache(): void {
   for (const entry of lessonsCache.values()) entry.index.close();
   lessonsCache.clear();
+  void closeQmdStore();
 }
 
 export async function searchLessons(
   vaultRoot: string,
   opts: LessonQuery,
-  hybrid?: SearchHybridConfig,
+  backend?: SearchBackendConfig,
 ): Promise<LessonHit[]> {
-  const index = await getLessonsIndex(vaultRoot);
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
-  let hits = hybrid ? await hybridSearch(index, vaultRoot, opts, hybrid) : index.search(opts);
+  let hits: LessonHit[] = [];
+  // qmd 检索失败或无命中 → 落回纯 FTS；检索永远不报错。
+  if (backend && opts.query?.trim()) {
+    try {
+      hits = await qmdSearch(vaultRoot, opts, backend);
+    } catch {
+      hits = [];
+    }
+  }
+  if (hits.length === 0) {
+    const index = await getLessonsIndex(vaultRoot);
+    hits = index.search(opts);
+  }
   try {
     // 使用反馈排序;usage 读取失败不阻断检索,保留原排序。
     hits = applyUsageRanking(hits, summarizeMemoryUsage(await readMemoryUsage(storage)), { cwd: opts.cwd });
@@ -99,40 +101,60 @@ export async function searchLessons(
     // 埋点/排序不影响检索结果
   }
   const events = hits
-    .map((hit, i) => ({ id: index.get(hit.path)?.id, action: 'retrieved' as MemoryAction, rank: i + 1 }))
+    .map((hit, i) => ({ id: hit.id, action: 'retrieved' as MemoryAction, rank: i + 1 }))
     .filter((e): e is { id: string; action: MemoryAction; rank: number } => !!e.id);
   await trackUsage(storage, events, opts.query);
   return hits;
 }
 
-/** 打开向量索引做混合召回；向量库不存在/为空/损坏/无模型 → 一律回退纯 FTS，不报错。 */
-async function hybridSearch(
-  index: LessonsIndex,
+/** qmd 命中 → LessonHit：frontmatter 语义（id/type/tags/scope）仍由 trove 自己解析。 */
+async function qmdSearch(
   vaultRoot: string,
   opts: LessonQuery,
-  hybrid: SearchHybridConfig,
+  backend: SearchBackendConfig,
 ): Promise<LessonHit[]> {
-  if (!existsSync(hybrid.vectorDb)) return index.search(opts);
-  let vectors: VectorIndex;
-  try {
-    vectors = VectorIndex.open(hybrid.vectorDb);
-  } catch {
-    return index.search(opts);
-  }
-  try {
-    if (vectors.count() === 0) return index.search(opts);
-    const embedder = await getEmbedder(hybrid.embedding, { cacheDir: hybrid.modelCache });
-    return await searchLessonsHybrid(vaultRoot, opts.query ?? '', opts, {
-      index,
-      embedder,
-      vectors,
-      recallTopK: hybrid.recallTopK,
-      rrfK: hybrid.rrfK,
-      minScore: hybrid.minScore,
+  const qmdHits = await searchQmd(vaultRoot, opts.query ?? '', backend, {
+    ...(opts.category ? { categories: [opts.category] } : {}),
+    limit: opts.limit,
+  });
+  return toLessonHits(vaultRoot, qmdHits, opts);
+}
+
+async function toLessonHits(
+  vaultRoot: string,
+  qmdHits: QmdHit[],
+  opts: LessonQuery,
+): Promise<LessonHit[]> {
+  const root = libraryLessonsDir(vaultRoot);
+  const out: LessonHit[] = [];
+  for (const hit of qmdHits) {
+    if (opts.category && hit.path.split('/')[0] !== opts.category) continue;
+    let raw: string;
+    try {
+      raw = await readFile(join(root, hit.path), 'utf8');
+    } catch {
+      continue;
+    }
+    const fm = parseFrontmatter(raw);
+    const body = stripFrontmatter(raw) ?? raw;
+    const type = fm?.type ?? '';
+    if (opts.type && type !== opts.type && !type.startsWith(`${opts.type}/`)) continue;
+    if (opts.since && fm?.updatedAt && Date.parse(fm.updatedAt) < opts.since) continue;
+    out.push({
+      path: hit.path,
+      title: fm?.title || hit.title || basename(hit.path),
+      type,
+      tags: fm?.tags ?? [],
+      ...(fm?.updatedAt ? { updatedAt: fm.updatedAt } : {}),
+      ...(fm?.id ? { id: fm.id } : {}),
+      ...(fm?.scope ? { scope: fm.scope } : {}),
+      // 片段从正文里取：qmd 的分片带着 frontmatter，直接展示会像一条坏记录。
+      snippet: snippetAround(body, opts.query ?? '') || clip(body, 160),
+      score: hit.score,
+      scoreParts: { bm25: hit.score, recency: 0, exact: 0, project: 0 },
     });
-  } finally {
-    vectors.close();
   }
+  return out;
 }
 
 /** 记录使用事件;写失败静默忽略,绝不拖垮检索。 */

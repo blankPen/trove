@@ -155,16 +155,18 @@ describe('runLessonPipelineV2(端到端)', () => {
     expect(decisions.some((d) => d.stage === 'identity' && d.gate === 'C')).toBe(true);
   });
 
-  it('shadow:只写审计 + 决策,不写记忆与轨迹', async () => {
+  it('shadow:只写 .shadow.json 审计 + 决策,不写记忆/轨迹/标准审计', async () => {
     const r = await runLessonPipelineV2('sess-1', deps('shadow', llmFor([EXPERIENCE]), jevAllHigh()));
 
     expect(r.shadow).toBe(true);
     const files = await storage.list();
     expect(files.some((f) => f.startsWith('experiences/'))).toBe(false);
     expect(files.some((f) => f.startsWith('trajectories/'))).toBe(false);
-    expect(await storage.exists('audit/sess-1.json')).toBe(true);
+    expect(await storage.exists('audit/sess-1.shadow.json')).toBe(true);
+    expect(await storage.exists('audit/sess-1.json')).toBe(false);
+    expect(await storage.exists('memory_diff.json')).toBe(false);
 
-    const audit = JSON.parse((await storage.read('audit/sess-1.json'))!);
+    const audit = JSON.parse((await storage.read('audit/sess-1.shadow.json'))!);
     expect(audit.v2.shadow).toBe(true);
     expect(audit.summary.skips).toBe(1);
     expect(audit.operations.skips[0].reason).toBe('shadow:add');

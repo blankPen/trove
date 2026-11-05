@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch } from '../../../src/core/lessons/learn.js';
+import { loadSessionEvents, runLessonExtraction, learnPendingBatch, learnRecentBatch, recentUnlearnedKeys } from '../../../src/core/lessons/learn.js';
 import { readLearnQueue, enqueueLearn } from '../../../src/core/lessons/queue.js';
 import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
 import { libraryDir, libraryLessonsDir, safeSessionName } from '../../../src/core/layout.js';
@@ -343,7 +343,8 @@ describe('runLessonExtraction · v2 路由', () => {
     const files = await storage.list();
     expect(files.some((f) => f.startsWith('experiences/') && !f.startsWith('experiences/.'))).toBe(false);
     expect(files.some((f) => f.startsWith('trajectories/'))).toBe(false);
-    expect(await storage.read('audit/s-1.json')).not.toBeNull();
+    expect(await storage.read('audit/s-1.shadow.json')).not.toBeNull();
+    expect(await storage.read('audit/s-1.json')).toBeNull();
   });
 
   it('v2 下 LLM 抛 LlmParseError → skipReason llm_parse_failed 且写 skipped 标记', async () => {
@@ -362,6 +363,28 @@ describe('runLessonExtraction · v2 路由', () => {
 });
 
 describe('learnRecentBatch 手动批量学习', () => {
+  const learnCfg = (mode: 'shadow' | 'auto') => ({
+    learn: { v2: true, mode, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } },
+  });
+
+  it('recentUnlearnedKeys:shadow 模式把 .shadow.json 视为已处理,不重复入列', async () => {
+    const e1 = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', e1);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: e1, startedAt: '2026-01-01T00:00:00.000Z' }]);
+    await storage.write('audit/claude-code:s-1.shadow.json', '{}');
+
+    expect(await recentUnlearnedKeys(vault, 10, learnCfg('shadow'))).toEqual([]);
+  });
+
+  it('recentUnlearnedKeys:auto 模式忽略 .shadow.json,会话可真正补学', async () => {
+    const e1 = sampleEvents('s-1');
+    await writeSession('claude-code', 's-1', e1);
+    await writeIndex([{ harness: 'claude-code', session: 's-1', events: e1, startedAt: '2026-01-01T00:00:00.000Z' }]);
+    await storage.write('audit/claude-code:s-1.shadow.json', '{}');
+
+    expect(await recentUnlearnedKeys(vault, 10, learnCfg('auto'))).toEqual(['claude-code:s-1']);
+  });
+
   it('按 startedAt 降序取最近 N 个未学习会话,超出部分不学', async () => {
     const e1 = sampleEvents('s-1');
     const e2 = sampleEvents('s-2');

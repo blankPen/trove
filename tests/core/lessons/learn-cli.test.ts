@@ -199,6 +199,19 @@ describe('trove learn --list(Stage 8 查看命令)', () => {
     expect(code).toBe(0);
     expect(lines.join('\n')).toContain('尚无提取记录');
   });
+
+  it('--session 指定会话且标准 diff 不存在时回退展示 shadow diff', async () => {
+    const diff = buildMemoryDiff(
+      [{ op: 'skip', type: 'experiences/foo', title: '候选', reason: 'shadow:add' }],
+      { sessionId: 'sess-1', project: 'proj' },
+    );
+    await storage.write('audit/sess-1.shadow.json', JSON.stringify(diff, null, 2));
+
+    const code = await runLearn(['learn', '--list', '--session', 'sess-1']);
+
+    expect(code).toBe(0);
+    expect(lines.join('\n')).toContain('跳过: 候选（shadow:add）');
+  });
 });
 
 describe('trove learn <session-id>(Stage 9 单会话提取命令)', () => {

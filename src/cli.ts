@@ -56,7 +56,7 @@ import { defaultResolveAdapters, loadRuntime } from './runtime.js';
 import { startServer } from './server/index.js';
 import { createConsoleProgress } from './progress-console.js';
 import { silentProgress } from './progress.js';
-import { formatDiff, readLatestDiff, readSessionDiff } from './core/lessons/audit.js';
+import { formatDiff, readLatestDiff, readSessionDiff, readShadowDiff } from './core/lessons/audit.js';
 import { LocalStorageAdapter } from './core/lessons/storage.js';
 import { refreshSidecars } from './core/lessons/sidecar.js';
 import { runLessonExtraction, learnPendingBatch, learnRecentBatch } from './core/lessons/learn.js';
@@ -706,7 +706,9 @@ async function cmdLearnList(
   out: (l: string) => void,
 ): Promise<void> {
   const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
-  const diff = sessionId ? await readSessionDiff(storage, sessionId) : await readLatestDiff(storage);
+  const diff = sessionId
+    ? (await readSessionDiff(storage, sessionId)) ?? (await readShadowDiff(storage, sessionId))
+    : await readLatestDiff(storage);
   out(diff ? formatDiff(diff) : sessionId ? `无会话 ${sessionId} 的提取记录` : '尚无提取记录');
 }
 

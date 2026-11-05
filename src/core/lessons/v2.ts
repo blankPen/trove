@@ -221,7 +221,8 @@ export async function runLessonPipelineV2(
   if (shadow) {
     const skipOps: MemoryOp[] = ops.map((op) => ({ op: 'skip', type: op.type, title: op.op === 'append' ? op.path : op.title, reason: `shadow:${op.op}` }));
     const diff = { ...buildMemoryDiff(skipOps, { sessionId, project }), v2 };
-    await writeMemoryDiff(diff, deps.storage);
+    // 只落 .shadow.json:不占「已学习」标记,切 auto 后同一会话仍可真正补学。
+    await deps.storage.write(`audit/${sessionId}.shadow.json`, JSON.stringify(diff, null, 2));
     await decisionTail;
     return { diff, shadow: true };
   }

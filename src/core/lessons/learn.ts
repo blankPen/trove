@@ -214,9 +214,14 @@ export async function learnPendingBatch(
 }
 
 /** 从统一索引按 startedAt 降序取最多 limit 个「未学习」会话 key(harness:session)。 */
-async function recentUnlearnedKeys(vaultRoot: string, limit: number): Promise<string[]> {
+export async function recentUnlearnedKeys(
+  vaultRoot: string,
+  limit: number,
+  config?: Pick<Config, 'learn'>,
+): Promise<string[]> {
   const index = (await loadLibraryIndex(vaultRoot)) ?? (await rebuildUnifiedIndex(vaultRoot));
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  const shadow = readLearnConfig(config).mode === 'shadow';
   const entries = Object.values(index.sessions).sort((a, b) =>
     (b.startedAt ?? '') > (a.startedAt ?? '') ? 1 : -1,
   );
@@ -224,13 +229,16 @@ async function recentUnlearnedKeys(vaultRoot: string, limit: number): Promise<st
   for (const s of entries) {
     const key = `${s.harness}:${s.session}`;
     // 已成功(.json)或已失败(.failed.json)都算已处理;双形式兜底历史裸 session 落盘。
+    // .shadow.json 是 shadow 观察轮的审计:仅 shadow 模式算已处理,auto 忽略以真正补学。
     const handled =
       (await storage.exists(`audit/${key}.json`)) ||
       (await storage.exists(`audit/${s.session}.json`)) ||
       (await storage.exists(`audit/${key}.failed.json`)) ||
       (await storage.exists(`audit/${s.session}.failed.json`)) ||
       (await storage.exists(`audit/${key}.skipped.json`)) ||
-      (await storage.exists(`audit/${s.session}.skipped.json`));
+      (await storage.exists(`audit/${s.session}.skipped.json`)) ||
+      (shadow && (await storage.exists(`audit/${key}.shadow.json`))) ||
+      (shadow && (await storage.exists(`audit/${s.session}.shadow.json`)));
     if (!handled) keys.push(key);
     if (keys.length >= limit) break;
   }
@@ -244,7 +252,7 @@ export async function learnRecentBatch(
   deps: LessonProviderDeps = {},
   opts: { log?: (line: string) => void } = {},
 ): Promise<string> {
-  const keys = await recentUnlearnedKeys(vaultRoot, limit);
+  const keys = await recentUnlearnedKeys(vaultRoot, limit, deps.config);
   if (keys.length === 0) return '没有可学习的会话(都已学习或索引为空)';
 
   // 缺配置在此抛出,与单条 `trove learn <id>` 一致,不静默吞掉手动触发的错误。

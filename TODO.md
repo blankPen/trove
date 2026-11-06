@@ -2,6 +2,8 @@
 
 ## 待办
 
+- [ ] **检索层换 qmd + Qwen3-Embedding-0.6B**（已定案，见 [诊断与改造方案](docs/superpowers/specs/2026-11-06-trove-learning-retrieval-upgrade.md) §7.1）：删除现有 bge（`Xenova/bge-small-zh-v1.5`）与 `@huggingface/transformers` 依赖，`searchLessons()` 内部换成 qmd 的完整管线（BM25 + 向量 + 查询扩展 + HyDE + 重排）。注意模型下载须带 `HF_ENDPOINT=https://hf-mirror.com`。
+- [ ] **学习沉淀三层改造**（见 [诊断与改造方案](docs/superpowers/specs/2026-11-06-trove-learning-retrieval-upgrade.md) §6）：L0 在场信号抽取 → L1 主题级沉淀与增量更新 → L2 关联图谱；目标是单会话 token 从 9.6 万降到 1~2 万，并消灭「同一主题被重复沉淀最多 50 次」的问题（根因：`src/core/lessons/gateway.ts:195` 无 Jev 时 Gate C 恒返回 `add`）。
 - [ ] **web 界面**（设计已定，见 [规格](docs/superpowers/specs/2026-11-04-trove-web-ui.md)）：`trove web` 起本地服务 + `web/` 独立 React 前端，五个页签（总览 / 会话 / 沉淀 / 技能 / 用量），v1 内容只读，只提供同步与 daemon 运维操作
 - [x] 参考 [分层架构方案](https://feishu.doubao.com/docx/WoxKd0aeroqotexUoLgctahHnxI) 完成分层架构改造与验证
 - [x] 优化 sync 策略：远端模式改为可配置（可选），不配置时仅做本地 `.trove` 目录同步（需相应改动 `init` / `sync` 等逻辑流程）

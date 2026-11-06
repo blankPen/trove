@@ -200,11 +200,13 @@ trove status --json             # 机器可读概览
 
 `trove status` 报四件事：每个工具在本地归档了多少（数量和体积）、远端是否可达（5 秒探测、设备数、最后在线时间）、daemon 的状态和最近一轮结果、还剩什么没同步（按会话 / 文件 / 技能分类计数）。
 
-### 本地向量检索
+### 本地混合检索（qmd）
 
-lessons 检索是混合的：SQLite FTS5 + BM25 与本地嵌入模型经 RRF（Reciprocal Rank Fusion）融合。`trove learn` 维护一份独立的向量索引（`~/.trove/cache/vectors.sqlite`），随同一批 lessons 增量构建。模型是 `Xenova/bge-small-zh-v1.5`（q8 量化、512 维），经 `@huggingface/transformers` + ONNX Runtime 本地运行；首次使用下载一次（约 90 MB）到 `~/.trove/cache/models`，仅该次下载需要联网。
+lessons 检索走 [qmd](https://github.com/tobi/qmd)：BM25 + 查询扩展 + HyDE + 本地向量 + LLM 重排，全程离线。5 个记忆类目注册成 qmd collection，共用一份索引（`~/.trove/cache/qmd.sqlite`），由 `trove learn` 增量重建。嵌入模型是 `Qwen3-Embedding-0.6B`（GGUF、q8），经 `node-llama-cpp` 本地运行；qmd 还需要它的查询扩展（1.7B）与重排（0.6B）模型，合计约 2.3 GB，首次下载到 `~/.cache/qmd/models`，仅该次下载需要联网。
 
-用 `learn.embedding` 配置：`enabled`、`model`、`host`（默认 `https://hf-mirror.com`）、`gateTopK`、`recallTopK`、`rrfK`。降级可靠：无网络、缺模型、索引为空或损坏都回退纯 FTS5，命令不会报错。
+用 `learn.search` 配置：`enabled`、`model`、`host`（作为 `HF_ENDPOINT` 的 Hugging Face 镜像，默认 `https://hf-mirror.com`）、`minScore`。降级可靠：无网络、缺模型、索引为空或损坏都回退纯 FTS5，命令不会报错。
+
+注意：混合检索要走一遍本地模型，冷查询是秒级而不是毫秒级；qmd 会缓存查询扩展，同一查询重复问会快很多。
 
 ### 给 agent 的知识库（skill + MCP）
 

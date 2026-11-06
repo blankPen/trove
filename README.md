@@ -200,11 +200,13 @@ trove status --json             # machine-readable overview
 
 `trove status` reports four things: what each tool has archived locally (count and size), whether the remote is reachable (5 s probe, device count, last seen), the daemon's state and last result, and what is still pending — sessions, files and skills by category.
 
-### Local vector search
+### Local hybrid search (qmd)
 
-Lessons search is hybrid: SQLite FTS5 + BM25 fused with a local embedding model via Reciprocal Rank Fusion (RRF). `trove learn` maintains a separate vector index (`~/.trove/cache/vectors.sqlite`), rebuilt incrementally from the same lessons. The model is `Xenova/bge-small-zh-v1.5` (q8-quantised, 512-dim), run locally through `@huggingface/transformers` with ONNX Runtime; it downloads once (~90 MB) into `~/.trove/cache/models` on first use, and only that first download needs network.
+Lessons search runs on [qmd](https://github.com/tobi/qmd): BM25 + query expansion + HyDE + local vectors + LLM reranking, all offline. The five lesson categories are registered as qmd collections under one index (`~/.trove/cache/qmd.sqlite`), rebuilt incrementally by `trove learn`. The embedding model is `Qwen3-Embedding-0.6B` (GGUF, q8), run locally through `node-llama-cpp`; qmd also needs its query-expansion (1.7B) and reranker (0.6B) models — about 2.3 GB, downloaded once into `~/.cache/qmd/models`. Only that first download needs network.
 
-Tune it under `learn.embedding` — `enabled`, `model`, `host` (default `https://hf-mirror.com`), `gateTopK`, `recallTopK`, `rrfK`. It degrades gracefully: no network, missing model, or an empty/corrupt index all fall back to pure FTS5, so commands never error.
+Tune it under `learn.search` — `enabled`, `model`, `host` (the Hugging Face mirror used as `HF_ENDPOINT`, default `https://hf-mirror.com`), `minScore`. It degrades gracefully: no network, missing model, or an empty/corrupt index all fall back to pure FTS5, so commands never error.
+
+Note: hybrid retrieval is a full local model round-trip, so a cold query takes seconds, not milliseconds; qmd caches query expansions, so repeats of the same query are much faster.
 
 ### Knowledge base for agents (skill + MCP)
 

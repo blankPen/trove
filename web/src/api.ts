@@ -196,7 +196,7 @@ export interface MemoryHealth {
   trustLevel: number;
   usage: { retrieved: number; viewed: number; helpful: number; harmful: number; last7d: number };
   jobs?: { queued: number; running: number; retry: number; dead: number } | null;
-  vectors: { count: number; model?: string } | null;
+  searchIndex: { documents: number; needsEmbedding: number } | null;
 }
 
 async function get<T>(path: string): Promise<T> {

@@ -2,7 +2,14 @@ packages:
   - web
 
 allowBuilds:
+  better-sqlite3: true
   esbuild: true
   fast-xml-parser: true
-  onnxruntime-node: false
+  node-llama-cpp: true
   protobufjs: false
+  sqlite-vec: true
+  tree-sitter-go: false
+  tree-sitter-javascript: false
+  tree-sitter-python: false
+  tree-sitter-rust: false
+  tree-sitter-typescript: false

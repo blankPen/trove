@@ -99,7 +99,7 @@ describe('config(设计 §10.2)', () => {
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
       lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
       capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
-      embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60, minScore: 0.6 },
+      search: { enabled: true, model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf', host: 'https://hf-mirror.com', minScore: 0 },
     });
 
     // 老配置没有 learn 字段 → 补默认
@@ -123,7 +123,7 @@ describe('config(设计 §10.2)', () => {
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
       lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
       capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
-      embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60, minScore: 0.6 },
+      search: { enabled: true, model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf', host: 'https://hf-mirror.com', minScore: 0 },
     });
   });
 
@@ -184,8 +184,7 @@ describe('paths(设计 §6.1)', () => {
     expect(p.state).toBe('/Users/pz/.trove/state.json');
     expect(p.logs).toBe('/Users/pz/.trove/logs');
     expect(p.tmp).toBe('/Users/pz/.trove/tmp');
-    expect(p.vectorDb).toBe('/Users/pz/.trove/cache/vectors.sqlite');
-    expect(p.modelCache).toBe('/Users/pz/.trove/cache/models');
+    expect(p.qmdDb).toBe('/Users/pz/.trove/cache/qmd.sqlite');
   });
 
   it('未指定 base 时默认 ~/.trove', () => {

@@ -6,8 +6,6 @@ import type { LearnConfig } from '../../config.js';
 import type { DecisionGateway, CandidateForGate, ExistingForGate } from './gateway.js';
 import type { EvidenceRef, MemoryKind, MemoryStatus, QualityScore } from './memory.js';
 import { idPrefix, inferKind, newMemoryId } from './memory.js';
-import type { Embedder } from './embedding.js';
-import type { VectorIndex } from './vector-index.js';
 
 export interface ExistingMemory {
   type: string;
@@ -129,10 +127,6 @@ export interface V2MergeDeps {
   gateway: DecisionGateway;
   llm: LlmProvider;
   learn: LearnConfig;
-  /** 可选向量粗筛：候选编码 → 与库内向量余弦 top-K，与标题 2-gram 取并集（上限 5）。 */
-  embedder?: Embedder;
-  vectorIndex?: VectorIndex;
-  gateTopK?: number;
 }
 
 export async function mergeMemoriesV2(
@@ -150,7 +144,7 @@ export async function mergeMemoriesV2(
 
 async function resolveV2(c: MemoryCandidateV2, existing: ExistingForGate[], deps: V2MergeDeps): Promise<MemoryOp | null> {
   const gate: CandidateForGate = { type: c.type, title: c.title, content: c.content, evidence: c.evidence };
-  const top = await topSimilarV2(gate, c.scope, existing, deps);
+  const top = topSimilarV2(gate, c.scope, existing);
   let identity = await deps.gateway.resolveIdentity(gate, top);
   if (identity.decision === 'escalate') {
     // 边界带交 LLM 身份裁决;失败回退 add(非破坏性)
@@ -240,40 +234,13 @@ function topSimilar(c: CandidateForGate, scope: string | undefined, existing: Ex
     .map((x) => x.e);
 }
 
-/** Gate C 向量粗筛：向量结果优先，标题 2-gram 补齐，并集上限 5；无向量/失败回退标题逻辑。 */
-async function topSimilarV2(
+/** Gate C 粗筛：按标题 2-gram 取近邻（上限 5）。向量粗筛随 bge 方案一起下线。 */
+function topSimilarV2(
   c: CandidateForGate,
   scope: string | undefined,
   existing: ExistingForGate[],
-  deps: V2MergeDeps,
-): Promise<ExistingForGate[]> {
-  const titleTop = topSimilar(c, scope, existing);
-  if (!deps.embedder || !deps.vectorIndex) return titleTop;
-  try {
-    const [qv] = await deps.embedder.encode([c.content]);
-    if (!qv) return titleTop;
-    const eligible = existing.filter((e) => e.type === c.type && scopeCompatible(scope, e.scope));
-    const byPath = new Map(eligible.map((e) => [e.path, e]));
-    const merged: ExistingForGate[] = [];
-    const seen = new Set<string>();
-    for (const h of deps.vectorIndex.search(qv, deps.gateTopK ?? 5)) {
-      const e = byPath.get(h.path);
-      if (e && !seen.has(e.path)) {
-        merged.push(e);
-        seen.add(e.path);
-      }
-    }
-    for (const e of titleTop) {
-      if (!seen.has(e.path)) {
-        merged.push(e);
-        seen.add(e.path);
-        if (merged.length >= 5) break;
-      }
-    }
-    return merged.slice(0, 5);
-  } catch {
-    return titleTop;
-  }
+): ExistingForGate[] {
+  return topSimilar(c, scope, existing);
 }
 
 /** scope 兼容:相同,或任一方缺失/global(旧 global 可被任意项目合并)。 */

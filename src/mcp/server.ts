@@ -10,7 +10,7 @@ import {
   listLessons,
   searchLessons,
   searchSessions,
-  type SearchHybridConfig,
+  type SearchBackendConfig,
 } from '../core/search/service.js';
 import {
   formatLesson,
@@ -27,8 +27,8 @@ export interface McpOptions {
   cacheDir: string;
   version: string;
   now?: () => number;
-  /** 混合召回配置;缺省纯 FTS。 */
-  hybrid?: SearchHybridConfig;
+  /** 检索后端配置;缺省纯 FTS。 */
+  backend?: SearchBackendConfig;
 }
 
 function textResult(text: string): { content: Array<{ type: 'text'; text: string }> } {
@@ -111,7 +111,7 @@ export function createMcpServer(opts: McpOptions): McpServer {
             ...(args.limit ? { limit: args.limit } : {}),
             cwd: process.cwd(),
           },
-          opts.hybrid,
+          opts.backend,
         );
         return textResult(formatLessonHits(hits));
       } catch (err) {

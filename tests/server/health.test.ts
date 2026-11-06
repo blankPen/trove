@@ -134,9 +134,9 @@ describe('buildMemoryHealth', () => {
     expect(h.trustLevel).toBe(0);
   });
 
-  it('无 jobs/vectors 缓存时不报错,返回 null', async () => {
+  it('无 jobs/检索索引 缓存时不报错,返回 null', async () => {
     const h = await buildMemoryHealth(trovePaths(base), () => NOW);
     expect(h.jobs).toBeNull();
-    expect(h.vectors).toBeNull();
+    expect(h.searchIndex).toBeNull();
   });
 });

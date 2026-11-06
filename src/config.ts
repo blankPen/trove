@@ -80,19 +80,14 @@ export interface LearnLifecycleConfig {
   trajectoryMax: number;
 }
 
-/** 本地向量检索配置（A5）：bge-small-zh + RRF 混合召回。 */
-export interface LearnEmbeddingConfig {
+/** 本地检索后端配置：qmd 混合检索（BM25 + 向量 + 查询扩展 + 重排）。 */
+export interface LearnSearchConfig {
   enabled: boolean;
+  /** 嵌入模型 URI（hf:<repo>/<file>）。 */
   model: string;
-  /** 模型下载镜像；可用 learn.embedding.host 覆盖。 */
+  /** 模型下载镜像（HF_ENDPOINT）；可用 learn.search.host 覆盖。 */
   host: string;
-  /** Gate C 向量粗筛候选数。 */
-  gateTopK: number;
-  /** 混合召回里向量侧召回数。 */
-  recallTopK: number;
-  /** RRF 融合常数 k。 */
-  rrfK: number;
-  /** 向量召回最低余弦相似度;低于此值不进入融合,避免短问句硬凑无关结果。 */
+  /** 最低命中分；低于此分不返回（0 = 不过滤）。 */
   minScore: number;
 }
 
@@ -113,7 +108,7 @@ export interface LearnConfig {
   jev: { maxCallsPerSession: number; timeoutMs: number };
   lifecycle: LearnLifecycleConfig;
   capacity: CapacityConfig;
-  embedding: LearnEmbeddingConfig;
+  search: LearnSearchConfig;
 }
 
 /** learn 默认值,`defaultConfig` 与 `readLearnConfig` 共用,避免重复字面量。 */
@@ -129,7 +124,12 @@ export function defaultLearnConfig(): LearnConfig {
     jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
     lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
     capacity: { ...DEFAULT_CAPACITY },
-    embedding: { enabled: true, model: 'Xenova/bge-small-zh-v1.5', host: 'https://hf-mirror.com', gateTopK: 5, recallTopK: 10, rrfK: 60, minScore: 0.6 },
+    search: {
+      enabled: true,
+      model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf',
+      host: 'https://hf-mirror.com',
+      minScore: 0,
+    },
   };
 }
 
@@ -226,7 +226,7 @@ export function normalizeLearn(learn: unknown): LearnConfig {
   const j = (l.jev ?? {}) as Record<string, unknown>;
   const c = (l.lifecycle ?? {}) as Record<string, unknown>;
   const cap = (l.capacity ?? {}) as Record<string, unknown>;
-  const e = (l.embedding ?? {}) as Record<string, unknown>;
+  const s = (l.search ?? {}) as Record<string, unknown>;
   return {
     mode: normalizeLearnMode(l.mode),
     autoMigrate: l.autoMigrate !== false,
@@ -255,14 +255,11 @@ export function normalizeLearn(learn: unknown): LearnConfig {
       profileBytes: num(cap.profileBytes, d.capacity.profileBytes),
       entitiesPerType: num(cap.entitiesPerType, d.capacity.entitiesPerType),
     },
-    embedding: {
-      enabled: e.enabled !== false,
-      model: strNonEmpty(e.model, d.embedding.model),
-      host: strNonEmpty(e.host, d.embedding.host),
-      gateTopK: num(e.gateTopK, d.embedding.gateTopK),
-      recallTopK: num(e.recallTopK, d.embedding.recallTopK),
-      rrfK: num(e.rrfK, d.embedding.rrfK),
-      minScore: num(e.minScore, d.embedding.minScore),
+    search: {
+      enabled: s.enabled !== false,
+      model: strNonEmpty(s.model, d.search.model),
+      host: strNonEmpty(s.host, d.search.host),
+      minScore: Math.max(0, num(s.minScore, d.search.minScore)),
     },
   };
 }

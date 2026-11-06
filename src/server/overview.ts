@@ -53,7 +53,7 @@ export async function buildOverview(opts: {
     deviceName: config.device.name,
     adapters,
   });
-  const libraryPending = await computeLibraryPending(paths.vault, state);
+  const libraryPending = await computeLibraryPending(paths.vault, state, config.device.id);
   const usage = summarizeUsage(usageRecords);
 
   return {

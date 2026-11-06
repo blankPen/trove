@@ -45,6 +45,24 @@ function toKey(path: string): string {
   return strip(path);
 }
 
+/** ListObjectsV2 的 XML 只转义这 5 个实体;key/prefix/token 都必须还原后再用。 */
+function xmlUnescape(s: string): string {
+  return s.replace(/&(amp|lt|gt|quot|apos);/g, (_m, entity: string) => {
+    switch (entity) {
+      case 'amp':
+        return '&';
+      case 'lt':
+        return '<';
+      case 'gt':
+        return '>';
+      case 'quot':
+        return '"';
+      default:
+        return "'";
+    }
+  });
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -263,20 +281,21 @@ export class S3Store implements RemoteStore {
         const size = Number(/<Size>(\d+)<\/Size>/.exec(m[1]!)?.[1] ?? '0');
         const modified = /<LastModified>([\s\S]*?)<\/LastModified>/.exec(m[1]!)?.[1];
         const mtime = modified ? Date.parse(modified) : NaN;
-        out.push({ key, size, isDir: false, ...(Number.isFinite(mtime) ? { mtime } : {}) });
+        out.push({ key: xmlUnescape(key), size, isDir: false, ...(Number.isFinite(mtime) ? { mtime } : {}) });
       }
 
       const prefixRe = /<CommonPrefixes>([\s\S]*?)<\/CommonPrefixes>/g;
       while ((m = prefixRe.exec(xml))) {
         const p = /<Prefix>([\s\S]*?)<\/Prefix>/.exec(m[1]!)?.[1];
         if (!p) continue;
-        out.push({ key: p, size: 0, isDir: true });
+        out.push({ key: xmlUnescape(p), size: 0, isDir: true });
       }
 
       const truncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
       token = truncated
-        ? /<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/.exec(xml)?.[1]
+        ? xmlUnescape(/<NextContinuationToken>([\s\S]*?)<\/NextContinuationToken>/.exec(xml)?.[1] ?? '')
         : undefined;
+      if (token === '') token = undefined;
     } while (token);
     return out;
   }

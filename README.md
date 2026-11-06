@@ -13,7 +13,7 @@
 then merged into a personal library that follows you across every device you own.
 
 [![Release](https://img.shields.io/npm/v/trove-cli?label=release&color=111111)](https://www.npmjs.com/package/trove-cli) [![Stars](https://img.shields.io/github/stars/blankPen/trove?style=flat&color=111111)](https://github.com/blankPen/trove/stargazers) [![License](https://img.shields.io/badge/license-MIT-111111)](LICENSE)<br>
-![Node.js](https://img.shields.io/badge/Node.js-22%2B-000000?logo=node.js&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black) ![Windows](https://img.shields.io/badge/Windows-0078D4?logo=windows&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-22.13%2B-000000?logo=node.js&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black) ![Windows](https://img.shields.io/badge/Windows-0078D4?logo=windows&logoColor=white)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -47,7 +47,7 @@ npm i -g trove-cli      # provides the `trove` command
 npx trove-cli --help    # or try it without installing
 ```
 
-The unscoped `trove` name on npm belongs to another package, so this one publishes as **`trove-cli`**; the command itself is still `trove`. Node.js 22 or newer.
+The unscoped `trove` name on npm belongs to another package, so this one publishes as **`trove-cli`**; the command itself is still `trove`. Node.js 22.13 or newer (`node:sqlite` needs no experimental flag from that version on).
 
 **2 · Point it at a remote.** Run the interactive setup and it will ask what kind of remote you have, then the fields that kind needs:
 

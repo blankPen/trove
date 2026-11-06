@@ -282,3 +282,80 @@ describe('pullLibrary 下载校验失败容错', () => {
     expect(existsSync(shardAbs)).toBe(false);
   });
 });
+
+describe('pullLibrary 远端路径信任边界', () => {
+  it('分片里的穿越路径被跳过,不会写出 vault', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-evil-'));
+    const outside = join(tmpdir(), `trove-evil-session-${Date.now()}.jsonl`);
+    const remote = new MemoryRemote();
+    const evil = `../../${outside.split('/').pop()}`;
+    remote.files.set(`library/${evil}`, Buffer.from('evil-remote'));
+    const shard: IndexShard = {
+      v: 1,
+      device: 'dev1',
+      mapper: 'claude-code',
+      updatedAt: '2026-10-23T00:00:00.000Z',
+      sessions: {
+        'claude-code:evil': {
+          device: 'dev1',
+          path: evil,
+          hash: sha('evil-remote'),
+          events: 1,
+          rawSources: [],
+        },
+      },
+      skills: {},
+    };
+    await remote.writeJson('library/index/dev1.json', shard);
+
+    const r = await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state: emptyState() });
+
+    expect(r.downloaded).toBe(0);
+    expect(existsSync(outside)).toBe(false);
+    // 分片落盘时剔除非法条目,统一索引不会引用它
+    const local = JSON.parse(
+      await readFile(join(vault, 'library', 'index', 'dev1.json'), 'utf8'),
+    ) as IndexShard;
+    expect(local.sessions).toEqual({});
+  });
+
+  it('技能版本里的穿越路径被跳过', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-evil-skill-'));
+    const outsideName = `trove-evil-skill-${Date.now()}.txt`;
+    const outside = join(tmpdir(), outsideName);
+    const remote = new MemoryRemote();
+    const shard: IndexShard = {
+      v: 1,
+      device: 'dev1',
+      mapper: 'claude-code',
+      updatedAt: '2026-10-23T00:00:00.000Z',
+      sessions: {},
+      skills: { evil: { name: 'evil', hash: 'h', source: 'self', files: [] } },
+    };
+    await remote.writeJson('library/index/dev1.json', shard);
+    remote.files.set(
+      'library/skills/evil/meta/every.json',
+      Buffer.from(JSON.stringify({ versions: [{ hash: 'v1', files: [{ rel: `../../../../../../${outsideName}` }] }] })),
+    );
+    remote.files.set(
+      `library/skills/evil/versions/v1/../../../../../../${outsideName}`,
+      Buffer.from('evil-remote'),
+    );
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state: emptyState() });
+
+    expect(existsSync(outside)).toBe(false);
+  });
+
+  it('lessons 远端文件名单里的穿越路径被跳过', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-evil-lesson-'));
+    const outsideName = `trove-evil-lesson-${Date.now()}.md`;
+    const outside = join(tmpdir(), outsideName);
+    const remote = new MemoryRemote();
+    remote.files.set(`library/lessons/../../../${outsideName}`, Buffer.from('evil-remote'));
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
+
+    expect(existsSync(outside)).toBe(false);
+  });
+});

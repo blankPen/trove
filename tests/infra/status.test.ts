@@ -114,13 +114,18 @@ describe('computeLibraryPending', () => {
       'skills/review/versions/hash/SKILL.md',
       'index/dev1.json',
     ];
-    for (const rel of files) {
+    // 他设备的文件不是本设备要推的内容,不计入待同步
+    const foreign = [
+      'sessions/claude-code/sess2/dev2.jsonl',
+      'index/dev2.json',
+    ];
+    for (const rel of [...files, ...foreign]) {
       await mkdir(join(vault, 'library', ...rel.split('/').slice(0, -1)), { recursive: true });
       await writeFile(join(vault, 'library', ...rel.split('/')), 'x'.repeat(5));
     }
     const state = emptyState();
 
-    const r = await computeLibraryPending(vault, state);
+    const r = await computeLibraryPending(vault, state, 'dev1');
 
     expect(r).toEqual({
       sessions: { count: 1, files: 1, bytes: 5 },
@@ -133,7 +138,7 @@ describe('computeLibraryPending', () => {
       const st = await stat(join(vault, 'library', ...rel.split('/')));
       state.library.pushed[rel] = { size: st.size, mtimeMs: Math.round(st.mtimeMs) };
     }
-    expect(await computeLibraryPending(vault, state)).toEqual({
+    expect(await computeLibraryPending(vault, state, 'dev1')).toEqual({
       sessions: { count: 0, files: 0, bytes: 0 },
       skills: { count: 0, files: 0, bytes: 0 },
       index: { files: 0, bytes: 0 },

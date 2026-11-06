@@ -118,6 +118,7 @@ export function computeStatus(opts: StatusOptions): StatusReport {
 export async function computeLibraryPending(
   vaultRoot: string,
   state: State,
+  deviceId: string,
 ): Promise<PendingLibrary> {
   const root = libraryDir(vaultRoot);
   const sessionKeys = new Set<string>();
@@ -128,7 +129,7 @@ export async function computeLibraryPending(
     index: { files: 0, bytes: 0 },
   };
 
-  for (const rel of await listLibraryFiles(vaultRoot)) {
+  for (const rel of await listLibraryFiles(vaultRoot, deviceId)) {
     const st = await stat(join(root, ...rel.split('/')));
     const prev = state.library.pushed[rel];
     if (prev && prev.size === st.size && prev.mtimeMs === Math.round(st.mtimeMs)) continue;

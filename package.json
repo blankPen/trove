@@ -16,14 +16,15 @@
     "url": "git+https://github.com/blankPen/trove.git"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && pnpm --dir web build",
     "postbuild": "chmod +x dist/main.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:e2e": "pnpm build && playwright test",
     "test:watch": "vitest"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",

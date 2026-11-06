@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { request } from 'node:http';
 import { startServer, type RunningServer } from '../../src/server/index.js';
 import { trovePaths } from '../../src/paths.js';
 import { defaultConfig } from '../../src/config.js';
@@ -107,4 +108,47 @@ describe('trove web API · 运维', () => {
     expect(text).toContain('event: error');
     expect(text).toContain('远端不可达');
   });
+
+  it('跨来源 POST 被拒绝,不会触发运维动作', async () => {
+    const res = await fetch(`${server.url}/api/daemon/restart`, {
+      method: 'POST',
+      headers: { origin: 'https://evil.example' },
+    });
+    expect(res.status).toBe(403);
+    expect(daemonRestarts).toBe(0);
+  });
+
+  it('同源 POST 照常放行', async () => {
+    const res = await fetch(`${server.url}/api/daemon/restart`, {
+      method: 'POST',
+      headers: { origin: server.url },
+    });
+    expect(res.status).toBe(200);
+    expect(daemonRestarts).toBe(1);
+  });
+
+  it('Host 不是回环地址的请求被拒绝(DNS rebinding)', async () => {
+    const status = await rawGetStatus(`${server.url}/api/daemon`, {
+      host: `evil.example:${server.port}`,
+    });
+    expect(status).toBe(403);
+  });
 });
+
+function rawGetStatus(
+  url: string,
+  headers: Record<string, string>,
+): Promise<number> {
+  const u = new URL(url);
+  return new Promise((resolve, reject) => {
+    const req = request(
+      { hostname: u.hostname, port: u.port, path: u.pathname, method: 'GET', headers },
+      (res) => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode ?? 0));
+      },
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}

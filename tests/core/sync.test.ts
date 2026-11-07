@@ -1,10 +1,10 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { sync } from '../../src/core/sync.js';
 import { loadState, saveState } from '../../src/core/state.js';
-import { indexPath, metaPath, type DeviceIndex } from '../../src/core/remote-layout.js';
+import { indexPath, indexStampPath, metaPath, type DeviceIndex } from '../../src/core/remote-layout.js';
 import type { Adapter } from '../../src/adapters/index.js';
 import type { Progress } from '../../src/progress.js';
 import { MemoryRemote } from '../helpers/memory-remote.js';
@@ -81,6 +81,17 @@ describe('sync(collect → pull → push)', () => {
     expect(report.collected.skipped).toBe(1);
     expect(report.pushed.uploadedChunks).toBe(0);
     expect(remote.writes.filter((w) => w.endsWith('.bin')).length).toBe(chunkWrites);
+  });
+
+  it('第二次同步复用本机索引缓存 → 不再读整份索引', async () => {
+    const { opts, remote } = await setup();
+    await sync(opts);
+    expect(await remote.readJson(indexStampPath('dev1'))).toMatchObject({ v: 1 });
+
+    const spy = vi.spyOn(remote, 'readJson');
+    await sync(opts);
+
+    expect(spy.mock.calls.map((c) => c[0])).not.toContain(indexPath('dev1'));
   });
 
   it('源文件增长 → 只上传新块,远端索引大小跟进', async () => {

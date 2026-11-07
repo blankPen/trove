@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { pushLibrary } from '../../../src/core/library/sync.js';
 import { emptyState, loadState } from '../../../src/core/state.js';
+import { LESSONS_STAMP_PATH, libraryStampPath } from '../../../src/core/remote-layout.js';
 import { MemoryRemote } from '../../helpers/memory-remote.js';
 
 async function fixture() {
@@ -89,7 +90,70 @@ describe('pushLibrary 断点续传', () => {
       statePath,
     });
 
-    expect(remote.writes.at(-1)).toMatch(/^library\/index\//);
+    expect(remote.writes.filter((w) => !w.endsWith('.stamp')).at(-1)).toMatch(/^library\/index\//);
+  });
+
+  it('推送后写入分片戳与 lessons 戳,重复推送不再重写', async () => {
+    const { vault, statePath } = await fixture();
+    const remote = new MemoryRemote();
+    const opts = {
+      remote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state: emptyState(),
+      statePath,
+    };
+
+    await pushLibrary(opts);
+
+    expect(await remote.readJson(libraryStampPath('dev1'))).toMatchObject({ v: 1 });
+    expect(await remote.readJson(LESSONS_STAMP_PATH)).toMatchObject({ v: 1 });
+    const stamps = remote.writes.filter((w) => w.endsWith('.stamp')).length;
+
+    await pushLibrary(opts);
+
+    expect(remote.writes.filter((w) => w.endsWith('.stamp')).length).toBe(stamps);
+  });
+
+  it('只推自己的分片,不覆盖其他设备的分片', async () => {
+    const { vault, statePath } = await fixture();
+    const otherAbs = join(vault, 'library', 'index', 'dev2.json');
+    await writeFile(otherAbs, 'x:index/dev2.json');
+    const remote = new MemoryRemote();
+
+    await pushLibrary({
+      remote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state: emptyState(),
+      statePath,
+    });
+
+    expect(remote.files.has('library/index/dev1.json')).toBe(true);
+    expect(remote.files.has('library/index/dev2.json')).toBe(false);
+  });
+
+  it('lessons 上传后戳没写成 → 下次 push 补写', async () => {
+    const { vault, statePath } = await fixture();
+    const state = emptyState();
+    const remote = new MemoryRemote();
+    const opts = {
+      remote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state,
+      statePath,
+    };
+    await pushLibrary(opts);
+    const first = (await remote.readJson(LESSONS_STAMP_PATH)) as { token: string };
+
+    // 模拟上传成功但戳写入失败:远端仍是旧戳,本地只留下 dirty 标记
+    state.library.lessonsDirty = true;
+    await pushLibrary(opts);
+
+    const second = (await remote.readJson(LESSONS_STAMP_PATH)) as { token: string };
+    expect(second.token).not.toBe(first.token);
+    expect(state.library.lessonsDirty).toBe(false);
   });
 
   it('换后端(remoteId 变了) → 忽略旧水位,整份重推', async () => {
@@ -119,7 +183,7 @@ describe('pushLibrary 断点续传', () => {
 
     expect(r.uploaded).toBe(rels.length);
     expect(r.skipped).toBe(0);
-    expect(newRemote.writes.length).toBe(rels.length);
+    expect(newRemote.writes.filter((w) => !w.endsWith('.stamp'))).toHaveLength(rels.length);
     expect(state.library.remoteId).toBe('s3:https://cos.example/bucket');
   });
 

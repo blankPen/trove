@@ -66,6 +66,15 @@ export interface LibraryState {
   /** 已拉取的 library 文件: device → path → hash */
   pulled: Record<string, Record<string, string>>;
   /**
+   * 已拉取的设备分片戳:device → hash。
+   * 与远端戳一致且本地文件齐全时,整份分片都不用再读。
+   */
+  shardStamps?: Record<string, string>;
+  /** 已应用的 lessons 目录戳;一致时跳过整轮目录列举。 */
+  lessonsToken?: string;
+  /** lessons 已上传但戳还没写成功;下次 push 必须补写,否则对端会漏拉。 */
+  lessonsDirty?: boolean;
+  /**
    * library.pushed 记录所属的远端身份。
    * 换后端后旧记录对新远端无效,否则会整体跳过上传,只剩索引分片指向不存在的文件。
    */
@@ -80,6 +89,11 @@ export interface State {
   pushed: Record<string, Record<string, PushedEntry>>;
   /** 远端设备 id → "harness:key" → 已拉取快照 */
   pulled: Record<string, Record<string, PulledEntry>>;
+  /**
+   * 远端设备索引戳:device → hash。
+   * 与远端 index.stamp 一致时整台设备无需再读 index.json。
+   */
+  indexStamps?: Record<string, string>;
   library: LibraryState;
   daemon?: DaemonStatus;
   /**
@@ -123,6 +137,7 @@ export async function loadState(path: string): Promise<State> {
     sources: parsed.sources ?? {},
     pushed: parsed.pushed ?? {},
     pulled: parsed.pulled ?? {},
+    ...(parsed.indexStamps ? { indexStamps: parsed.indexStamps } : {}),
     library: parsed.library ?? emptyLibraryState(),
     ...(parsed.daemon ? { daemon: parsed.daemon } : {}),
     ...(parsed.remoteId ? { remoteId: parsed.remoteId } : {}),

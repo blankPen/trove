@@ -1,4 +1,6 @@
-import { stat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { CHUNK_SIZE, chunkRanges, hashFile, hashRange, reusableChunks, type ChunkRef } from './chunker.js';
 import { mapLimit } from './concurrency.js';
 import { throwIfAborted } from './collect.js';
@@ -6,11 +8,14 @@ import type { State } from './state.js';
 import {
   chunkRemotePath,
   chunksHash,
+  deviceRemoteRoot,
   encodeKey,
   indexPath,
+  indexStampPath,
   itemKey,
   objectRemotePath,
   validateRelPath,
+  type ContentStamp,
   type DeviceIndex,
   type IndexItem,
 } from './remote-layout.js';
@@ -42,6 +47,47 @@ export interface PushResult {
 /** 索引检查点间隔(ms):长同步被打断最多损失一分钟的续传记录。 */
 const INDEX_CHECKPOINT_MS = 60_000;
 
+interface IndexCache {
+  stamp: ContentStamp;
+  index: DeviceIndex;
+}
+
+/** 本机索引缓存:只有本设备写自己的 index.json,戳一致时不必再 GET 整份索引。 */
+function indexCachePath(vaultRoot: string, deviceId: string): string {
+  return join(vaultRoot, '.cache', 'index', `${deviceId}.json`);
+}
+
+async function readIndexCache(path: string, deviceId: string): Promise<IndexCache | null> {
+  try {
+    const cache = JSON.parse(await readFile(path, 'utf8')) as IndexCache;
+    if (cache.stamp?.v !== 1 || !cache.index || cache.index.deviceId !== deviceId) return null;
+    if (!cache.index.items || typeof cache.index.items !== 'object') return null;
+    // 缓存文件损坏/被手改时不能拿来当远端索引用
+    if (stampOf(cache.index).hash !== cache.stamp.hash) return null;
+    return cache;
+  } catch {
+    return null;
+  }
+}
+
+async function writeIndexCache(path: string, cache: IndexCache): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tmp, JSON.stringify(cache), 'utf8');
+  await rename(tmp, path);
+}
+
+/** 与远端写入保持同一序列化,保证戳里的 hash 就是 index.json 的 hash。 */
+function stampOf(index: DeviceIndex): ContentStamp {
+  const body = JSON.stringify(index);
+  return {
+    v: 1,
+    hash: createHash('sha256').update(body).digest('hex'),
+    size: Buffer.byteLength(body),
+    updatedAt: index.updatedAt,
+  };
+}
+
 /**
  * 把本地 vault 中本设备的归档增量推到远端(块级)。
  *
@@ -59,7 +105,17 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
   const layout = remote.layoutHint?.() ?? 'chunk';
   const progress = opts.progress ?? silentProgress;
 
-  const previous = (await remote.readJson(indexPath(deviceId))) as DeviceIndex | null;
+  const cachePath = indexCachePath(vaultRoot, deviceId);
+  const dirEntries = await remote.list(deviceRemoteRoot(deviceId));
+  const indexEntry = dirEntries.find((e) => e.name === 'index.json');
+  const stamp = (await remote.readJson(indexStampPath(deviceId))) as ContentStamp | null;
+  const cache = await readIndexCache(cachePath, deviceId);
+  // shortcut: 中断可能留下"索引已写、戳未写";size 不同会回退全量读,同尺寸改写要等下次变更才发现。
+  const useCache =
+    stamp !== null && cache !== null && stamp.hash === cache.stamp.hash && indexEntry?.size === stamp.size;
+  const previous = useCache && cache
+    ? cache.index
+    : ((await remote.readJson(indexPath(deviceId))) as DeviceIndex | null);
   const index: DeviceIndex = {
     v: 1,
     deviceId,
@@ -97,7 +153,11 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
 
   const commitIndex = async () => {
     index.updatedAt = now();
+    const stamp = stampOf(index);
     await remote.writeJson(indexPath(deviceId), index);
+    // 顺序:索引 → 本地缓存 → 戳。中断最多让下一轮回退到全量读,不会用旧缓存冒充新索引
+    await writeIndexCache(cachePath, { stamp, index });
+    await remote.writeJson(indexStampPath(deviceId), stamp);
     indexChanged = false;
     lastCheckpoint = Date.now();
   };
@@ -211,6 +271,13 @@ export async function pushLocal(opts: PushOptions): Promise<PushResult> {
   }
 
   if (indexChanged) await commitIndex();
+  // 首次升级或上次中断:索引没变也补一个戳,否则对端会一直整份读索引
+  if (!indexChanged && indexEntry) {
+    const current = stampOf(index);
+    if (!stamp || stamp.hash !== current.hash || stamp.size !== indexEntry.size) {
+      await remote.writeJson(indexStampPath(deviceId), { ...current, size: indexEntry.size });
+    }
+  }
   // 记住这次推送属于哪个远端:下次换后端时,本地的复用记录会自动作废
   if (opts.remoteId) state.remoteId = opts.remoteId;
   return { uploadedChunks, uploadedBytes, uploadedItems, skippedItems };

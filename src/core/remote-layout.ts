@@ -45,6 +45,26 @@ export interface DeviceMeta {
   lastSeen: number;
 }
 
+/**
+ * 内容变更戳:与索引/分片同目录的百字节小对象。
+ * 拉取端只读它就能判断整份 JSON 是否变过,不必每轮重传完整索引。
+ */
+export interface ContentStamp {
+  v: 1;
+  /** 内容 JSON 的 sha256 */
+  hash: string;
+  /** 内容字节数;与远端对象大小对不上说明上次提交只写了一半,回退到全量读 */
+  size: number;
+  updatedAt: number;
+}
+
+/** lessons 是共享目录,戳只需要"变没变";随机 token 比整树哈希便宜。 */
+export interface TokenStamp {
+  v: 1;
+  token: string;
+  updatedAt: number;
+}
+
 export function chunksHash(chunks: readonly ChunkRef[]): string {
   return createHash('sha256').update(JSON.stringify(chunks)).digest('hex');
 }
@@ -85,6 +105,19 @@ export function deviceRemoteRoot(deviceId: string): string {
 export function indexPath(deviceId: string): string {
   return `${deviceRemoteRoot(deviceId)}/index.json`;
 }
+
+/** 索引变更戳:内容没变时拉取端只读这百字节,不读整份 index.json。 */
+export function indexStampPath(deviceId: string): string {
+  return `${deviceRemoteRoot(deviceId)}/index.stamp`;
+}
+
+/** library 分片戳;不用 .json 后缀,避免被当成分片解析或被 clean 扫描。 */
+export function libraryStampPath(deviceId: string): string {
+  return `library/index/${deviceId}.stamp`;
+}
+
+/** lessons 目录变更戳,放在 lessons 目录外,避免混进经验文件。 */
+export const LESSONS_STAMP_PATH = 'library/lessons.stamp';
 
 export function metaPath(deviceId: string): string {
   return `${deviceRemoteRoot(deviceId)}/meta.json`;

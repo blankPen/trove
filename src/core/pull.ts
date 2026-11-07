@@ -7,10 +7,13 @@ import { hashFile } from './chunker.js';
 import { throwIfAborted } from './collect.js';
 import {
   chunkRemotePath,
+  deviceRemoteRoot,
   indexPath,
+  indexStampPath,
   itemKey,
   objectRemotePath,
   validateIndexItem,
+  type ContentStamp,
   type DeviceIndex,
 } from './remote-layout.js';
 import { silentProgress, type Progress } from '../progress.js';
@@ -38,6 +41,11 @@ export interface PullResult {
 const SAFE_DEVICE = /^[A-Za-z0-9._-]+$/;
 const SAFE_HARNESS = /^[a-z0-9-]+$/;
 
+/** 本机已有推送记录:raw 以本地为权威,pull 不必再读自己的索引。 */
+function hasPushed(state: State): boolean {
+  return Object.values(state.pushed).some((bucket) => Object.keys(bucket).length > 0);
+}
+
 /**
  * 拉取其他设备的增量,重建到本地 vault(只增不删)。
  * 索引里已包含块清单,无需逐会话取清单;单条记录先写临时文件,
@@ -59,6 +67,23 @@ export async function pullRemote(opts: PullOptions): Promise<PullResult> {
   let itemNo = 0;
 
   for (const dev of devices) {
+    // 本机 raw 是权威,pull 从不覆盖自己;有推送记录时连索引都不用读
+    if (dev === deviceId && hasPushed(state)) continue;
+
+    // 先读百字节变更戳:与上次一致且索引大小对得上,整台设备都不必再读
+    const dirEntries = await remote.list(deviceRemoteRoot(dev));
+    const indexEntry = dirEntries.find((e) => e.name === 'index.json');
+    const stamp = (await remote.readJson(indexStampPath(dev))) as ContentStamp | null;
+    const knownStamp = state.indexStamps?.[dev];
+    if (
+      stamp &&
+      knownStamp === stamp.hash &&
+      indexEntry?.size === stamp.size &&
+      state.pulled[dev] !== undefined
+    ) {
+      continue;
+    }
+
     const rawIndex = await remote.readJson(indexPath(dev));
     if (!rawIndex || typeof rawIndex !== 'object') continue;
     const index = rawIndex as DeviceIndex;
@@ -180,6 +205,9 @@ export async function pullRemote(opts: PullOptions): Promise<PullResult> {
       downloadedItems++;
       progress.item(`${dev}/${item.relPath}`, itemNo, entries.length, item.size);
     }
+
+    // 整份索引处理完才记戳:中途抛错下次仍会全量读,不会漏数据
+    if (stamp) (state.indexStamps ??= {})[dev] = stamp.hash;
   }
 
   return { downloadedChunks, downloadedBytes, downloadedItems, skippedItems };

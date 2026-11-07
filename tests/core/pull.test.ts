@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { pullRemote } from '../../src/core/pull.js';
 import { emptyState } from '../../src/core/state.js';
 import {
@@ -10,6 +10,7 @@ import {
   chunksHash,
   encodeKey,
   indexPath,
+  indexStampPath,
   itemKey,
   objectRemotePath,
   type DeviceIndex,
@@ -132,6 +133,55 @@ describe('pullRemote(重建 + 增量)', () => {
     expect(r.downloadedChunks).toBe(0);
     expect(r.skippedItems).toBe(1);
     expect(remote.reads).toEqual([]);
+  });
+
+  it('索引戳未变 → 不读整份索引', async () => {
+    const root = await vault();
+    const remote = new MemoryRemote();
+    const { deviceId } = await seedRemote(remote, '0123456789');
+    const size = (await remote.list(`raw/${deviceId}`)).find((e) => e.name === 'index.json')!.size;
+    await remote.writeJson(indexStampPath(deviceId), { v: 1, hash: 'h1', size, updatedAt: 1 });
+    const o = opts(root, remote);
+    o.state.pulled[deviceId] = {};
+    o.state.indexStamps = { [deviceId]: 'h1' };
+    const spy = vi.spyOn(remote, 'readJson');
+
+    const r = await pullRemote(o);
+
+    expect(r.downloadedItems).toBe(0);
+    expect(spy.mock.calls.map((c) => c[0])).not.toContain(indexPath(deviceId));
+  });
+
+  it('索引戳变化 → 重新读索引', async () => {
+    const root = await vault();
+    const remote = new MemoryRemote();
+    const { deviceId } = await seedRemote(remote, '0123456789');
+    const size = (await remote.list(`raw/${deviceId}`)).find((e) => e.name === 'index.json')!.size;
+    await remote.writeJson(indexStampPath(deviceId), { v: 1, hash: 'h2', size, updatedAt: 1 });
+    const o = opts(root, remote);
+    o.state.pulled[deviceId] = {};
+    o.state.indexStamps = { [deviceId]: 'h1' };
+
+    const r = await pullRemote(o);
+
+    expect(r.downloadedItems).toBe(1);
+    expect(o.state.indexStamps?.[deviceId]).toBe('h2');
+  });
+
+  it('本机已有推送记录 → 不读自己的索引', async () => {
+    const root = await vault();
+    const remote = new MemoryRemote();
+    const { deviceId } = await seedRemote(remote, '0123456789');
+    const o = opts(root, remote, deviceId);
+    o.state.pushed['claude-code'] = {
+      'projects/a.jsonl': { generation: 'g1', size: 10, chunks: [], chunksHash: 'x' },
+    };
+    const spy = vi.spyOn(remote, 'readJson');
+
+    const r = await pullRemote(o);
+
+    expect(r.downloadedItems).toBe(0);
+    expect(spy.mock.calls.map((c) => c[0])).not.toContain(indexPath(deviceId));
   });
 
   it('同世代追加 → 只下载新块,本地保留已有前缀', async () => {

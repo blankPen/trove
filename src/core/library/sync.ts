@@ -1,10 +1,17 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { hashFile } from '../chunker.js';
 import { throwIfAborted } from '../collect.js';
 import { validateRelPath } from '../remote-layout.js';
 import { libraryDir, safeSessionName } from '../layout.js';
+import {
+  LESSONS_STAMP_PATH,
+  libraryStampPath,
+  type ContentStamp,
+  type TokenStamp,
+} from '../remote-layout.js';
 import { silentProgress, type Progress } from '../../progress.js';
 import type { RemoteStore } from '../../remote/store.js';
 import type { State } from '../state.js';
@@ -38,6 +45,77 @@ async function writeAtomic(path: string, data: string | Buffer): Promise<void> {
 /** 远端分片里的路径是不可信输入:绝对路径/穿越/反斜杠/NUL 一律拒绝。 */
 function safeLibraryPath(root: string, rel: string): string | null {
   return validateRelPath(rel) ? join(root, ...rel.split('/')) : null;
+}
+
+/** 内容相同就不写:避免技能 meta 每轮重写、重传。 */
+async function writeIfChanged(path: string, data: string): Promise<void> {
+  try {
+    if ((await readFile(path, 'utf8')) === data) return;
+  } catch {
+    // 不存在或读不了:照常写
+  }
+  await writeAtomic(path, data);
+}
+
+async function readLocalShard(path: string): Promise<IndexShard | null> {
+  try {
+    const shard = JSON.parse(await readFile(path, 'utf8')) as IndexShard;
+    return shard && shard.v === 1 && shard.sessions && typeof shard.sessions === 'object'
+      ? shard
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 本地分片引用的文件是否齐全:只有齐全时才能跳过远端分片,
+ * 否则手工删掉的会话/技能文件就再也恢复不回来。
+ */
+async function shardFilesMissing(root: string, shard: IndexShard): Promise<boolean> {
+  for (const entry of Object.values(shard.sessions ?? {})) {
+    if (!entry?.path || !existsSync(join(root, ...entry.path.split('/')))) return true;
+  }
+  for (const name of Object.keys(shard.skills ?? {})) {
+    const safe = safeSessionName(name);
+    const metaDir = join(root, 'skills', safe, 'meta');
+    let metas: string[];
+    try {
+      metas = (await readdir(metaDir)).filter((f) => f.endsWith('.json'));
+    } catch {
+      return true;
+    }
+    if (metas.length === 0) return true;
+    for (const file of metas) {
+      let meta: { versions?: Array<{ hash?: string; files?: Array<{ rel?: string }> }> };
+      try {
+        meta = JSON.parse(await readFile(join(metaDir, file), 'utf8')) as typeof meta;
+      } catch {
+        return true;
+      }
+      for (const v of meta.versions ?? []) {
+        if (!v.hash) return true;
+        for (const f of v.files ?? []) {
+          if (!f.rel) continue;
+          const target = join(root, 'skills', safe, 'versions', v.hash, ...f.rel.split('/'));
+          if (!existsSync(target)) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** 递归列远端目录;对象存储一次前缀列举,WebDAV 回退为逐层 list。 */
+async function listRemoteFiles(remote: RemoteStore, dir: string): Promise<string[]> {
+  if (remote.listAll) {
+    try {
+      return (await remote.listAll(dir)).map((e) => e.name);
+    } catch {
+      // 部分 WebDAV 禁用 Depth: infinity,退回逐层 list
+    }
+  }
+  return walkRemote(remote, dir);
 }
 
 export interface PushLibraryOptions {
@@ -80,6 +158,7 @@ export async function listLibraryFiles(
     ...(await walk(root, 'sessions')).filter(ownSession),
     ...(await walk(root, 'skills')),
     ...(await walk(root, 'lessons')),
+    // 每台设备只写自己的分片;别的设备的分片由它们自己推,这里不能覆盖
     ...(await walk(root, 'index')).filter((rel) => rel === `index/${deviceId}.json`),
     // index 分片是引用其他文件的提交点:必须最后传,否则中断会留下指向不存在文件的悬空引用
   ].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
@@ -94,6 +173,7 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
   let uploaded = 0;
   let bytes = 0;
   let skipped = 0;
+  let pushedLessons = false;
   let n = 0;
   let lastCheckpoint = Date.now();
 
@@ -127,11 +207,42 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
       state.library.pushed[rel] = { size: st.size, mtimeMs: Math.round(st.mtimeMs) };
       uploaded++;
       bytes += st.size;
+      if (rel.startsWith('lessons/')) pushedLessons = true;
       progress.item(rel, n, files.length, st.size);
       if (Date.now() - lastCheckpoint >= CHECKPOINT_MS) await checkpoint();
     }
   } finally {
     if (uploaded > 0) await checkpoint();
+  }
+
+  // 自己的分片戳:对端只读百字节就能判断整份分片有没有变
+  const ownShard = join(root, 'index', `${opts.deviceId}.json`);
+  try {
+    const st = await stat(ownShard);
+    const hash = await hashFile(ownShard);
+    const stamp = (await remote.readJson(libraryStampPath(opts.deviceId))) as ContentStamp | null;
+    if (!stamp || stamp.hash !== hash || stamp.size !== st.size) {
+      await remote.writeJson(libraryStampPath(opts.deviceId), {
+        v: 1,
+        hash,
+        size: st.size,
+        updatedAt: Date.now(),
+      } satisfies ContentStamp);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+
+  // lessons 变了才换 token;远端还没有戳时补一个,让后续同步不必每轮递归列举
+  const lessonsStamp = (await remote.readJson(LESSONS_STAMP_PATH)) as TokenStamp | null;
+  if (pushedLessons || !lessonsStamp) {
+    const token = randomUUID();
+    await remote.writeJson(LESSONS_STAMP_PATH, {
+      v: 1,
+      token,
+      updatedAt: Date.now(),
+    } satisfies TokenStamp);
+    state.library.lessonsToken = token;
   }
 
   return { uploaded, bytes, skipped };
@@ -191,7 +302,9 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
   let bytes = 0;
   let skipped = 0;
 
-  const shards = (await remote.list('library/index')).filter((e) => e.type === 'file');
+  const shards = (await remote.list('library/index')).filter(
+    (e) => e.type === 'file' && e.name.endsWith('.json'),
+  );
   progress.phase('library', `${shards.length} 个设备分片`);
 
   // 分片是索引来源,必须最后落盘:先拉内容文件再写分片,中断时索引不会引用未下载的文件
@@ -200,6 +313,28 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
   for (const shardEntry of shards) {
     throwIfAborted(opts.signal);
     const shardPath = `library/index/${shardEntry.name}`;
+    const shardAbs = join(root, 'index', shardEntry.name);
+    const shardDevice = shardEntry.name.replace(/\.json$/, '');
+    const localShard = await readLocalShard(shardAbs);
+    const localComplete = localShard ? !(await shardFilesMissing(root, localShard)) : false;
+
+    // 本机分片是权威,文件齐全时连远端同名分片都不用读
+    if (localComplete && shardDevice === opts.deviceId) continue;
+
+    // 别的设备:戳没变且本地文件齐全 → 整份分片不读
+    let shardStamp: ContentStamp | null = null;
+    if (shardDevice !== opts.deviceId) {
+      shardStamp = (await remote.readJson(libraryStampPath(shardDevice))) as ContentStamp | null;
+      if (
+        localComplete &&
+        shardStamp &&
+        state.library.shardStamps?.[shardDevice] === shardStamp.hash &&
+        shardEntry.size === shardStamp.size
+      ) {
+        continue;
+      }
+    }
+
     const raw = await remote.readJson(shardPath);
     if (!raw || typeof raw !== 'object') continue;
     const shard = raw as IndexShard;
@@ -207,7 +342,6 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
     const device = shard.device;
     const isSelf = device === opts.deviceId;
     // 分片本身也要落地,统一索引才能离线重建;本机分片是权威,只在缺失时恢复
-    const shardAbs = join(root, 'index', shardEntry.name);
     const writeShard = !isSelf || (await localHash(shardAbs)) === null;
     const pulled = (state.library.pulled[device] ??= {});
 
@@ -277,7 +411,7 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
         }
         const metaRaw = await remote.readJson(remoteMeta);
         if (!metaRaw || typeof metaRaw !== 'object') continue;
-        await writeAtomic(localMeta, JSON.stringify(metaRaw, null, 2) + '\n');
+        await writeIfChanged(localMeta, JSON.stringify(metaRaw, null, 2) + '\n');
         const versions = (metaRaw as { versions?: Array<{ hash: string; files?: Array<{ rel: string }> }> })
           .versions ?? [];
         for (const v of versions) {
@@ -312,35 +446,40 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
       }
     }
     if (writeShard) pendingShards.push({ abs: shardAbs, shard });
+    if (shardStamp) (state.library.shardStamps ??= {})[device] = shardStamp.hash;
   }
 
   // lessons:共享沉淀,没有设备分片。本地已有就不覆盖(本机内容可能是刚 learn 的新版本),
   // 只在缺失时从远端恢复 —— 新设备能拿到经验库,又不会丢掉本机刚生成的内容。
-  const remoteLessons = await walkRemote(remote, 'library/lessons');
-  for (const remotePath of remoteLessons) {
-    throwIfAborted(opts.signal);
-    const rel = remotePath.slice('library/'.length);
-    const target = safeLibraryPath(root, rel);
-    if (!target) {
-      console.warn(`[trove] 远端 lesson 路径非法,已跳过: ${rel}`);
-      continue;
+const lessonsStamp = (await remote.readJson(LESSONS_STAMP_PATH)) as TokenStamp | null;
+  if (!(lessonsStamp?.token && state.library.lessonsToken === lessonsStamp.token)) {
+    const remoteLessons = await listRemoteFiles(remote, 'library/lessons');
+    for (const remotePath of remoteLessons) {
+      throwIfAborted(opts.signal);
+      const rel = remotePath.slice('library/'.length);
+      const target = safeLibraryPath(root, rel);
+      if (!target) {
+        console.warn(`[trove] 远端 lesson 路径非法,已跳过: ${rel}`);
+        continue;
+      }
+      if (await localHash(target)) {
+        skipped++;
+        continue;
+      }
+      const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+      try {
+        await mkdir(dirname(target), { recursive: true });
+        await remote.readFile(remotePath, tmp);
+        await rename(tmp, target);
+      } catch (err) {
+        await unlink(tmp).catch(() => {});
+        throw err;
+      }
+      downloaded++;
+      bytes += (await stat(target)).size;
+      progress.item(rel, itemNo, remoteLessons.length, bytes);
     }
-    if (await localHash(target)) {
-      skipped++;
-      continue;
-    }
-    const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
-    try {
-      await mkdir(dirname(target), { recursive: true });
-      await remote.readFile(remotePath, tmp);
-      await rename(tmp, target);
-    } catch (err) {
-      await unlink(tmp).catch(() => {});
-      throw err;
-    }
-    downloaded++;
-    bytes += (await stat(target)).size;
-    progress.item(rel, itemNo, remoteLessons.length, bytes);
+    if (lessonsStamp?.token) state.library.lessonsToken = lessonsStamp.token;
   }
 
   // 内容文件全部落地后再写分片;剔除本地仍缺失的条目,统一索引不会指向不存在的文件

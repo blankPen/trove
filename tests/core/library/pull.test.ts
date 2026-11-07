@@ -6,6 +6,10 @@ import { dirname, join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { pullLibrary } from '../../../src/core/library/sync.js';
 import { emptyState } from '../../../src/core/state.js';
+import {
+  LESSONS_STAMP_PATH,
+  libraryStampPath,
+} from '../../../src/core/remote-layout.js';
 import type { IndexShard } from '../../../src/core/library/schema.js';
 import { MemoryRemote } from '../../helpers/memory-remote.js';
 
@@ -104,6 +108,57 @@ describe('pullLibrary 分片本机权威', () => {
   });
 });
 
+describe('pullLibrary 变更戳', () => {
+  it('分片戳未变且本地文件齐全 → 不读整份分片', async () => {
+    const { vault, remote } = await setup('newer');
+    const state = emptyState();
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state });
+
+    const size = (await remote.list('library/index')).find((e) => e.name === 'dev1.json')!.size;
+    await remote.writeJson(libraryStampPath('dev1'), { v: 1, hash: 'h1', size, updatedAt: 1 });
+    state.library.shardStamps = { dev1: 'h1' };
+    const spy = vi.spyOn(remote, 'readJson');
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev2', state });
+
+    expect(spy.mock.calls.map((c) => c[0])).not.toContain('library/index/dev1.json');
+  });
+
+  it('本机分片与文件齐全 → 不读远端同名分片', async () => {
+    const { vault, remote } = await setup('newer');
+    const state = emptyState();
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state });
+    const spy = vi.spyOn(remote, 'readJson');
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state });
+
+    expect(spy.mock.calls.map((c) => c[0])).not.toContain('library/index/dev1.json');
+  });
+
+  it('本机分片存在但引用的会话缺失 → 仍从远端恢复', async () => {
+    const { vault, abs, remote } = await setup(null);
+    const shardAbs = join(vault, 'library', 'index', 'dev1.json');
+    await mkdir(dirname(shardAbs), { recursive: true });
+    await writeFile(
+      shardAbs,
+      JSON.stringify({
+        v: 1,
+        device: 'dev1',
+        mapper: 'claude-code',
+        updatedAt: '2026-10-23T00:00:00.000Z',
+        sessions: {
+          'claude-code:s1': { device: 'dev1', path: REL, hash: sha('remote'), events: 1, rawSources: [] },
+        },
+        skills: {},
+      }),
+    );
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
+
+    expect(await readFile(abs, 'utf8')).toBe('remote');
+  });
+});
+
 describe('pullLibrary 技能 meta/版本拉取', () => {
   async function skillSetup(metaVersion: string) {
     const vault = await mkdtemp(join(tmpdir(), 'trove-libpull-skill-'));
@@ -177,6 +232,18 @@ describe('pullLibrary lessons 恢复', () => {
     await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
 
     expect(await readFile(abs, 'utf8')).toBe('local-newer');
+  });
+
+  it('lessons 戳未变 → 不列举远端目录', async () => {
+    const { vault, remote } = await lessonsSetup('local-newer');
+    await remote.writeJson(LESSONS_STAMP_PATH, { v: 1, token: 't1', updatedAt: 1 });
+    const state = emptyState();
+    state.library.lessonsToken = 't1';
+    const spy = vi.spyOn(remote, 'listAll');
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state });
+
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

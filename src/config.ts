@@ -80,15 +80,36 @@ export interface LearnLifecycleConfig {
   trajectoryMax: number;
 }
 
-/** 本地检索后端配置：qmd 混合检索（BM25 + 向量 + 查询扩展 + 重排）。 */
+/**
+ * 向量后端：local=本地 GGUF（qmd 全管线，首次需下载约 2.3GB 模型）；
+ * dashscope=阿里百炼云端嵌入（OpenAI 兼容接口，不下载、不启动本地模型）。
+ */
+export type EmbeddingProvider = 'local' | 'dashscope';
+
+/** 阿里百炼云端嵌入配置（provider=dashscope 生效）。 */
+export interface DashScopeEmbeddingConfig {
+  /** 百炼 API Key；不写进代码，由用户 `trove config set` 写入 config.json。 */
+  apiKey: string;
+  /** OpenAI 兼容端点；默认北京地域，国际站改成 dashscope-intl 域名。 */
+  baseUrl: string;
+  /** 模型名；text-embedding-v4 支持 64～2048 维。 */
+  model: string;
+  /** 向量维度；1024 是效果与成本的默认平衡点。 */
+  dimension: number;
+}
+
+/** 检索后端配置：本地 qmd 混合检索，或百炼云端向量。 */
 export interface LearnSearchConfig {
   enabled: boolean;
-  /** 嵌入模型 URI（hf:<repo>/<file>）。 */
+  provider: EmbeddingProvider;
+  /** 本地嵌入模型 URI（hf:<repo>/<file>）；provider=local 生效。 */
   model: string;
-  /** 模型下载镜像（HF_ENDPOINT）；可用 learn.search.host 覆盖。 */
+  /** 模型下载镜像（HF_ENDPOINT）；provider=local 生效。 */
   host: string;
-  /** 最低命中分；低于此分不返回（0 = 不过滤）。 */
+  /** 最低命中分；低于此分不返回（0 = 不过滤；云端为余弦相似度 0..1）。 */
   minScore: number;
+  /** 云端向量配置；provider=dashscope 生效。 */
+  dashscope: DashScopeEmbeddingConfig;
 }
 
 export interface LearnConfig {
@@ -126,9 +147,16 @@ export function defaultLearnConfig(): LearnConfig {
     capacity: { ...DEFAULT_CAPACITY },
     search: {
       enabled: true,
+      provider: 'local',
       model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf',
       host: 'https://hf-mirror.com',
       minScore: 0,
+      dashscope: {
+        apiKey: '',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'text-embedding-v4',
+        dimension: 1024,
+      },
     },
   };
 }
@@ -257,10 +285,27 @@ export function normalizeLearn(learn: unknown): LearnConfig {
     },
     search: {
       enabled: s.enabled !== false,
+      provider: normalizeEmbeddingProvider(s.provider),
       model: strNonEmpty(s.model, d.search.model),
       host: strNonEmpty(s.host, d.search.host),
       minScore: Math.max(0, num(s.minScore, d.search.minScore)),
+      dashscope: normalizeDashScope(s.dashscope, d.search.dashscope),
     },
+  };
+}
+
+/** 未知/非法的向量后端一律回退本地，避免配置写错后静默走云端。 */
+export function normalizeEmbeddingProvider(v: unknown): EmbeddingProvider {
+  return v === 'dashscope' ? 'dashscope' : 'local';
+}
+
+function normalizeDashScope(v: unknown, fallback: DashScopeEmbeddingConfig): DashScopeEmbeddingConfig {
+  const d = (v ?? {}) as Record<string, unknown>;
+  return {
+    apiKey: strNonEmpty(d.apiKey, fallback.apiKey),
+    baseUrl: strNonEmpty(d.baseUrl, fallback.baseUrl),
+    model: strNonEmpty(d.model, fallback.model),
+    dimension: Math.max(1, Math.round(num(d.dimension, fallback.dimension))),
   };
 }
 

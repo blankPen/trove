@@ -200,13 +200,23 @@ trove status --json             # machine-readable overview
 
 `trove status` reports four things: what each tool has archived locally (count and size), whether the remote is reachable (5 s probe, device count, last seen), the daemon's state and last result, and what is still pending — sessions, files and skills by category.
 
-### Local hybrid search (qmd)
+### Search backends: local qmd or Alibaba Cloud Bailian
 
-Lessons search runs on [qmd](https://github.com/tobi/qmd): BM25 + query expansion + HyDE + local vectors + LLM reranking, all offline. The five lesson categories are registered as qmd collections under one index (`~/.trove/cache/qmd.sqlite`), rebuilt incrementally by `trove learn`. The embedding model is `Qwen3-Embedding-0.6B` (GGUF, q8), run locally through `node-llama-cpp`; qmd also needs its query-expansion (1.7B) and reranker (0.6B) models — about 2.3 GB, downloaded once into `~/.cache/qmd/models`. Only that first download needs network.
+By default lessons search runs on [qmd](https://github.com/tobi/qmd): BM25 + query expansion + HyDE + local vectors + LLM reranking, all offline. The five lesson categories are registered as qmd collections under one index (`~/.trove/cache/qmd.sqlite`), rebuilt incrementally by `trove learn`. The embedding model is `Qwen3-Embedding-0.6B` (GGUF, q8), run locally through `node-llama-cpp`; qmd also needs its query-expansion (1.7B) and reranker (0.6B) models — about 2.3 GB, downloaded once into `~/.cache/qmd/models`.
 
-Tune it under `learn.search` — `enabled`, `model`, `host` (the Hugging Face mirror used as `HF_ENDPOINT`, default `https://hf-mirror.com`), `minScore`. It degrades gracefully: no network, missing model, or an empty/corrupt index all fall back to pure FTS5, so commands never error.
+You can switch the vectors to Alibaba Cloud Bailian (DashScope) instead — no local model download or startup at all. Retrieval becomes FTS5 keyword + cloud vectors fused with RRF, and the vector cache lives in `~/.trove/cache/cloud-vectors.sqlite`:
 
-Note: hybrid retrieval is a full local model round-trip, so a cold query takes seconds, not milliseconds; qmd caches query expansions, so repeats of the same query are much faster.
+```sh
+trove config set learn.search.provider dashscope
+trove config set learn.search.dashscope.apiKey sk-xxx   # Bailian API key
+# Optional: dashscope.model (default text-embedding-v4), dashscope.dimension (default 1024),
+#           dashscope.baseUrl (Beijing by default; use the dashscope-intl host for Singapore)
+trove daemon restart   # rebuilds the vector index for the new provider on startup
+```
+
+Cloud embeddings are billed by token (text-embedding-v4 is about ¥0.5 per million tokens, with a 1M-token free quota for new users); only incremental index updates and each query spend tokens. With `provider=local` the local knobs still apply: `learn.search` — `enabled`, `model`, `host` (the Hugging Face mirror used as `HF_ENDPOINT`, default `https://hf-mirror.com`), `minScore`. It degrades gracefully: no network, missing model/key, or an empty/corrupt index all fall back to pure FTS5, so commands never error.
+
+Note: local hybrid retrieval is a full model round-trip, so a cold query takes seconds, not milliseconds; qmd caches query expansions, so repeats of the same query are much faster. The cloud provider adds one network round-trip per query (typically tens to hundreds of milliseconds).
 
 ### Knowledge base for agents (skill + MCP)
 

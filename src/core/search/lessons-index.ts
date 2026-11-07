@@ -62,7 +62,8 @@ interface Row {
 const SKIP_DIRS = new Set(['archive', 'audit', 'trajectories', '.trove']);
 const SKIP_FILES = new Set(['INDEX.md', 'README.md']);
 
-async function walk(root: string, rel = ''): Promise<string[]> {
+/** lessons 目录下的 Markdown 相对路径（跳过 archive/audit/trajectories 与索引文件）。 */
+export async function walkLessons(root: string, rel = ''): Promise<string[]> {
   const out: string[] = [];
   let entries;
   try {
@@ -74,7 +75,7 @@ async function walk(root: string, rel = ''): Promise<string[]> {
     if (entry.name.startsWith('.')) continue;
     const childRel = rel ? `${rel}/${entry.name}` : entry.name;
     if (entry.isDirectory()) {
-      if (!SKIP_DIRS.has(entry.name)) out.push(...(await walk(root, childRel)));
+      if (!SKIP_DIRS.has(entry.name)) out.push(...(await walkLessons(root, childRel)));
     } else if (entry.isFile() && entry.name.endsWith('.md') && !SKIP_FILES.has(entry.name)) {
       out.push(childRel);
     }
@@ -99,7 +100,7 @@ export class LessonsIndex {
 
   static async build(vaultRoot: string): Promise<LessonsIndex> {
     const root = libraryLessonsDir(vaultRoot);
-    const files = await walk(root);
+    const files = await walkLessons(root);
     const docs = new Map<string, LessonDoc>();
     const db = openSqlite(':memory:', false);
     db.exec(`

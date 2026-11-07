@@ -12,7 +12,7 @@ vi.mock('@tobilu/qmd', () => ({
 const { searchLessons, closeSearchCache } = await import('../../../src/core/search/service.js');
 
 let vault: string;
-const backend = { dbPath: join(tmpdir(), 'nope.sqlite'), model: 'hf:test' };
+const backend = { provider: 'local' as const, dbPath: join(tmpdir(), 'nope.sqlite'), model: 'hf:test' };
 
 async function seed(rel: string, fm: string[], body: string): Promise<void> {
   const abs = join(vault, 'library/lessons', rel);

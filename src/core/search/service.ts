@@ -12,6 +12,8 @@ import { loadLibraryIndex } from '../library/index-file.js';
 import { LessonsIndex, resolveLessonPath, type LessonDoc, type LessonHit, type LessonQuery } from './lessons-index.js';
 import { applyUsageRanking, clip, snippetAround } from './rank.js';
 import { closeQmdStore, searchQmd, type QmdHit, type QmdSearchConfig } from './qmd.js';
+import { cloudVectorSearch, type CloudSearchConfig } from './cloud.js';
+import type { SearchBackend } from './backend.js';
 import {
   SessionsIndex,
   type BuildStats,
@@ -24,8 +26,8 @@ export interface LessonResult extends LessonDoc {
   truncated: boolean;
 }
 
-/** 检索后端配置：由 CLI/MCP 从 learn.search 映射；缺省走纯 FTS。 */
-export type SearchBackendConfig = QmdSearchConfig;
+/** 检索后端配置：由 CLI/MCP 从 learn.search 解析；缺省走纯 FTS。 */
+export type SearchBackendConfig = SearchBackend;
 
 export interface SessionSearchResult {
   results: Awaited<ReturnType<SessionsIndex['search']>>['results'];
@@ -82,10 +84,13 @@ export async function searchLessons(
 ): Promise<LessonHit[]> {
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
   let hits: LessonHit[] = [];
-  // qmd 检索失败或无命中 → 落回纯 FTS；检索永远不报错。
+  // 检索失败或无命中 → 落回纯 FTS；检索永远不报错。
   if (backend && opts.query?.trim()) {
     try {
-      hits = await qmdSearch(vaultRoot, opts, backend);
+      hits =
+        backend.provider === 'dashscope'
+          ? await cloudSearch(vaultRoot, opts, backend)
+          : await qmdSearch(vaultRoot, opts, backend);
     } catch {
       hits = [];
     }
@@ -111,13 +116,82 @@ export async function searchLessons(
 async function qmdSearch(
   vaultRoot: string,
   opts: LessonQuery,
-  backend: SearchBackendConfig,
+  backend: QmdSearchConfig,
 ): Promise<LessonHit[]> {
   const qmdHits = await searchQmd(vaultRoot, opts.query ?? '', backend, {
     ...(opts.category ? { categories: [opts.category] } : {}),
     limit: opts.limit,
   });
   return toLessonHits(vaultRoot, qmdHits, opts);
+}
+
+const RRF_K = 60;
+/** 云端的词法候选下限：多取一些给 RRF 融合，最终仍按 limit 截断。 */
+const CLOUD_CANDIDATES = 30;
+
+/**
+ * 云端检索：FTS5 词法召回 + 百炼向量召回，RRF 融合。
+ * 云端不可达时只用词法结果，不抛错。
+ */
+async function cloudSearch(
+  vaultRoot: string,
+  opts: LessonQuery,
+  cfg: CloudSearchConfig,
+): Promise<LessonHit[]> {
+  const index = await getLessonsIndex(vaultRoot);
+  const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
+  const candidates = Math.max(limit, CLOUD_CANDIDATES);
+  const lexical = index.search({ ...opts, limit: candidates });
+  let vector: string[] = [];
+  try {
+    const hits = await cloudVectorSearch(opts.query ?? '', cfg, candidates);
+    vector = hits.map((h) => h.path).filter((p) => matchesQuery(index.get(p), opts));
+  } catch {
+    // 云端不可达时保留词法结果
+  }
+  const fused = fuseRankings([lexical.map((h) => h.path), vector]);
+  // RRF 原始分很小（1/61 量级），归一到 0..1 后再交给使用反馈排序，避免 0.1 级加分盖过相关性。
+  const max = Math.max(0, ...fused.values());
+  const out: LessonHit[] = [];
+  for (const [path, raw] of [...fused].sort((a, b) => b[1] - a[1])) {
+    if (out.length >= limit) break;
+    const doc = index.get(path);
+    if (!matchesQuery(doc, opts)) continue;
+    out.push(docHit(doc, max > 0 ? raw / max : raw, opts.query ?? ''));
+  }
+  return out;
+}
+
+/** 词法/向量两个有序列表做倒数排序融合。 */
+function fuseRankings(lists: string[][]): Map<string, number> {
+  const scores = new Map<string, number>();
+  for (const list of lists) {
+    list.forEach((path, i) => scores.set(path, (scores.get(path) ?? 0) + 1 / (RRF_K + i + 1)));
+  }
+  return scores;
+}
+
+function matchesQuery(doc: LessonDoc | null | undefined, opts: LessonQuery): doc is LessonDoc {
+  if (!doc) return false;
+  if (opts.category && doc.path.split('/')[0] !== opts.category) return false;
+  if (opts.type && doc.type !== opts.type && !doc.type.startsWith(`${opts.type}/`)) return false;
+  if (opts.since && doc.updatedAt && Date.parse(doc.updatedAt) < opts.since) return false;
+  return true;
+}
+
+function docHit(doc: LessonDoc, score: number, query: string): LessonHit {
+  return {
+    path: doc.path,
+    title: doc.title,
+    type: doc.type,
+    tags: doc.tags,
+    ...(doc.updatedAt ? { updatedAt: doc.updatedAt } : {}),
+    ...(doc.id ? { id: doc.id } : {}),
+    ...(doc.scope ? { scope: doc.scope } : {}),
+    snippet: snippetAround(doc.body, query) || clip(doc.body, 160),
+    score,
+    scoreParts: { bm25: score, recency: 0, exact: 0, project: 0 },
+  };
 }
 
 async function toLessonHits(

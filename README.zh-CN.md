@@ -200,13 +200,23 @@ trove status --json             # 机器可读概览
 
 `trove status` 报四件事：每个工具在本地归档了多少（数量和体积）、远端是否可达（5 秒探测、设备数、最后在线时间）、daemon 的状态和最近一轮结果、还剩什么没同步（按会话 / 文件 / 技能分类计数）。
 
-### 本地混合检索（qmd）
+### 检索后端：本地 qmd 或阿里百炼云端
 
-lessons 检索走 [qmd](https://github.com/tobi/qmd)：BM25 + 查询扩展 + HyDE + 本地向量 + LLM 重排，全程离线。5 个记忆类目注册成 qmd collection，共用一份索引（`~/.trove/cache/qmd.sqlite`），由 `trove learn` 增量重建。嵌入模型是 `Qwen3-Embedding-0.6B`（GGUF、q8），经 `node-llama-cpp` 本地运行；qmd 还需要它的查询扩展（1.7B）与重排（0.6B）模型，合计约 2.3 GB，首次下载到 `~/.cache/qmd/models`，仅该次下载需要联网。
+默认走 [qmd](https://github.com/tobi/qmd)：BM25 + 查询扩展 + HyDE + 本地向量 + LLM 重排，全程离线。5 个记忆类目注册成 qmd collection，共用一份索引（`~/.trove/cache/qmd.sqlite`），由 `trove learn` 增量重建。嵌入模型是 `Qwen3-Embedding-0.6B`（GGUF、q8），经 `node-llama-cpp` 本地运行；qmd 还需要它的查询扩展（1.7B）与重排（0.6B）模型，合计约 2.3 GB，首次下载到 `~/.cache/qmd/models`，仅该次下载需要联网。
 
-用 `learn.search` 配置：`enabled`、`model`、`host`（作为 `HF_ENDPOINT` 的 Hugging Face 镜像，默认 `https://hf-mirror.com`）、`minScore`。降级可靠：无网络、缺模型、索引为空或损坏都回退纯 FTS5，命令不会报错。
+也可以把向量换成阿里百炼云端：不下载、不启动任何本地模型，检索改为 FTS5 词法 + 云端向量 RRF 融合，索引缓存到 `~/.trove/cache/cloud-vectors.sqlite`：
 
-注意：混合检索要走一遍本地模型，冷查询是秒级而不是毫秒级；qmd 会缓存查询扩展，同一查询重复问会快很多。
+```sh
+trove config set learn.search.provider dashscope
+trove config set learn.search.dashscope.apiKey sk-xxx   # 百炼 API Key
+# 可选：dashscope.model（默认 text-embedding-v4）、dashscope.dimension（默认 1024）、
+#       dashscope.baseUrl（默认北京地域；国际站改为 dashscope-intl 域名）
+trove daemon restart   # 启动时按新配置重建向量索引
+```
+
+云端按 token 计费（text-embedding-v4 约 0.5 元/百万 token，含 100 万 token 新用户免费额度），只有索引增量更新和每次查询会消耗。`provider=local` 时本地配置仍生效：`learn.search` 的 `enabled`、`model`、`host`（作为 `HF_ENDPOINT` 的 Hugging Face 镜像，默认 `https://hf-mirror.com`）、`minScore`。降级可靠：无网络、缺模型/key、索引为空或损坏都回退纯 FTS5，命令不会报错。
+
+注意：本地混合检索要走一遍本地模型，冷查询是秒级而不是毫秒级；qmd 会缓存查询扩展，同一查询重复问会快很多。云端模式每次查询多一次网络往返（通常几十到几百毫秒）。
 
 ### 给 agent 的知识库（skill + MCP）
 

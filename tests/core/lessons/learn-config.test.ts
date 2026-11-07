@@ -80,18 +80,51 @@ describe('readLearnConfig(v2 单轨学习配置)', () => {
   it('search 缺省补默认,部分覆盖保留,负值钳 0,空 host 回退默认', () => {
     expect(readLearnConfig().search).toEqual({
       enabled: true,
+      provider: 'local',
       model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf',
       host: 'https://hf-mirror.com',
       minScore: 0,
+      dashscope: {
+        apiKey: '',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'text-embedding-v4',
+        dimension: 1024,
+      },
     });
     const got = readLearnConfig(
       learn({ search: { enabled: false, model: 'Xenova/bge-m3', host: '', minScore: -1 } } as never),
     );
     expect(got.search).toEqual({
       enabled: false,
+      provider: 'local',
       model: 'Xenova/bge-m3',
       host: 'https://hf-mirror.com',
       minScore: 0,
+      dashscope: {
+        apiKey: '',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: 'text-embedding-v4',
+        dimension: 1024,
+      },
+    });
+  });
+
+  it('provider 只认 local/dashscope,未知值回退 local;云端字段部分覆盖保留', () => {
+    expect(readLearnConfig(learn({ search: { provider: 'openai' } } as never)).search.provider).toBe('local');
+    const got = readLearnConfig(
+      learn({
+        search: {
+          provider: 'dashscope',
+          dashscope: { apiKey: 'sk-test', model: 'text-embedding-v3', dimension: 768 },
+        },
+      } as never),
+    );
+    expect(got.search.provider).toBe('dashscope');
+    expect(got.search.dashscope).toEqual({
+      apiKey: 'sk-test',
+      baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      model: 'text-embedding-v3',
+      dimension: 768,
     });
   });
 });

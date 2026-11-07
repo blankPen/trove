@@ -6,8 +6,6 @@ import { LocalStorageAdapter } from './storage.js';
 import { listMemoryFiles, listTrajectoryFiles, type MemoryFile } from './curator.js';
 import { readMemoryUsage, type MemoryUsageEvent } from './memory-usage.js';
 import { parseMemory, qualityTotal } from './memory.js';
-import { readTrust } from './trust.js';
-import { listInbox } from './inbox.js';
 import { JobQueue } from './jobs.js';
 import { qmdIndexStatus } from '../search/qmd.js';
 
@@ -150,19 +148,18 @@ export async function buildMemoryHealth(
   now: () => number = Date.now,
 ): Promise<MemoryHealth> {
   const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
-  const [files, trajectories, usageEvents, trust, inbox] = await Promise.all([
+  const [files, trajectories, usageEvents] = await Promise.all([
     listMemoryFiles(storage),
     listTrajectoryFiles(storage),
     readMemoryUsage(storage),
-    readTrust(storage),
-    listInbox(storage),
   ]);
   const metrics = summarizeHealth(files, await countArchived(storage));
   return {
     ...metrics,
     unreferencedTrajectories: countUnreferencedTrajectories(files, trajectories),
-    inboxPending: inbox.length,
-    trustLevel: trust.level,
+    // 人工审核已下线,字段保留一版给旧前端读数。
+    inboxPending: 0,
+    trustLevel: 0,
     usage: summarizeUsageEvents(usageEvents, now()),
     jobs: await readJobStats(paths),
     searchIndex: await readSearchIndexStats(paths),

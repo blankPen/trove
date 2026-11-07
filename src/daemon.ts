@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { open, readFile, rename, stat, unlink, writeFile, mkdir, appendFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { chmod, open, readFile, rename, stat, unlink, writeFile, mkdir, appendFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { isProcessAlive } from './core/lock.js';
 import { humanSize } from './format.js';
@@ -7,6 +8,9 @@ import { execFileSync } from 'node:child_process';
 import type { Progress } from './progress.js';
 import type { SyncReport } from './core/sync.js';
 import type { TrovePaths } from './paths.js';
+import type { QmdSearchConfig, QmdSyncResult } from './core/search/qmd.js';
+import { startSearchServer, type RunningSearchServer } from './server/search.js';
+import { SEARCH_PROTOCOL, type DaemonSearchInfo } from './core/search/client.js';
 
 export interface DaemonStatusFile {
   running: boolean;
@@ -35,6 +39,17 @@ export interface DaemonRuntime {
   learnIntervalSeconds?: number;
   /** 启动期依赖预热(检索索引与模型):与同步循环并发,失败只记日志不阻断 daemon。 */
   ensureDeps?: (progress: Progress) => Promise<string | undefined>;
+  /** 检索服务:daemon 成为本机唯一检索运行时;缺省不启用。 */
+  search?: DaemonSearchRuntimeConfig;
+}
+
+export interface DaemonSearchRuntimeConfig {
+  qmd: QmdSearchConfig;
+  /** 监听端口;0 = 随机。 */
+  port: number;
+  keepWarmMinutes: number;
+  cacheDir: string;
+  version: string;
 }
 
 export const isAlive = isProcessAlive;
@@ -151,6 +166,19 @@ function downloadProgress(paths: TrovePaths): Progress {
   };
 }
 
+/** 端口与 token 只给本机 CLI/MCP 读，权限必须 0600（status 文件是 644，不能混用）。 */
+async function writeDaemonSearchInfo(paths: TrovePaths, info: DaemonSearchInfo): Promise<void> {
+  await mkdir(dirname(paths.daemonSearch), { recursive: true });
+  const tmp = `${paths.daemonSearch}.tmp-${process.pid}`;
+  await writeFile(tmp, JSON.stringify(info), { mode: 0o600 });
+  await chmod(tmp, 0o600);
+  await rename(tmp, paths.daemonSearch);
+}
+
+async function removeDaemonSearchInfo(paths: TrovePaths): Promise<void> {
+  await unlink(paths.daemonSearch).catch(() => {});
+}
+
 /**
  * daemon 主循环:sync 与 learn 两个循环并发跑,共享 abort 信号;SIGTERM/abort 后清理 pid 退出。
  * sync 循环每轮状态写 daemon.status.json,供 `trove daemon status` 读取;learn 循环只写日志。
@@ -169,8 +197,37 @@ export async function runDaemon(runtime: DaemonRuntime, signal: AbortSignal): Pr
   await writeDaemonStatus(paths, status);
   await daemonLog(paths, `daemon 启动 pid=${process.pid} interval=${intervalSeconds}s since=${since}`);
 
-  // 依赖预热不阻塞同步:模型下载可能几十秒到几分钟,同步循环先跑起来
-  if (runtime.ensureDeps) {
+  // 检索服务先于依赖预热:端口落地后 CLI 才能探测到它;模型预热在 server 内部异步进行。
+  let searchServer: RunningSearchServer | null = null;
+  if (runtime.search) {
+    const token = randomBytes(32).toString('hex');
+    try {
+      searchServer = await startSearchServer({
+        vaultRoot: paths.vault,
+        cacheDir: runtime.search.cacheDir,
+        version: runtime.search.version,
+        qmd: runtime.search.qmd,
+        token,
+        port: runtime.search.port,
+        keepWarmMinutes: runtime.search.keepWarmMinutes,
+        log: (line) => void daemonLog(paths, line),
+      });
+      await writeDaemonSearchInfo(paths, {
+        pid: process.pid,
+        port: searchServer.port,
+        token,
+        protocol: SEARCH_PROTOCOL,
+        startedAt: Date.now(),
+      });
+    } catch (e) {
+      // 端点起不来时 CLI 会自动回落本地加载,不影响检索可用性
+      searchServer = null;
+      await daemonLog(paths, `检索服务启动失败(CLI 回落本地加载): ${(e as Error).message}`);
+    }
+  }
+
+  // 启动期不再单独建索引：首轮同步后会按需检查一次，重复检查只会占用检索闸门。
+  if (!searchServer && runtime.ensureDeps) {
     const progress = downloadProgress(paths);
     void runtime.ensureDeps(progress).then(
       (note) => {
@@ -181,10 +238,16 @@ export async function runDaemon(runtime: DaemonRuntime, signal: AbortSignal): Pr
   }
 
   try {
-    const loops: Promise<void>[] = [syncLoop(runtime, status, signal)];
+    const loops: Promise<void>[] = [
+      syncLoop(runtime, status, signal, searchServer ? () => searchServer!.runtime.reindex() : undefined),
+    ];
     if (runtime.learnTick) loops.push(learnLoop(runtime, signal));
     await Promise.all(loops);
   } finally {
+    if (searchServer) {
+      await searchServer.close().catch(() => {});
+      await removeDaemonSearchInfo(paths);
+    }
     status.running = false;
     status.nextRunAt = undefined;
     await writeDaemonStatus(paths, status);
@@ -193,7 +256,12 @@ export async function runDaemon(runtime: DaemonRuntime, signal: AbortSignal): Pr
   }
 }
 
-async function syncLoop(runtime: DaemonRuntime, status: DaemonStatusFile, signal: AbortSignal): Promise<void> {
+async function syncLoop(
+  runtime: DaemonRuntime,
+  status: DaemonStatusFile,
+  signal: AbortSignal,
+  afterIndex?: () => Promise<QmdSyncResult | null>,
+): Promise<void> {
   const { paths, intervalSeconds, runOnce } = runtime;
   while (!signal.aborted) {
     const started = Date.now();
@@ -220,6 +288,20 @@ async function syncLoop(runtime: DaemonRuntime, status: DaemonStatusFile, signal
           if (note) await daemonLog(paths, note);
         } catch (e) {
           await daemonLog(paths, `同步后处理失败: ${(e as Error).message}`);
+        }
+      }
+      // 每轮同步后增量重建检索索引；没有新数据就跳过，避免无谓占用检索闸门。
+      const changed =
+        report.collected.archived > 0 ||
+        report.collected.appended > 0 ||
+        report.pulled.downloadedItems > 0 ||
+        report.library.pulled.downloaded > 0;
+      if (afterIndex && changed) {
+        try {
+          const r = await afterIndex();
+          if (r) await daemonLog(paths, `索引检查: ${r.documents} 篇 · 本次嵌入 ${r.chunksEmbedded} 片段 · 待嵌入 ${r.needsEmbedding}`);
+        } catch (e) {
+          await daemonLog(paths, `索引更新失败: ${(e as Error).message}`);
         }
       }
     } catch (err) {

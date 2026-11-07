@@ -1,18 +1,12 @@
-/** lessons 检索：进程内 FTS5 索引（911 篇 / 约 1MB，冷构建约 280ms）。 */
+/**
+ * lessons 目录索引：把文件解析成内存 Map，供 list / get 使用。
+ * 语义检索走 qmd（`qmd.ts`），这里不做全文索引——两份 FTS 只会多一套分词要维护。
+ */
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { basename, join, resolve, sep } from 'node:path';
-import { openSqlite, type DatabaseSync } from '../../sqlite.js';
 import { libraryLessonsDir } from '../layout.js';
 import { parseFrontmatter, stripFrontmatter } from '../lessons/frontmatter.js';
-import {
-  clip,
-  exactBonus,
-  projectAffinity,
-  recencyBoost,
-  snippetAround,
-  type ScoreParts,
-} from './rank.js';
-import { isSingleCjkQuery, toFtsQuery, tokenizeText } from './tokenize.js';
+import { clip, type ScoreParts } from './rank.js';
 
 export interface LessonDoc {
   path: string;
@@ -50,15 +44,6 @@ export interface LessonQuery {
   cwd?: string;
 }
 
-interface Row {
-  path: string;
-  title: string;
-  type: string;
-  tags: string;
-  updated_at: string;
-  score: number;
-}
-
 const SKIP_DIRS = new Set(['archive', 'audit', 'trajectories', '.trove']);
 const SKIP_FILES = new Set(['INDEX.md', 'README.md']);
 
@@ -92,7 +77,6 @@ export function resolveLessonPath(vaultRoot: string, rel: string): string | null
 
 export class LessonsIndex {
   private constructor(
-    private readonly db: DatabaseSync,
     private readonly docs: Map<string, LessonDoc>,
     readonly mtimeMs: number,
   ) {}
@@ -101,55 +85,25 @@ export class LessonsIndex {
     const root = libraryLessonsDir(vaultRoot);
     const files = await walk(root);
     const docs = new Map<string, LessonDoc>();
-    const db = openSqlite(':memory:', false);
-    db.exec(`
-      CREATE VIRTUAL TABLE lessons_fts USING fts5(
-        title_tok, tags_tok, body_tok,
-        path UNINDEXED, title UNINDEXED, type UNINDEXED, tags UNINDEXED, updated_at UNINDEXED,
-        tokenize='unicode61'
-      );
-    `);
-    const insert = db.prepare(
-      'INSERT INTO lessons_fts(title_tok,tags_tok,body_tok,path,title,type,tags,updated_at) VALUES(?,?,?,?,?,?,?,?)',
-    );
-    db.exec('BEGIN');
-    try {
-      for (const rel of files) {
-        let raw: string;
-        try {
-          raw = await readFile(join(root, rel), 'utf8');
-        } catch {
-          continue;
-        }
-        const fm = parseFrontmatter(raw);
-        const body = stripFrontmatter(raw) ?? raw;
-        const doc: LessonDoc = {
-          path: rel,
-          title: fm?.title || basename(rel),
-          type: fm?.type ?? '',
-          tags: fm?.tags ?? [],
-          ...(fm?.id ? { id: fm.id } : {}),
-          ...(fm?.updatedAt ? { updatedAt: fm.updatedAt } : {}),
-          ...(fm?.scope ? { scope: fm.scope } : {}),
-          body,
-        };
-        docs.set(rel, doc);
-        insert.run(
-          tokenizeText(doc.title),
-          tokenizeText(doc.tags.join(' ')),
-          tokenizeText(body),
-          doc.path,
-          doc.title,
-          doc.type,
-          JSON.stringify(doc.tags),
-          doc.updatedAt ?? '',
-        );
+    for (const rel of files) {
+      let raw: string;
+      try {
+        raw = await readFile(join(root, rel), 'utf8');
+      } catch {
+        continue;
       }
-      db.exec('COMMIT');
-    } catch (err) {
-      db.exec('ROLLBACK');
-      db.close();
-      throw err;
+      const fm = parseFrontmatter(raw);
+      const body = stripFrontmatter(raw) ?? raw;
+      docs.set(rel, {
+        path: rel,
+        title: fm?.title || basename(rel),
+        type: fm?.type ?? '',
+        tags: fm?.tags ?? [],
+        ...(fm?.id ? { id: fm.id } : {}),
+        ...(fm?.updatedAt ? { updatedAt: fm.updatedAt } : {}),
+        ...(fm?.scope ? { scope: fm.scope } : {}),
+        body,
+      });
     }
     let mtimeMs = 0;
     try {
@@ -157,66 +111,11 @@ export class LessonsIndex {
     } catch {
       // 目录不存在时留 0
     }
-    return new LessonsIndex(db, docs, mtimeMs);
+    return new LessonsIndex(docs, mtimeMs);
   }
 
   close(): void {
-    this.db.close();
-  }
-
-  search(opts: LessonQuery): LessonHit[] {
-    const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
-    const query = (opts.query ?? '').trim();
-    if (!query) return this.list(opts);
-    const now = Date.now();
-    const rows: Row[] = isSingleCjkQuery(query)
-      ? [...this.docs.values()]
-          .filter((d) => d.title.includes(query) || d.body.includes(query))
-          .map((d) => ({
-            path: d.path,
-            title: d.title,
-            type: d.type,
-            tags: JSON.stringify(d.tags),
-            updated_at: d.updatedAt ?? '',
-            score: 0,
-          }))
-      : (this.db
-          .prepare(
-            'SELECT path,title,type,tags,updated_at,bm25(lessons_fts,5.0,3.0,1.0) AS score ' +
-              'FROM lessons_fts WHERE lessons_fts MATCH ? ORDER BY score LIMIT 300',
-          )
-          .all(toFtsQuery(query)) as unknown as Row[]);
-
-    const hits: LessonHit[] = [];
-    for (const row of rows) {
-      if (opts.category && row.path.split('/')[0] !== opts.category) continue;
-      if (opts.type && row.type !== opts.type && !row.type.startsWith(`${opts.type}/`)) continue;
-      if (opts.since && row.updated_at && Date.parse(row.updated_at) < opts.since) continue;
-      const doc = this.docs.get(row.path);
-      const body = doc?.body ?? '';
-      const tags = parseTags(row.tags);
-      const parts: ScoreParts = {
-        bm25: -Number(row.score) || 0,
-        recency: recencyBoost(row.updated_at, 30, 1.5, now),
-        exact: exactBonus(`${row.title}\n${body.slice(0, 500)}`, query),
-        project: projectAffinity(opts.cwd, query),
-      };
-      hits.push({
-        path: row.path,
-        title: row.title,
-        type: row.type,
-        tags,
-        ...(row.updated_at ? { updatedAt: row.updated_at } : {}),
-        ...(doc?.id ? { id: doc.id } : {}),
-        ...(doc?.scope ? { scope: doc.scope } : {}),
-        snippet: snippetAround(body, query) || clip(body, 160),
-        score: parts.bm25 + parts.recency + parts.exact + parts.project,
-        scoreParts: parts,
-      });
-    }
-    return dedupeByTitle(hits)
-      .sort((a, b) => b.score - a.score || (b.updatedAt ?? '').localeCompare(a.updatedAt ?? ''))
-      .slice(0, limit);
+    // 纯内存索引，没有需要释放的资源；保留方法避免调用方分支。
   }
 
   list(opts: LessonQuery = {}): LessonHit[] {
@@ -244,22 +143,4 @@ export class LessonsIndex {
   get(rel: string): LessonDoc | null {
     return this.docs.get(rel) ?? null;
   }
-}
-
-function parseTags(raw: string): string[] {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.map(String) : [];
-  } catch {
-    return [];
-  }
-}
-
-function dedupeByTitle(hits: LessonHit[]): LessonHit[] {
-  const byTitle = new Map<string, LessonHit>();
-  for (const hit of hits) {
-    const prev = byTitle.get(hit.title);
-    if (!prev || hit.score > prev.score) byTitle.set(hit.title, hit);
-  }
-  return [...byTitle.values()];
 }

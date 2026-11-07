@@ -31,7 +31,7 @@ function jevWithKeep(
 }
 
 const allKeep = async (_s: unknown, q: Record<string, { instructions: string }>) =>
-  Object.fromEntries(Object.keys(q).map((id) => [id, 1]));
+  Object.fromEntries(Object.keys(q).map((id) => [id, id.endsWith(':noise') ? 0 : 1]));
 
 describe('Jev 快速压缩(LLM 分析前)', () => {
   it('noul 判定全 ≥0.5 → 保留全部事件', async () => {
@@ -46,7 +46,10 @@ describe('Jev 快速压缩(LLM 分析前)', () => {
     const events = eventsWithCalls(16);
     const keepCalls = vi.fn(async (_s, q) => {
       const out: Record<string, number> = {};
-      for (const id of Object.keys(q)) out[id] = id === 'c0' ? 0 : 1;
+      for (const id of Object.keys(q)) {
+        if (id.startsWith('c0:')) out[id] = id.endsWith(':noise') ? 1 : 0;
+        else out[id] = id.endsWith(':noise') ? 0 : 1;
+      }
       return out;
     });
     const out = await compactEvents(events, jevWithKeep(keepCalls));
@@ -99,5 +102,94 @@ describe('Jev 快速压缩(LLM 分析前)', () => {
     const events = eventsWithCalls(150, () => 'x'.repeat(1200));
     const out = await compactEvents(events, jevWithKeep(allKeep));
     expect(out.length).toBe(80);
+  });
+});
+
+describe('确定性预过滤(不花 Jev)', () => {
+  /** 带同/异入参的调用序列,便于测重试去重。 */
+  function callEvents(specs: Array<{ input: string; output: string; assistant?: string; status?: 'ok' | 'error' }>): Event[] {
+    const events: Event[] = [];
+    let seq = 0;
+    for (const s of specs) {
+      events.push(ev(seq++, 'message', { role: 'user', text: `问 ${seq}` }));
+      events.push(ev(seq++, 'tool_call', { tool: { name: 'Bash', call_id: `c${seq}`, input: s.input } }));
+      events.push(ev(seq++, 'tool_result', { role: 'tool', result: { call_id: `c${seq - 1}`, status: s.status ?? 'ok', output: s.output } }));
+      if (s.assistant !== undefined) events.push(ev(seq++, 'message', { role: 'assistant', text: s.assistant }));
+    }
+    return events;
+  }
+
+  it('无错误信号的大输出在送 Jev 前被截断,含 error 的保留', async () => {
+    const big = 'x'.repeat(9000);
+    const specs: Array<{ input: string; output: string }> = [];
+    for (let i = 0; i < 14; i++) specs.push({ input: `s${i}`, output: `out ${i}` });
+    specs.push({ input: 'a', output: big });
+    specs.push({ input: 'b', output: `${big} error: boom` });
+    const events = callEvents(specs);
+
+    const keepCalls = vi.fn(allKeep);
+    await compactEvents(events, jevWithKeep(keepCalls));
+    const state = keepCalls.mock.calls[0]![0] as string;
+    expect(state).toContain('…[已截断 9000 字符]');
+    expect(state.split(big)).toHaveLength(2); // 完整大串只剩含 error 的那一份
+    expect(state).toContain('error: boom');
+  });
+
+  it('同一命令失败后重试只保留最后一次', async () => {
+    const events = callEvents([
+      { input: 'npm test', output: 'fail 1', status: 'error' },
+      { input: 'npm test', output: 'fail 2', status: 'error' },
+      { input: 'npm test', output: 'pass' },
+    ]);
+    const out = await compactEvents(events, null);
+    const results = out.filter((e) => e.kind === 'tool_result');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result?.output).toBe('pass');
+  });
+
+  it('成功后的重复调用不算重试,全部保留', async () => {
+    const events = callEvents([
+      { input: 'npm test', output: 'first' },
+      { input: 'npm test', output: 'second' },
+    ]);
+    const out = await compactEvents(events, null);
+    expect(out.filter((e) => e.kind === 'tool_result')).toHaveLength(2);
+  });
+
+  it('中间有 assistant 回复的相同命令不算重试', async () => {
+    const events = callEvents([
+      { input: 'npm test', output: 'first', assistant: '先看失败原因' },
+      { input: 'npm test', output: 'second', assistant: '再试一次' },
+    ]);
+    const out = await compactEvents(events, null);
+    expect(out.filter((e) => e.kind === 'tool_result')).toHaveLength(2);
+  });
+
+  it('空输出与纯进度输出被丢弃', async () => {
+    const events = callEvents([
+      { input: 'a', output: '' },
+      { input: 'b', output: '[progress] 1/10' },
+      { input: 'c', output: '   \n  \n' },
+      { input: 'd', output: '有用的输出' },
+    ]);
+    const out = await compactEvents(events, null);
+    const results = out.filter((e) => e.kind === 'tool_result');
+    expect(results).toHaveLength(1);
+    expect(results[0]!.result?.output).toBe('有用的输出');
+  });
+
+  it('noise 分 ≥0.5 的调用对被删,即使 reusable 达标', async () => {
+    const events = eventsWithCalls(16);
+    const jev = jevWithKeep(async (_s, q) => {
+      const out: Record<string, number> = {};
+      for (const id of Object.keys(q)) {
+        if (id.startsWith('c0:')) out[id] = id.endsWith(':noise') ? 0.9 : 0.9;
+        else out[id] = id.endsWith(':noise') ? 0 : 1;
+      }
+      return out;
+    });
+    const out = await compactEvents(events, jev);
+    expect(out.map((e) => e.seq)).not.toContain(1);
+    expect(out.map((e) => e.seq)).not.toContain(2);
   });
 });

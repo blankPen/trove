@@ -3,7 +3,6 @@ import type { ReactNode } from 'react';
 import Mark from './Mark.tsx';
 import {
   IconHealth,
-  IconInbox,
   IconLessons,
   IconOverview,
   IconSessions,
@@ -22,7 +21,6 @@ const NAV = [
   { to: '/', label: '总览', Icon: IconOverview, end: true },
   { to: '/sessions', label: '会话', Icon: IconSessions, end: false },
   { to: '/lessons', label: '沉淀', Icon: IconLessons, end: false },
-  { to: '/inbox', label: 'Inbox', Icon: IconInbox, end: false },
   { to: '/health', label: '健康', Icon: IconHealth, end: false },
   { to: '/skills', label: '技能', Icon: IconSkills, end: false },
   { to: '/usage', label: '用量', Icon: IconUsage, end: false },

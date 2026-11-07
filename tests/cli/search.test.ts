@@ -1,11 +1,23 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { run } from '../../src/cli.js';
 import { defaultConfig, saveConfig } from '../../src/config.js';
 import { trovePaths } from '../../src/paths.js';
 import { rebuildUnifiedIndex } from '../../src/core/library/index-file.js';
+
+// lessons 检索只走 qmd；CLI 测试里用假 store，避免加载本地 GGUF 模型。
+const { qmdSearch } = vi.hoisted(() => ({ qmdSearch: vi.fn() }));
+vi.mock('@tobilu/qmd', () => ({
+  createStore: async () => ({
+    search: qmdSearch,
+    getStatus: async () => ({ totalDocuments: 0, needsEmbedding: 0, hasVectorIndex: false }),
+    update: async () => ({}),
+    embed: async () => ({}),
+    close: async () => {},
+  }),
+}));
 
 async function writeLesson(vault: string, rel: string, front: Record<string, string[] | string>, body: string) {
   const abs = join(vault, 'library/lessons', rel);
@@ -140,6 +152,9 @@ describe('trove search CLI', () => {
 
   it('lessons search/show + whoami + status --json', async () => {
     const { lines, deps } = await setup();
+    qmdSearch.mockResolvedValue([
+      { file: 'qmd://experiences/gotcha-feishu-edit.md', displayPath: '', title: '', score: 0.9 },
+    ]);
 
     lines.length = 0;
     expect(await run(['lessons', 'search', '飞书 编辑', '--json'], deps)).toBe(0);

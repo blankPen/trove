@@ -95,28 +95,27 @@ function v2Jev(): JevProvider {
   return {
     async score() { return { taskSuccess: 1, meanScore: 1 }; },
     async keepCalls(_s: unknown, q: Record<string, unknown>): Promise<Record<string, number>> {
-      return Object.fromEntries(Object.keys(q).map((k) => [k, 0.95]));
+      return Object.fromEntries(Object.keys(q).map((k) => [k, k.endsWith(':noise') ? 0 : 0.95]));
     },
   };
 }
 
 function happyLlm(): MockLlm {
   return new MockLlm((_p, _s, task) => {
-    switch (task) {
-      case 'learn:summarize':
-        return { topic: '脚本退出码', intent: '修复脚本退出码', outcome: 'success', keySteps: ['set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
-      case 'learn:classify':
-        return { preferences: false, entities: false, experiences: true, events: false, resources: false };
-      case 'learn:trajectory':
-        return { task: '调试脚本退出码', outcome: 'success', reusableSignals: ['用 set -e 立即中断'] };
-      case 'learn:extract':
-        return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: '## 适用场景\nshell 脚本需要失败即中断\n\n## 做法\n用 `set -e`\n\n## 验证\n命令出错立即退出\n\n## 边界与反例\n不适用需要忽略单命令失败的场景', evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }] }] };
-      case 'learn:triage': return { decision: 'accept' };
-      case 'learn:quality': return { decision: 'accept' };
-      case 'learn:identity': return { decision: 'add' };
-      case 'learn:merge': return { content: 'merged' };
-      default: throw new Error(`unexpected task ${task}`);
+    if (task === 'learn:extract-ops') {
+      return {
+        ops: [
+          {
+            action: 'add',
+            type: 'experiences/debug_pattern',
+            title: '脚本退出应该用 set -e', slug: 'set-e',
+            content: '## 适用场景\nshell 脚本需要失败即中断\n\n## 做法\n用 `set -e`\n\n## 验证\n命令出错立即退出\n\n## 边界与反例\n不适用需要忽略单命令失败的场景',
+            evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }],
+          },
+        ],
+      };
     }
+    throw new Error(`unexpected task ${task}`);
   });
 }
 

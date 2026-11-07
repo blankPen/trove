@@ -9,7 +9,6 @@ import {
   type QualityScore,
 } from '../../src/core/lessons/memory.js';
 import { buildMemoryHealth } from '../../src/core/lessons/health.js';
-import { writeInboxItem } from '../../src/core/lessons/inbox.js';
 import { trovePaths } from '../../src/paths.js';
 import { tmpVault, vaultRoot } from '../helpers/vault.js';
 
@@ -116,21 +115,10 @@ describe('buildMemoryHealth', () => {
     expect(h.usage).toEqual({ retrieved: 3, viewed: 1, helpful: 1, harmful: 1, last7d: 1 });
   });
 
-  it('inbox 待审数与 trust 等级', async () => {
-    await writeInboxItem(storage, {
-      id: 'inbox_a',
-      session: 'sess-1',
-      type: 'experiences/gotcha',
-      title: '待审标题',
-      content: '正文',
-      evidence: EVID,
-      promptVersion: 'exp-v3',
-      createdAt: '2026-02-01T00:00:00.000Z',
-    });
-
+  it('审核下线后 inbox/trust 指标恒为 0', async () => {
     const h = await buildMemoryHealth(trovePaths(base), () => NOW);
 
-    expect(h.inboxPending).toBe(1);
+    expect(h.inboxPending).toBe(0);
     expect(h.trustLevel).toBe(0);
   });
 

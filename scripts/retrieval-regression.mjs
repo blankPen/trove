@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 检索回归对照：同一批真实查询上跑「现状 FTS」与「qmd 混合检索」，输出 hit@1/hit@3。
+ * 检索回归：同一批真实查询上跑 qmd 混合检索，输出 hit@1/hit@3。
  * 用法：pnpm build && node scripts/retrieval-regression.mjs [--build]
  *   --build  顺带重建 qmd 索引（首次约 10 分钟，需要本地 GGUF 模型）
  *
@@ -9,7 +9,6 @@
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { LessonsIndex } from '../dist/core/search/lessons-index.js';
 import { syncQmdIndex, searchQmd } from '../dist/core/search/qmd.js';
 
 const base = process.env.TROVE_HOME || join(homedir(), '.trove');
@@ -55,7 +54,6 @@ async function walk(root, rel = '') {
   return out;
 }
 
-const index = await LessonsIndex.build(vaultRoot);
 const text = new Map();
 for (const rel of await walk(lessonsRoot)) {
   const raw = await readFile(join(lessonsRoot, rel), 'utf8');
@@ -78,7 +76,6 @@ if (process.argv.includes('--build')) {
 
 const rows = [];
 for (const [q, keys] of QUERIES) {
-  const fts = index.search({ query: q, limit: 3 }).map((h) => h.path);
   const t0 = Date.now();
   let qmd = [];
   let err = '';
@@ -87,19 +84,17 @@ for (const [q, keys] of QUERIES) {
   } catch (e) {
     err = e.message.slice(0, 80);
   }
-  rows.push({ q, keys, fts, qmd, err, ms: Date.now() - t0, ftsH: hit(fts, keys), qmdH: hit(qmd, keys) });
+  rows.push({ q, keys, qmd, err, ms: Date.now() - t0, qmdH: hit(qmd, keys) });
   console.log(`[${rows.length}/${QUERIES.length}] ${q} (qmd ${Date.now() - t0}ms)`);
 }
 
 const n = (field, sub) => rows.filter((r) => r[field][sub] > 0).length;
 console.log(`\n查询数 ${rows.length}`);
-console.log(`现状 FTS(strict)    hit@1=${n('ftsH', 'h1')}/${rows.length}  hit@3=${n('ftsH', 'h3')}/${rows.length}`);
 console.log(`qmd query(hybrid)    hit@1=${n('qmdH', 'h1')}/${rows.length}  hit@3=${n('qmdH', 'h3')}/${rows.length}`);
 const avg = rows.reduce((n2, r) => n2 + r.ms, 0) / rows.length;
 console.log(`qmd 单条查询平均耗时 ${avg.toFixed(0)}ms`);
 console.log('');
 for (const r of rows) {
   console.log(`Q: ${r.q}  [主题词 ${r.keys.join('/')}]`);
-  console.log(`   fts  h3=${r.ftsH.h3} ${r.fts.slice(0, 3).join(' | ') || '(空)'}`);
   console.log(`   qmd  h3=${r.qmdH.h3}${r.err ? ' ERR ' + r.err : ''} ${r.qmd.slice(0, 3).join(' | ') || '(空)'}`);
 }

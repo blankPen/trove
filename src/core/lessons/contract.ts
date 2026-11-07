@@ -75,14 +75,3 @@ export function stripEvidenceSection(content: string): string {
   return (head + tail).replace(/\s+$/, '') + '\n';
 }
 
-export function decideQuality(
-  total: number,
-  q: QualityScore,
-  cfg: LearnQualityConfig,
-): { decision: 'accept' | 'escalate' | 'reject'; reason: string } {
-  if (q.evidence < cfg.evidenceMin) return { decision: 'reject', reason: 'evidence_below_min' };
-  const dimsOk = [q.specific, q.actionable, q.transferable, q.evidence, q.non_duplicate].every((v) => v >= 0.6);
-  if (total >= cfg.autoAccept && dimsOk) return { decision: 'accept', reason: 'quality_auto' };
-  if (total >= cfg.reviewFloor) return { decision: 'escalate', reason: 'quality_borderline' };
-  return { decision: 'reject', reason: 'quality_below_floor' };
-}

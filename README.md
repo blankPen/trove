@@ -189,8 +189,9 @@ trove skills show review        # every version and origin of one skill
 trove library reindex           # rebuild the unified index from device shards
 trove usage --since 7d --json
 trove whoami                    # profile, preferences, recent direction
-trove lessons search "edit button"   # FTS5 over lessons
+trove lessons search "edit button"   # qmd hybrid search (needs models)
 trove lessons show <path>       # read one lesson
+trove lessons reindex           # incremental qmd index rebuild (via daemon when running)
 trove sessions search "COS signature" # FTS5 over sessions
 trove sessions search "SignatureDoesNotMatch" --exact  # linear grep
 trove sessions show <id> --around "SignatureDoesNotMatch"
@@ -204,9 +205,18 @@ trove status --json             # machine-readable overview
 
 Lessons search runs on [qmd](https://github.com/tobi/qmd): BM25 + query expansion + HyDE + local vectors + LLM reranking, all offline. The five lesson categories are registered as qmd collections under one index (`~/.trove/cache/qmd.sqlite`), rebuilt incrementally by `trove learn`. The embedding model is `Qwen3-Embedding-0.6B` (GGUF, q8), run locally through `node-llama-cpp`; qmd also needs its query-expansion (1.7B) and reranker (0.6B) models — about 2.3 GB, downloaded once into `~/.cache/qmd/models`. Only that first download needs network.
 
-Tune it under `learn.search` — `enabled`, `model`, `host` (the Hugging Face mirror used as `HF_ENDPOINT`, default `https://hf-mirror.com`), `minScore`. It degrades gracefully: no network, missing model, or an empty/corrupt index all fall back to pure FTS5, so commands never error.
+Tune it under `learn.search` — `enabled`, `model`, `host` (the Hugging Face mirror used as `HF_ENDPOINT`, default `https://hf-mirror.com`), `minScore`. There is **no FTS fallback**: if the backend is disabled, the model is missing, or the index is corrupt, search errors out instead of silently returning nothing. `trove lessons list/show` do not touch the model and keep working.
 
 Note: hybrid retrieval is a full local model round-trip, so a cold query takes seconds, not milliseconds; qmd caches query expansions, so repeats of the same query are much faster.
+
+#### Resident search service (model reuse through the daemon)
+
+Once `trove daemon` is running it keeps the qmd models warm and publishes a search endpoint on a random `127.0.0.1` port (port and token live in `~/.trove/daemon.search.json`, mode 0600). The CLI and `trove mcp` probe and reuse it, so the models load once per machine; when the daemon is down they fall back to loading in-process — same results, just slower.
+
+- `search.mode`: `auto` (default, probe the daemon) / `daemon` / `local`; `search.timeoutMs` defaults to 3000.
+- `daemon.search.enabled` defaults to on; `port` defaults to 0 (random); `keepWarmMinutes` defaults to 15 (0 = no keep-alive).
+- HTTP-capable clients can connect to `POST http://127.0.0.1:<port>/mcp` with the same token; `GET /v1/health` reports the protocol, model warmth and index counts.
+- The daemon runs an incremental `update + embed` after every sync round (remote pulls or hand edits show up within one cycle); `trove lessons reindex` forces it immediately.
 
 ### Knowledge base for agents (skill + MCP)
 
@@ -222,7 +232,7 @@ Note: hybrid retrieval is a full local model round-trip, so a cold query takes s
 | `trove_session_get` | `trove sessions show` | Events around a match |
 | `trove_status` | `trove status --json` | Index and data freshness |
 
-Search is **SQLite FTS5 + BM25** through Node's built-in `node:sqlite`, with CJK 2-gram preprocessing. Lessons use an in-process index (~280 ms cold); sessions use a persistent incremental index at `~/.trove/cache/search.sqlite` (local cache, rebuildable, never synced). Exact identifiers — error codes, function names, paths — fall back to `--exact` linear grep, which covers the tool output the index truncates to 1 KB.
+Lesson search runs on qmd (above); `lessons list/show`, `whoami` and session search never touch the model. Sessions use **SQLite FTS5 + BM25** through Node's built-in `node:sqlite`, with CJK 2-gram preprocessing, backed by a persistent incremental index at `~/.trove/cache/search.sqlite` (local cache, rebuildable, never synced). Exact identifiers — error codes, function names, paths — fall back to `--exact` linear grep, which covers the tool output the index truncates to 1 KB.
 
 ```sh
 claude mcp add trove -- trove mcp

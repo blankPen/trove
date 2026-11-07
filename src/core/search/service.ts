@@ -24,8 +24,19 @@ export interface LessonResult extends LessonDoc {
   truncated: boolean;
 }
 
-/** 检索后端配置：由 CLI/MCP 从 learn.search 映射；缺省走纯 FTS。 */
+/** 检索后端配置：由 CLI/MCP 从 learn.search 映射；未启用时 searchLessons 直接报错。 */
 export type SearchBackendConfig = QmdSearchConfig;
+
+/** 外部检索通道（daemon）。返回 null 表示这条通道不可用，调用方回落本地。 */
+export interface LessonSearchTransport {
+  readonly kind: 'daemon';
+  search(query: string, opts: { category?: string; limit?: number }): Promise<QmdHit[] | null>;
+}
+
+/** 结果来源，供 --json / 日志观测；由 searchLessons 就地填充。 */
+export interface SearchRunMeta {
+  backend?: 'daemon' | 'qmd' | 'list';
+}
 
 export interface SessionSearchResult {
   results: Awaited<ReturnType<SessionsIndex['search']>>['results'];
@@ -79,21 +90,41 @@ export async function searchLessons(
   vaultRoot: string,
   opts: LessonQuery,
   backend?: SearchBackendConfig,
+  transport?: LessonSearchTransport,
+  meta?: SearchRunMeta,
 ): Promise<LessonHit[]> {
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
+  const query = opts.query?.trim() ?? '';
+  // 无查询词 = 浏览目录，不是检索。
+  if (!query) {
+    if (meta) meta.backend = 'list';
+    return listLessons(vaultRoot, opts);
+  }
   let hits: LessonHit[] = [];
-  // qmd 检索失败或无命中 → 落回纯 FTS；检索永远不报错。
-  if (backend && opts.query?.trim()) {
-    try {
-      hits = await qmdSearch(vaultRoot, opts, backend);
-    } catch {
-      hits = [];
+  let viaRemote = false;
+  // 优先 daemon；它返回 null（未运行/超时）才在本进程加载模型。
+  if (transport) {
+    const remote = await transport
+      .search(query, {
+        ...(opts.category ? { category: opts.category } : {}),
+        ...(opts.limit !== undefined ? { limit: opts.limit } : {}),
+      })
+      .catch(() => null);
+    if (remote) {
+      viaRemote = true;
+      hits = await toLessonHits(vaultRoot, remote, opts);
     }
   }
-  if (hits.length === 0) {
-    const index = await getLessonsIndex(vaultRoot);
-    hits = index.search(opts);
+  if (!viaRemote) {
+    // daemon 活着但检索失败时不再本地加载：同机再装一份 2.5GB 模型既慢又抢内存。
+    if (transport) {
+      throw new Error('daemon 检索失败或超时；请重试，或运行 trove daemon status 查看状态');
+    }
+    // 不做 FTS 兜底：后端未启用或 qmd 失败时直接报错，不静默返回空结果。
+    if (!backend) throw new Error('检索后端未启用(learn.search.enabled=false 或配置不可读)');
+    hits = await qmdSearch(vaultRoot, opts, backend);
   }
+  if (meta) meta.backend = viaRemote ? 'daemon' : 'qmd';
   try {
     // 使用反馈排序;usage 读取失败不阻断检索,保留原排序。
     hits = applyUsageRanking(hits, summarizeMemoryUsage(await readMemoryUsage(storage)), { cwd: opts.cwd });

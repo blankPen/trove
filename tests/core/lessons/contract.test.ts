@@ -4,7 +4,6 @@ import {
   lintExperience,
   appendEvidenceSection,
   stripEvidenceSection,
-  decideQuality,
 } from '../../../src/core/lessons/contract.js';
 import type { QualityScore } from '../../../src/core/lessons/memory.js';
 
@@ -124,30 +123,3 @@ describe('stripEvidenceSection', () => {
   });
 });
 
-describe('decideQuality', () => {
-  it('证据低于硬门 → reject evidence_below_min', () => {
-    expect(decideQuality(0.9, q({ evidence: 0.79 }), cfg)).toEqual({ decision: 'reject', reason: 'evidence_below_min' });
-  });
-
-  it('total ≥ autoAccept 且五维 ≥0.6 → accept quality_auto', () => {
-    expect(decideQuality(0.85, q(), cfg)).toEqual({ decision: 'accept', reason: 'quality_auto' });
-  });
-
-  it('total 达标但某维 <0.6 → escalate quality_borderline', () => {
-    expect(decideQuality(0.85, q({ specific: 0.5 }), cfg).decision).toBe('escalate');
-  });
-
-  it('total ∈ [reviewFloor, autoAccept) → escalate', () => {
-    expect(decideQuality(0.7, q(), cfg)).toEqual({ decision: 'escalate', reason: 'quality_borderline' });
-  });
-
-  it('total < reviewFloor → reject quality_below_floor', () => {
-    expect(decideQuality(0.5, q(), cfg)).toEqual({ decision: 'reject', reason: 'quality_below_floor' });
-  });
-
-  it('边界值:证据 0.8 恰好通过硬门,total 0.80 恰好 accept、0.60 恰好 escalate', () => {
-    expect(decideQuality(0.8, q({ evidence: 0.8 }), cfg).decision).toBe('accept');
-    expect(decideQuality(0.6, q(), cfg).decision).toBe('escalate');
-    expect(decideQuality(0.599, q(), cfg).decision).toBe('reject');
-  });
-});

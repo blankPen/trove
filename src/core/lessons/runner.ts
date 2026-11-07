@@ -154,6 +154,5 @@ function parseCheckpoint(job: Job): Checkpoint | null {
 
 function describeDiff(outcome: ExtractionOutcome): string {
   const d = outcome.diff?.summary;
-  const pending = outcome.pending ? ` · 待审 ${outcome.pending}` : '';
-  return `新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}${pending}`;
+  return `新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}`;
 }

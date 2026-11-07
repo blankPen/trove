@@ -155,33 +155,6 @@ export interface Usage {
   pendingExtraction: string[];
 }
 
-export interface InboxItem {
-  id: string;
-  session: string;
-  type: string;
-  title: string;
-  content: string;
-  evidence: Array<{ session: string; seq: number; quote: string; path?: string; line?: number }>;
-  scope?: string;
-  quality?: { specific: number; actionable: number; transferable: number; evidence: number; non_duplicate: number };
-  confidence?: number;
-  trajectoryId?: string;
-  promptVersion: string;
-  createdAt: string;
-}
-
-export interface InboxState {
-  items: InboxItem[];
-  trust: {
-    level: number;
-    accepted: number;
-    rejected: number;
-    since: string;
-    updatedAt: string;
-    lastRejectedAt?: string;
-  };
-}
-
 export interface MemoryHealth {
   total: number;
   byCategory: Record<string, number>;
@@ -192,8 +165,6 @@ export interface MemoryHealth {
   lowQuality: number;
   duplicates: number;
   unreferencedTrajectories: number;
-  inboxPending: number;
-  trustLevel: number;
   usage: { retrieved: number; viewed: number; helpful: number; harmful: number; last7d: number };
   jobs?: { queued: number; running: number; retry: number; dead: number } | null;
   searchIndex: { documents: number; needsEmbedding: number } | null;
@@ -241,9 +212,6 @@ export const api = {
       `/api/skills/file?name=${encodeURIComponent(name)}&hash=${encodeURIComponent(hash)}&rel=${encodeURIComponent(rel)}`,
     ),
   usage: () => get<Usage>('/api/usage'),
-  inbox: () => get<InboxState>('/api/inbox'),
-  acceptInbox: (id: string) => post<{ paths: string[] }>(`/api/inbox/${encodeURIComponent(id)}/accept`),
-  rejectInbox: (id: string) => post<{ ok: boolean }>(`/api/inbox/${encodeURIComponent(id)}/reject`),
   health: () => get<MemoryHealth>('/api/health'),
   daemon: () => get<{ running: boolean; pid?: number; status: DaemonStatus | null }>('/api/daemon'),
   restartDaemon: () => post<{ pid: number; wasRunning: boolean }>('/api/daemon/restart'),

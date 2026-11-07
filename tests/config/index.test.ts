@@ -59,6 +59,7 @@ describe('config(设计 §10.2)', () => {
       startOnInit: true,
       learnIntervalSeconds: 60,
       learnBatch: 3,
+      search: { enabled: true, port: 0, keepWarmMinutes: 15 },
     });
 
     // 老配置文件没有 daemon 字段
@@ -72,6 +73,7 @@ describe('config(设计 §10.2)', () => {
       startOnInit: true,
       learnIntervalSeconds: 60,
       learnBatch: 3,
+      search: { enabled: true, port: 0, keepWarmMinutes: 15 },
     });
 
     // 显式 false / 自定义值不会被回填覆盖,learn 缺省仍按默认补齐
@@ -84,6 +86,7 @@ describe('config(设计 §10.2)', () => {
       startOnInit: false,
       learnIntervalSeconds: 60,
       learnBatch: 3,
+      search: { enabled: true, port: 0, keepWarmMinutes: 15 },
     });
   });
 

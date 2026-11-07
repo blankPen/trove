@@ -189,3 +189,61 @@ describe('applyOperations · v2 meta', () => {
     expect(archived).not.toContain('status: active');
   });
 });
+
+describe('applyOperations · 增量写入安全', () => {
+  it('patch 锚点失配 → stale,不覆盖现有内容', async () => {
+    await applyOperations(
+      [{ op: 'add', type: 'experiences/gotcha', path: 'experiences/g.md', title: '旧标题', content: '旧正文', evidence: [], meta: meta() }],
+      { storage, now: () => t0 },
+    );
+    const r = await applyOperations(
+      [{ op: 'patch', type: 'experiences/gotcha', path: 'experiences/g.md', title: '新标题', content: '新正文', before: '不存在的锚点文本', meta: meta() }],
+      { storage, now: () => t0 },
+    );
+    expect(r.stale).toEqual(['experiences/g.md']);
+    expect(r.updated).toEqual([]);
+    expect(await storage.read('experiences/g.md')).toContain('旧正文');
+  });
+
+  it('patch 成功时留一份 archive 备份', async () => {
+    await applyOperations(
+      [{ op: 'add', type: 'experiences/gotcha', path: 'experiences/g.md', title: '旧标题', content: '旧正文', evidence: [], meta: meta() }],
+      { storage, now: () => t0 },
+    );
+    const r = await applyOperations(
+      [{ op: 'patch', type: 'experiences/gotcha', path: 'experiences/g.md', title: '新标题', content: '新正文', before: '旧正文', meta: meta() }],
+      { storage, now: () => t0 },
+    );
+    expect(r.updated).toEqual(['experiences/g.md']);
+    const backups = (await storage.list('archive/')).filter((p) => p.endsWith('.bak'));
+    expect(backups).toHaveLength(1);
+    expect(await storage.read(backups[0]!)).toContain('旧正文');
+  });
+
+  it('add 同路径已存在 → skipped,不覆盖', async () => {
+    await applyOperations(
+      [{ op: 'add', type: 'experiences/gotcha', path: 'experiences/g.md', title: '标题', content: '原正文', evidence: [], meta: meta() }],
+      { storage, now: () => t0 },
+    );
+    const r = await applyOperations(
+      [{ op: 'add', type: 'experiences/gotcha', path: 'experiences/g.md', title: '标题', content: '覆盖正文', evidence: [], meta: meta() }],
+      { storage, now: () => t0 },
+    );
+    expect(r.skipped).toEqual(['experiences/g.md']);
+    expect(await storage.read('experiences/g.md')).toContain('原正文');
+  });
+
+  it('append 内容已存在 → skipped,不重复追加', async () => {
+    await applyOperations(
+      [{ op: 'append', type: 'resources/doc', path: 'resources/docs/a.md', content: '资源正文' }],
+      { storage, now: () => t0 },
+    );
+    const r = await applyOperations(
+      [{ op: 'append', type: 'resources/doc', path: 'resources/docs/a.md', content: '资源正文' }],
+      { storage, now: () => t0 },
+    );
+    expect(r.skipped).toEqual(['resources/docs/a.md']);
+    const text = (await storage.read('resources/docs/a.md'))!;
+    expect(text.split('资源正文')).toHaveLength(2); // 只出现一次
+  });
+});

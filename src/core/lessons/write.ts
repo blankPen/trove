@@ -21,6 +21,8 @@ export interface ApplyResult {
   appended: string[];
   archived: string[];
   skipped: string[];
+  /** patch 锚点失配(文件在读取后被改过),未写入,不覆盖。 */
+  stale: string[];
 }
 
 const SECTION: Record<string, string> = {
@@ -33,10 +35,15 @@ const SECTION: Record<string, string> = {
 
 export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise<ApplyResult> {
   const now = () => (deps.now ?? (() => new Date()))().toISOString();
-  const res: ApplyResult = { added: [], updated: [], appended: [], archived: [], skipped: [] };
+  const res: ApplyResult = { added: [], updated: [], appended: [], archived: [], skipped: [], stale: [] };
 
   for (const op of ops) {
     if (op.op === 'add') {
+      // 写层幂等:同路径已存在时不覆盖(merge 层正常已拦,这里防并发/重跑)。
+      if (await deps.storage.exists(op.path)) {
+        res.skipped.push(op.path);
+        continue;
+      }
       await deps.storage.write(op.path, renderV2File(op, now()));
       res.added.push(op.path);
       const archive = op.archivePath ?? op.supersedePath;
@@ -45,13 +52,25 @@ export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise
       }
     } else if (op.op === 'patch') {
       const existing = await deps.storage.read(op.path);
-      await deps.storage.write(op.path, renderV2Patch(op, existing, now()));
-      res.updated.push(op.path);
+      if (existing === null) {
+        res.skipped.push(op.path);
+      } else if (!existing.includes(op.before)) {
+        // 乐观锁:锚点对不上说明文件已被改过,放弃本次覆盖。
+        res.stale.push(op.path);
+      } else {
+        await backupForPatch(op.path, existing, deps.storage);
+        await deps.storage.write(op.path, renderV2Patch(op, existing, now()));
+        res.updated.push(op.path);
+      }
     } else if (op.op === 'append') {
       const existing = (await deps.storage.read(op.path)) ?? '';
-      const sep = existing && !existing.endsWith('\n') ? '\n' : '';
-      await deps.storage.write(op.path, existing + sep + op.content + '\n');
-      res.appended.push(op.path);
+      if (existing.includes(op.content.trim())) {
+        res.skipped.push(op.path);
+      } else {
+        const sep = existing && !existing.endsWith('\n') ? '\n' : '';
+        await deps.storage.write(op.path, existing + sep + op.content + '\n');
+        res.appended.push(op.path);
+      }
     } else {
       res.skipped.push(op.title);
     }
@@ -60,6 +79,12 @@ export async function applyOperations(ops: MemoryOp[], deps: WriteDeps): Promise
   await updateIndex(ops, deps.storage);
   await touchSidecars(deps.storage, affectedDirs(ops), { trigger: 'memory_write', now: deps.now });
   return res;
+}
+
+/** patch 前留存旧版本:合并可能丢内容,保留可回滚副本(archive/ 不计入记忆)。 */
+async function backupForPatch(path: string, text: string, storage: StorageAdapter): Promise<void> {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  await storage.write(`archive/${path}.${stamp}.bak`, text);
 }
 
 /** 无 meta 的旧调用方(memo/recent)自动补 v2 meta;有 meta 直接用。 */

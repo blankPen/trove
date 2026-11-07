@@ -1,6 +1,6 @@
 /** 容量预算:经验按项目/全局、实体按类型、偏好 profile 按字节限制;写满返回可解释拒绝与淘汰建议。 */
 import type { MemoryOp } from './merge.js';
-import type { ExistingForGate } from './gateway.js';
+import type { ExistingMemory } from './existing.js';
 import { qualityTotal } from './memory.js';
 
 export interface CapacityConfig {
@@ -36,7 +36,7 @@ export const DEFAULT_CAPACITY: CapacityConfig = {
 /** 只对净新增的 add 生效:patch/append 不计,supersede(add+归档)净增 0 也不计。被拒绝的 op 转成 skip。 */
 export function applyCapacity(
   ops: MemoryOp[],
-  existing: ExistingForGate[],
+  existing: ExistingMemory[],
   cfg: CapacityConfig,
 ): { ops: MemoryOp[]; rejected: Array<{ op: Extract<MemoryOp, { op: 'add' }>; decision: CapacityDecision }> } {
   // 本批 add(排除 supersede)按 scope/type 的增量,供「同 scope/type 的 add 数」计数。
@@ -110,7 +110,7 @@ export function applyCapacity(
     return suggestions(existing.filter((e) => e.type === type));
   }
 
-  function suggestions(list: ExistingForGate[]): CapacitySuggestion[] {
+  function suggestions(list: ExistingMemory[]): CapacitySuggestion[] {
     return list
       .map((e) => ({ path: e.path, title: e.title, score: evictScore(e) }))
       .sort((a, b) => a.score - b.score)
@@ -118,7 +118,7 @@ export function applyCapacity(
   }
 
   /** 淘汰优先级:质量低、用得少的先淘汰;无 quality 记 0。 */
-  function evictScore(e: ExistingForGate): number {
+  function evictScore(e: ExistingMemory): number {
     const q = e.quality;
     return (q ? qualityTotal(q) : 0) * (1 + (e.useCount ?? 0));
   }

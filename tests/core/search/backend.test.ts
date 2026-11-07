@@ -89,21 +89,32 @@ describe('searchLessons · qmd 后端', () => {
     expect(search.mock.calls[1]![0]).toMatchObject({ collections: ['experiences'] });
   });
 
-  it('qmd 报错时回落纯 FTS，不抛错', async () => {
+  it('qmd 报错时直接抛出，不静默回落', async () => {
     search.mockRejectedValue(new Error('database disk image is malformed'));
-    const hits = await searchLessons(vault, { query: 'SignatureDoesNotMatch' }, backend);
-    expect(hits.map((h) => h.path)).toEqual(['experiences/cos.md']);
+    await expect(searchLessons(vault, { query: 'SignatureDoesNotMatch' }, backend)).rejects.toThrow(
+      'database disk image is malformed',
+    );
   });
 
-  it('qmd 无命中时回落纯 FTS', async () => {
+  it('qmd 无命中时返回空，不回落 FTS', async () => {
     search.mockResolvedValue([]);
-    const hits = await searchLessons(vault, { query: 'lark-cli' }, backend);
-    expect(hits.map((h) => h.path)).toEqual(['entities/lark.md']);
+    expect(await searchLessons(vault, { query: 'lark-cli' }, backend)).toEqual([]);
   });
 
-  it('不传后端时不碰 qmd', async () => {
-    const hits = await searchLessons(vault, { query: 'lark-cli' });
+  it('daemon 通道失败时直接报错，不回落本地', async () => {
+    const transport = { kind: 'daemon' as const, search: async () => null };
+    await expect(searchLessons(vault, { query: 'COS 签名' }, backend, transport)).rejects.toThrow('daemon 检索失败');
     expect(search).not.toHaveBeenCalled();
-    expect(hits.map((h) => h.path)).toEqual(['entities/lark.md']);
+  });
+
+  it('daemon 通道返回空数组时如实返回空，不回落', async () => {
+    const transport = { kind: 'daemon' as const, search: async () => [] };
+    expect(await searchLessons(vault, { query: 'COS 签名' }, backend, transport)).toEqual([]);
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('不传后端时直接报错，不碰 qmd', async () => {
+    await expect(searchLessons(vault, { query: 'lark-cli' })).rejects.toThrow('检索后端未启用');
+    expect(search).not.toHaveBeenCalled();
   });
 });

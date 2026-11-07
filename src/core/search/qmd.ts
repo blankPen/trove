@@ -131,6 +131,24 @@ export async function searchQmd(
   return hits;
 }
 
+/** 预热：跑一次最小检索，把嵌入/查询扩展/重排三个模型都加载进当前进程。 */
+export async function warmQmdStore(vaultRoot: string, cfg: QmdSearchConfig): Promise<void> {
+  await searchQmd(vaultRoot, 'warmup', cfg, { limit: 1 });
+}
+
+/**
+ * 重置 qmd 的空闲卸载计时器（5 分钟无活动会 dispose 模型）。
+ * shortcut: 依赖 qmd 的 internal.llm.touchActivity，qmd 升级时这里是最先断的点；
+ * 断了返回 false，调用方按"不保活"降级。
+ */
+export function touchQmdActivity(): boolean {
+  const llm = (cached?.store as unknown as { internal?: { llm?: { touchActivity?: () => void } } })
+    ?.internal?.llm;
+  if (typeof llm?.touchActivity !== 'function') return false;
+  llm.touchActivity();
+  return true;
+}
+
 /** 索引状态：文档数与待嵌入数；索引不存在或损坏返回 null。 */
 export async function qmdIndexStatus(
   vaultRoot: string,

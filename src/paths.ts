@@ -17,6 +17,8 @@ export interface TrovePaths {
   daemonPid: string;
   daemonStatus: string;
   daemonLog: string;
+  /** daemon 检索通道的端口与 token(0600,每次启动轮换) */
+  daemonSearch: string;
   /** learn 待办队列(不在 vault 内,不参与同步) */
   learnQueue: string;
   /** learn 作业队列 SQLite(不在 vault 内,不参与同步) */
@@ -41,6 +43,7 @@ export function trovePaths(
     daemonPid: join(base, 'daemon.pid'),
     daemonStatus: join(base, 'daemon.status.json'),
     daemonLog: join(base, 'logs', 'daemon.log'),
+    daemonSearch: join(base, 'daemon.search.json'),
     learnQueue: join(base, 'learn-queue.json'),
     learnDb: join(base, 'cache', 'learn.db'),
     qmdDb: join(base, 'cache', 'qmd.sqlite'),

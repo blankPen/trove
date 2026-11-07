@@ -189,8 +189,9 @@ trove skills show review        # 某技能的全部版本与来源
 trove library reindex           # 从设备分片重建统一索引
 trove usage --since 7d --json
 trove whoami                    # 用户画像、偏好、近期方向
-trove lessons search "飞书 编辑" # FTS5 检索经验
+trove lessons search "飞书 编辑" # qmd 混合检索(需模型)
 trove lessons show <path>       # 读单条 lesson
+trove lessons reindex           # 增量重建 qmd 索引(daemon 在时由 daemon 执行)
 trove sessions search "COS 签名" # FTS5 会话检索
 trove sessions search "SignatureDoesNotMatch" --exact  # 线性精确检索
 trove sessions show <id> --around "SignatureDoesNotMatch"
@@ -204,9 +205,18 @@ trove status --json             # 机器可读概览
 
 lessons 检索走 [qmd](https://github.com/tobi/qmd)：BM25 + 查询扩展 + HyDE + 本地向量 + LLM 重排，全程离线。5 个记忆类目注册成 qmd collection，共用一份索引（`~/.trove/cache/qmd.sqlite`），由 `trove learn` 增量重建。嵌入模型是 `Qwen3-Embedding-0.6B`（GGUF、q8），经 `node-llama-cpp` 本地运行；qmd 还需要它的查询扩展（1.7B）与重排（0.6B）模型，合计约 2.3 GB，首次下载到 `~/.cache/qmd/models`，仅该次下载需要联网。
 
-用 `learn.search` 配置：`enabled`、`model`、`host`（作为 `HF_ENDPOINT` 的 Hugging Face 镜像，默认 `https://hf-mirror.com`）、`minScore`。降级可靠：无网络、缺模型、索引为空或损坏都回退纯 FTS5，命令不会报错。
+用 `learn.search` 配置：`enabled`、`model`、`host`（作为 `HF_ENDPOINT` 的 Hugging Face 镜像，默认 `https://hf-mirror.com`）、`minScore`。**没有 FTS 兜底**：后端关闭、模型缺失或索引损坏时检索直接报错，不会静默返回空结果；`trove lessons list/show` 不依赖模型，仍然可用。
 
 注意：混合检索要走一遍本地模型，冷查询是秒级而不是毫秒级；qmd 会缓存查询扩展，同一查询重复问会快很多。
+
+#### 常驻检索服务（daemon 复用模型）
+
+`trove daemon` 启动后会把 qmd 模型常驻在自己进程里，并在 `127.0.0.1` 的随机端口发布检索端点（端口与 token 写在 `~/.trove/daemon.search.json`，权限 0600）。CLI 与 `trove mcp` 探测到该端点就复用它，同一台机器上模型只加载一次；daemon 不在时自动回落本进程加载，结果一致、只是慢。
+
+- `search.mode`：`auto`（默认，探测 daemon）/ `daemon` / `local`；`search.timeoutMs` 默认 3000。
+- `daemon.search.enabled` 默认开启；`port` 默认 0（随机）；`keepWarmMinutes` 默认 15（0 = 不保活）。
+- 支持 HTTP 的客户端可直接连 `POST http://127.0.0.1:<port>/mcp`（同一 token）；`GET /v1/health` 返回协议版本、模型热态与索引计数。
+- 索引增量维护：daemon 每轮同步后自动 `update + embed`（远端拉取或手改文件一个周期内可见）；`trove lessons reindex` 可立即触发。
 
 ### 给 agent 的知识库（skill + MCP）
 
@@ -222,7 +232,7 @@ lessons 检索走 [qmd](https://github.com/tobi/qmd)：BM25 + 查询扩展 + HyD
 | `trove_session_get` | `trove sessions show` | 命中位置附近的事件 |
 | `trove_status` | `trove status --json` | 索引与数据新鲜度 |
 
-检索底层是 Node 22 内置 `node:sqlite` 的 **SQLite FTS5 + BM25**，中文按 2-gram 预处理。lessons 用进程内索引（约 280ms 冷构建）；sessions 用持久化增量索引 `~/.trove/cache/search.sqlite`（本机缓存，可删除重建，不参与同步）。报错码、函数名、路径等精确标识符用 `--exact` 线性 grep 兜底——它会覆盖索引只保留前 1KB 的工具输出。
+lessons 检索走 qmd（见上节）；`lessons list/show`、`whoami` 与 sessions 检索不依赖模型。sessions 用 Node 22 内置 `node:sqlite` 的 **SQLite FTS5 + BM25**（中文 2-gram 预处理），持久化增量索引在 `~/.trove/cache/search.sqlite`（本机缓存，可删除重建，不参与同步）。报错码、函数名、路径等精确标识符用 `--exact` 线性 grep 兜底——它会覆盖索引只保留前 1KB 的工具输出。
 
 ```bash
 claude mcp add trove -- trove mcp

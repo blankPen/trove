@@ -98,41 +98,36 @@ function v2Jev(): JevProvider {
   return {
     async score() { return { taskSuccess: 1, meanScore: 1 }; },
     async keepCalls(_s: unknown, q: Record<string, { instructions: string }>): Promise<Record<string, number>> {
-      return Object.fromEntries(Object.keys(q).map((k) => [k, 0.95]));
+      // noise 分恒 0、reusable 恒高分:保留全部调用对。
+      return Object.fromEntries(Object.keys(q).map((k) => [k, k.endsWith(':noise') ? 0 : 0.95]));
     },
   };
 }
 
-/** v2 LLM:按 task 路由,走通 auto 全链路(摘要→分类→轨迹→提取→质量/身份裁决)。 */
+/** 单次结构化分析:返回一条经验 op,走通 auto 全链路。 */
 function v2Llm(): MockLlm {
   return new MockLlm((_p, _s, task) => {
-    switch (task) {
-      case 'learn:summarize':
-        return { topic: '脚本退出码', intent: '修复脚本退出码', outcome: 'success', keySteps: ['set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
-      case 'learn:classify':
-        return { preferences: false, entities: false, experiences: true, events: false, resources: false };
-      case 'learn:trajectory':
-        return { task: '调试脚本退出码', outcome: 'success', reusableSignals: ['用 set -e 立即中断'] };
-      case 'learn:extract':
-        return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: '## 适用场景\nshell 脚本需要失败即中断的场景\n\n## 做法\n在脚本开头运行 `set -e`\n\n## 验证\n后续命令出错时脚本立即退出\n\n## 边界与反例\n不适用于需要忽略单个命令失败的场景', evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }] }] };
-      case 'learn:triage':
-        return { decision: 'accept' };
-      case 'learn:quality':
-        return { decision: 'accept' };
-      case 'learn:identity':
-        return { decision: 'add' };
-      case 'learn:merge':
-        return { content: 'merged' };
-      default:
-        throw new Error(`unexpected task ${task}`);
+    if (task === 'learn:extract-ops') {
+      return {
+        ops: [
+          {
+            action: 'add',
+            type: 'experiences/debug_pattern',
+            title: '脚本退出应该用 set -e', slug: 'set-e',
+            content: '## 适用场景\nshell 脚本需要失败即中断的场景\n\n## 做法\n在脚本开头运行 `set -e`\n\n## 验证\n后续命令出错时脚本立即退出\n\n## 边界与反例\n不适用于需要忽略单个命令失败的场景',
+            evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }],
+          },
+        ],
+      };
     }
+    throw new Error(`unexpected task ${task}`);
   });
 }
 
-/** 摘要 outcome=trivial 的 LLM,用于验证跳过语义。 */
+/** 无候选产出:验证 no_ops 跳过语义。 */
 function trivialLlm(): MockLlm {
   return new MockLlm((_p, _s, task) => {
-    if (task === 'learn:summarize') return { topic: '闲聊', intent: '聊天', outcome: 'trivial', keySteps: [], hasError: false, hasCorrection: false, hasWorkflow: false };
+    if (task === 'learn:extract-ops') return { ops: [] };
     throw new Error(`unexpected task ${task}`);
   });
 }
@@ -174,7 +169,6 @@ describe('learn 入口(v2 单轨编排)', () => {
     const memPath = files.find((f) => f.startsWith('experiences/') && !f.startsWith('experiences/.'));
     expect(memPath).toBeTruthy();
     expect(await storage.read(memPath!)).toContain('kind: experience');
-    expect(files.some((f) => f.startsWith('trajectories/'))).toBe(true);
     expect(await storage.read('INDEX.md')).not.toBeNull();
     expect(await storage.read('audit/s-1.json')).not.toBeNull();
   });
@@ -224,14 +218,14 @@ describe('learn 入口(v2 单轨编排)', () => {
     expect(forced.diff?.summary.adds).toBe(1);
   });
 
-  it('runLessonExtraction 摘要 trivial 跳过 → 落 skipped 标记,不写记忆', async () => {
+  it('runLessonExtraction 无候选产出 → 落 skipped 标记,不写记忆', async () => {
     const ev = sampleEvents('s-1');
     await writeSession('claude-code', 's-1', ev);
     await writeIndex([{ harness: 'claude-code', session: 's-1', events: ev }]);
 
     const outcome = await runLessonExtraction(vault, 's-1', { llm: trivialLlm(), jev: v2Jev(), config: learnCfg('auto') });
 
-    expect(outcome.skipReason).toBe('trivial');
+    expect(outcome.skipReason).toBe('no_ops');
     expect(await storage.read('audit/s-1.skipped.json')).not.toBeNull();
     expect(await storage.read('audit/s-1.json')).toBeNull();
   });

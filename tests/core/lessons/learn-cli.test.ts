@@ -13,9 +13,6 @@ import type { MemoryOp } from '../../../src/core/lessons/merge.js';
 import { MockLlm } from '../../../src/core/lessons/llm.js';
 import type { JevProvider } from '../../../src/core/lessons/jev.js';
 import type { Event } from '../../../src/core/events/schema.js';
-import { listInbox, writeInboxItem } from '../../../src/core/lessons/inbox.js';
-import type { InboxItem } from '../../../src/core/lessons/inbox.js';
-import { readTrust } from '../../../src/core/lessons/trust.js';
 
 let base: string;
 let storage: LocalStorageAdapter;
@@ -90,7 +87,7 @@ function v2Jev(): JevProvider {
   return {
     async score() { return { taskSuccess: 1, meanScore: 1 }; },
     async keepCalls(_s: unknown, q: Record<string, unknown>): Promise<Record<string, number>> {
-      return Object.fromEntries(Object.keys(q).map((k) => [k, 0.95]));
+      return Object.fromEntries(Object.keys(q).map((k) => [k, k.endsWith(':noise') ? 0 : 0.95]));
     },
   };
 }
@@ -98,26 +95,6 @@ function v2Jev(): JevProvider {
 /** 默认 review 下需要写记忆的用例显式切 auto(与规格一致)。 */
 function autoLearn() {
   return { learn: { mode: 'auto' as const, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } };
-}
-
-function reviewLearn() {
-  return { learn: { mode: 'review' as const, autoMigrate: true, quality: { autoAccept: 0.8, reviewFloor: 0.6, evidenceMin: 0.8 }, jev: { maxCallsPerSession: 8, timeoutMs: 2000 } } };
-}
-
-function inboxItem(overrides: Partial<InboxItem> = {}): InboxItem {
-  return {
-    id: 'inbox_abc123',
-    session: 's-1',
-    type: 'experiences/debug_pattern',
-    title: '脚本退出应该用 set -e',
-    content: EXPERIENCE_CONTENT,
-    evidence: [{ session: 's-1', seq: 1, quote: '脚本退出应该用 set -e' }],
-    quality: { specific: 0.9, actionable: 0.9, transferable: 0.8, evidence: 1, non_duplicate: 0.9 },
-    confidence: 0.9,
-    promptVersion: 'exp-v3',
-    createdAt: '2026-01-01T00:00:00.000Z',
-    ...overrides,
-  };
 }
 
 /** 经验类五段式正文,通过契约 lint。 */
@@ -138,21 +115,20 @@ const EXPERIENCE_CONTENT = [
 /** v2 单轨 LLM:按 task 路由,单经验。 */
 function happyLlm(): MockLlm {
   return new MockLlm((_p, _s, task) => {
-    switch (task) {
-      case 'learn:summarize':
-        return { topic: '调试脚本', intent: '修复脚本退出码', outcome: 'success', keySteps: ['改用 set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
-      case 'learn:classify':
-        return { preferences: false, entities: false, experiences: true, events: false, resources: false };
-      case 'learn:trajectory':
-        return { task: '调试脚本退出码', outcome: 'success', reusableSignals: ['用 set -e 立即中断'] };
-      case 'learn:extract':
-        return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: EXPERIENCE_CONTENT, slug: 'set-e', evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }] }] };
-      case 'learn:triage': return { decision: 'accept' };
-      case 'learn:quality': return { decision: 'accept' };
-      case 'learn:identity': return { decision: 'add' };
-      case 'learn:merge': return { content: '脚本退出应该用 set -e' };
-      default: throw new Error(`unexpected task ${task}`);
+    if (task === 'learn:extract-ops') {
+      return {
+        ops: [
+          {
+            action: 'add',
+            type: 'experiences/debug_pattern',
+            title: '脚本退出应该用 set -e', slug: 'set-e',
+            content: EXPERIENCE_CONTENT,
+            evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }],
+          },
+        ],
+      };
     }
+    throw new Error(`unexpected task ${task}`);
   });
 }
 
@@ -200,34 +176,37 @@ function chatEvents(session: string): Event[] {
   ];
 }
 
-/** v2 端到端 mock:分类同开偏好与经验;extract 按提示词里的类别标签返回对应记忆。 */
+/** 端到端 mock:一次返回经验 + 偏好两条 op。 */
 function richLlm(): MockLlm {
-  return new MockLlm((prompt, _s, task) => {
-    switch (task) {
-      case 'learn:summarize':
-        return { topic: '调试脚本', intent: '修复脚本退出码并固化偏好', outcome: 'success', keySteps: ['改用 set -e'], hasError: true, hasCorrection: true, hasWorkflow: false };
-      case 'learn:classify':
-        return { preferences: true, entities: false, experiences: true, events: false, resources: false };
-      case 'learn:trajectory':
-        return { task: '调试脚本退出码', outcome: 'success', reusableSignals: ['用 set -e 立即中断'] };
-      case 'learn:extract':
-        if (prompt.includes('「偏好」')) {
-          return { memories: [{ type: 'preferences/coding_style', title: 'shell 脚本统一使用 set -e', content: '用户偏好:shell 脚本统一使用 set -e 让错误立即中断', evidence: [{ seq: 2, quote: '以后所有 shell 脚本都用 set -e' }] }] };
-        }
-        return { memories: [{ type: 'experiences/debug_pattern', title: '脚本退出应该用 set -e', content: EXPERIENCE_CONTENT, slug: 'set-e', evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }] }] };
-      case 'learn:triage': return { decision: 'accept' };
-      case 'learn:quality': return { decision: 'accept' };
-      case 'learn:identity': return { decision: 'add' };
-      case 'learn:merge': return { content: 'shell 脚本统一使用 set -e 让错误立即中断' };
-      default: throw new Error(`unexpected task ${task}`);
+  return new MockLlm((_p, _s, task) => {
+    if (task === 'learn:extract-ops') {
+      return {
+        ops: [
+          {
+            action: 'add',
+            type: 'experiences/debug_pattern',
+            title: '脚本退出应该用 set -e', slug: 'set-e',
+            content: EXPERIENCE_CONTENT,
+            evidence: [{ seq: 1, quote: '脚本退出应该用 set -e' }],
+          },
+          {
+            action: 'add',
+            type: 'preferences/coding_style',
+            title: 'shell 脚本统一使用 set -e',
+            content: '用户偏好:shell 脚本统一使用 set -e 让错误立即中断',
+            evidence: [{ seq: 2, quote: '以后所有 shell 脚本都用 set -e' }],
+          },
+        ],
+      };
     }
+    throw new Error(`unexpected task ${task}`);
   });
 }
 
-/** 纯闲聊 mock:摘要返回 trivial,阶段 4 由模型跳过。 */
+/** 纯闲聊 mock:无候选产出。 */
 function chatLlm(): MockLlm {
   return new MockLlm((_p, _s, task) => {
-    if (task === 'learn:summarize') return { topic: '闲聊', intent: '聊天', outcome: 'trivial', keySteps: [], hasError: false, hasCorrection: false, hasWorkflow: false };
+    if (task === 'learn:extract-ops') return { ops: [] };
     throw new Error(`unexpected task ${task}`);
   });
 }
@@ -304,15 +283,6 @@ describe('trove learn 无 Jev 配置(外部增强可选)', () => {
     expect(await storage.read('audit/s-1.json')).not.toBeNull();
   });
 
-  it('learn review --accept-all:无 Jev 配置不阻断审核', async () => {
-    await writeInboxItem(storage, inboxItem());
-
-    const code = await runLearn(['learn', 'review', '--accept-all'], { lessonDeps: { llm: happyLlm(), config: reviewLearn() } });
-
-    expect(code).toBe(0);
-    expect(lines.join('\n')).not.toContain('缺少 Jev 配置');
-    expect(await listInbox(storage)).toEqual([]);
-  });
 });
 
 describe('全局端到端验收(端到端-1..4)', () => {
@@ -334,7 +304,6 @@ describe('全局端到端验收(端到端-1..4)', () => {
     expect(files).toContain('.overview.md');
     expect(files).toContain('memory_diff.json');
     expect(files).toContain('audit/e2e-1.json');
-    expect(files.some((f) => f.startsWith('trajectories/'))).toBe(true);
   });
 
   it('端到端-2:纯闲聊会话由模型摘要判 trivial 跳过,落 skipped 标记,不产生记忆文件', async () => {
@@ -343,7 +312,7 @@ describe('全局端到端验收(端到端-1..4)', () => {
     const code = await runLearn(['learn', 'e2e-2'], { lessonDeps: { llm: chatLlm(), jev: v2Jev(), config: autoLearn() } });
 
     expect(code).toBe(0);
-    expect(lines.join('\n')).toContain('会话未达提取阈值,跳过: trivial');
+    expect(lines.join('\n')).toContain('跳过: no_ops');
     // 只留骨架文件 + 跳过标记;无记忆文件、memory_diff 或成功审计
     const SKELETON = new Set(['INDEX.md', '.overview.md', 'README.md', '.trove/decisions.jsonl', '.trove/migrated-v2.json', 'audit/e2e-2.skipped.json']);
     const extra = (await storage.list()).filter((f) => !SKELETON.has(f));
@@ -364,10 +333,10 @@ describe('全局端到端验收(端到端-1..4)', () => {
     expect(await runLearn(['learn', 'e2e-3'], deps)).toBe(0);
     expect(lines.join('\n')).toContain('该会话已提取过,跳过');
 
-    // --force 重跑:debug_pattern(add)同路径幂等跳过、coding_style(patch)记为更新,文件不翻倍
+    // --force 重跑:同路径 add 一律幂等跳过,文件不翻倍
     lines.length = 0;
     expect(await runLearn(['learn', 'e2e-3', '--force'], deps)).toBe(0);
-    expect(lines.join('\n')).toContain('本次新增 0 条、更新 1 条、追加 0 条、跳过 0 条');
+    expect(lines.join('\n')).toContain('本次新增 0 条、更新 0 条、追加 0 条、跳过 2 条');
     expect((await storage.list()).filter((f) => f.startsWith('experiences/debug-'))).toEqual(['experiences/debug-set-e.md']);
     expect((await storage.list()).filter((f) => f.startsWith('preferences/coding_style'))).toEqual(['preferences/coding_style.md']);
     // 会话审计只落一份成功记录(不重复)
@@ -441,56 +410,9 @@ describe('trove learn -n(批量学习最近会话)', () => {
   });
 });
 
-describe('trove learn review/why/trust(人工审核与信任)', () => {
-  it('review --accept-all 接受候选:记忆落盘、inbox 清空、trust.accepted 增加', async () => {
-    await writeInboxItem(storage, inboxItem());
-
-    const code = await runLearn(['learn', 'review', '--accept-all'], { lessonDeps: { llm: happyLlm(), jev: v2Jev(), config: reviewLearn() } });
-
-    expect(code).toBe(0);
-    expect(await listInbox(storage)).toEqual([]);
-    expect((await storage.list()).some((f) => f.startsWith('experiences/') && f.endsWith('.md'))).toBe(true);
-    const t = await readTrust(storage);
-    expect(t.accepted).toBe(1);
-    expect(t.rejected).toBe(0);
-  });
-
-  it('review --reject-all 拒绝候选:inbox 清空、trust.rejected 增加', async () => {
-    await writeInboxItem(storage, inboxItem());
-
-    const code = await runLearn(['learn', 'review', '--reject-all'], { lessonDeps: { llm: happyLlm(), jev: v2Jev(), config: reviewLearn() } });
-
-    expect(code).toBe(0);
-    expect(await listInbox(storage)).toEqual([]);
-    expect((await storage.list()).some((f) => f.startsWith('experiences/') && f.endsWith('.md'))).toBe(false);
-    const t = await readTrust(storage);
-    expect(t.accepted).toBe(0);
-    expect(t.rejected).toBe(1);
-  });
-
-  it('why 输出 inbox 候选的标题、质量与证据', async () => {
-    await writeInboxItem(storage, inboxItem());
-
-    const code = await runLearn(['learn', 'why', 'inbox_abc123']);
-
-    expect(code).toBe(0);
-    const output = lines.join('\n');
-    expect(output).toContain('脚本退出应该用 set -e');
-    expect(output).toContain('specific=0.9');
-    expect(output).toContain('脚本退出应该用 set -e');
-  });
-
-  it('trust --level 2 显式设置信任等级', async () => {
-    const code = await runLearn(['learn', 'trust', '--level', '2']);
-
-    expect(code).toBe(0);
-    expect(lines.join('\n')).toContain('L2');
-    expect((await readTrust(storage)).level).toBe(2);
-  });
-});
 
 describe('trove learn status/pause/resume/retry 与 trove doctor(A3 可用性)', () => {
-  it('learn status --json 输出队列统计、inbox 待审与 trust', async () => {
+  it('learn status --json 输出队列统计与 stale 记忆', async () => {
     const queue = JobQueue.open(trovePaths(base).learnDb);
     queue.enqueue([{ sessionKey: 'claude-code:s-1', contentHash: 'h1' }]);
     queue.close();
@@ -500,8 +422,7 @@ describe('trove learn status/pause/resume/retry 与 trove doctor(A3 可用性)',
     expect(code).toBe(0);
     const parsed = JSON.parse(lines.join('\n'));
     expect(parsed.queue.queued).toBe(1);
-    expect(parsed.inboxPending).toBe(0);
-    expect(parsed.trust).toBe(0);
+    expect(parsed.staleMemories).toBe(0);
   });
 
   it('learn pause/resume 切换 learn.paused 并落盘', async () => {

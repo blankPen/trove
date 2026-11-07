@@ -90,7 +90,6 @@ export default function Health() {
 function Kpis({ h }: { h: MemoryHealth }) {
   const cells: Array<[string, number]> = [
     ['记忆', h.total],
-    ['待审', h.inboxPending],
     ['stale', h.stale],
     ['归档', h.archived],
     ['固定', h.pinned],

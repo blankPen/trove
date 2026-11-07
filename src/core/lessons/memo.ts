@@ -14,7 +14,7 @@ import { mergeMemories } from './merge.js';
 import { applyOperations } from './write.js';
 import { buildMemoryDiff, writeMemoryDiff } from './audit.js';
 import { getMemoryType, slugify } from './schema.js';
-import type { MemoryCandidate } from './extract.js';
+import type { MemoryCandidate } from './merge.js';
 import type { LessonProviderDeps, ExtractionOutcome } from './learn.js';
 
 /** Claude Code 记忆 type → trove 17 类 type。映射表硬编码;project→gotcha 是近似兜底,要调再抽配置。 */

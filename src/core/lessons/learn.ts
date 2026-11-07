@@ -15,7 +15,7 @@ import type { LlmProvider } from './llm.js';
 import { createUsageSink } from './usage.js';
 import { TypeSafeJevScorer } from './jev.js';
 import type { JevProvider } from './jev.js';
-import { runLessonPipelineV2 } from './v2.js';
+import { runLessonPipeline } from './pipeline.js';
 import type { MemoryDiff } from './audit.js';
 import { readLearnQueue } from './queue.js';
 import { autoMigrateLessons } from './migrate.js';
@@ -45,10 +45,8 @@ export interface LessonProviderDeps {
 export interface ExtractionOutcome {
   diff?: MemoryDiff;
   skipReason?: string;
-  /** v2 shadow 模式:已跑流水线但只写审计/决策,未写记忆。 */
+  /** shadow/review 模式:已跑流水线但只写审计,未写记忆。 */
   shadow?: boolean;
-  /** review 模式本次新写入 inbox 的候选数(待审)。 */
-  pending?: number;
 }
 
 /** 从统一索引解析单会话的 canonical 事件;裸 session 错配多个 harness 时报歧义。 */
@@ -109,7 +107,7 @@ export async function runLessonExtraction(
     return { skipReason: 'already_learned' };
   }
   const { llm, jev } = resolveProviders(deps);
-  const out = await runLessonPipelineV2(sessionId, {
+  const out = await runLessonPipeline(sessionId, {
     llm,
     jev,
     storage,
@@ -142,7 +140,7 @@ export async function runLessonExtraction(
       )
       .catch(() => {});
   }
-  return { diff: out.diff, skipReason: out.skipReason, shadow: out.shadow, pending: out.pending };
+  return { diff: out.diff, skipReason: out.skipReason, shadow: out.shadow };
 }
 
 /**
@@ -283,7 +281,6 @@ export async function learnRecentBatch(
   let extracted = 0;
   let skipped = 0;
   let failed = 0;
-  let pendingTotal = 0;
   for (let i = 0; i < keys.length; i++) {
     const key = keys[i]!;
     const started = Date.now();
@@ -307,10 +304,8 @@ export async function learnRecentBatch(
         opts.log?.(`[${i + 1}/${keys.length}] ${key} shadow 模式:未写记忆,${outcome.diff?.summary.skips ?? 0} 条候选记入审计 · ${took()}`);
       } else {
         extracted++;
-        pendingTotal += outcome.pending ?? 0;
         const d = outcome.diff?.summary;
-        const pending = outcome.pending ? ` · 待审 ${outcome.pending}` : '';
-        opts.log?.(`[${i + 1}/${keys.length}] ${key} 完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0}${pending} · ${took()}`);
+        opts.log?.(`[${i + 1}/${keys.length}] ${key} 完成:新增 ${d?.adds ?? 0}、更新 ${d?.updates ?? 0}、跳过 ${d?.skips ?? 0} · ${took()}`);
       }
     } catch (e) {
       // 文件在候选筛选后消失/未落地:不写 failed 标记,同步补齐后还能补学
@@ -325,6 +320,5 @@ export async function learnRecentBatch(
       opts.log?.(`[${i + 1}/${keys.length}] ${key} 失败:${msg}`);
     }
   }
-  const pendingPart = pendingTotal > 0 ? ` · 待审 ${pendingTotal}` : '';
-  return `经验提取完成:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 共 ${keys.length} 个会话${pendingPart}`;
+  return `经验提取完成:新增 ${extracted} · 跳过 ${skipped} · 失败 ${failed} · 共 ${keys.length} 个会话`;
 }

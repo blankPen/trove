@@ -56,6 +56,26 @@ export interface DaemonConfig {
   learnIntervalSeconds: number;
   /** learn 每个 tick 最多处理的候选会话数 */
   learnBatch: number;
+  /** 检索服务(daemon 作为本机唯一检索运行时);缺省按默认值。 */
+  search?: DaemonSearchConfig;
+}
+
+export type SearchMode = 'auto' | 'daemon' | 'local';
+
+/** CLI/MCP 侧检索通道:自动探测 daemon,不可用时本进程加载模型。 */
+export interface SearchClientConfig {
+  mode: SearchMode;
+  /** 探测与请求 daemon 的超时(毫秒)。 */
+  timeoutMs: number;
+}
+
+/** daemon 侧检索服务。 */
+export interface DaemonSearchConfig {
+  enabled: boolean;
+  /** 监听端口;0 = 随机(绑定 127.0.0.1)。 */
+  port: number;
+  /** 最近一次检索后保持模型热的分钟数;0 = 不保活。 */
+  keepWarmMinutes: number;
 }
 
 /** v2 学习质量门限(0..1)。 */
@@ -146,6 +166,8 @@ export interface Config {
   sources: SourcesConfig;
   sync: SyncConfig;
   daemon: DaemonConfig;
+  /** CLI/MCP 的检索通道选择;缺省 auto。 */
+  search?: SearchClientConfig;
   /** 经验提取 LLM 端点;缺省视为未配置,手动 learn 时报错提示 trove config set */
   llm?: { baseUrl: string; model: string; apiKey: string };
   /** Jev 打分端点;baseUrl 缺省用官方端点,可指向代理/镜像绕过区域限制 */
@@ -182,7 +204,15 @@ export function defaultConfig(
       doubao: { enabled: true },
     },
     sync: { raw: true },
-    daemon: { intervalSeconds: 300, since: '7d', startOnInit: true, learnIntervalSeconds: 60, learnBatch: 3 },
+    daemon: {
+      intervalSeconds: 300,
+      since: '7d',
+      startOnInit: true,
+      learnIntervalSeconds: 60,
+      learnBatch: 3,
+      search: { enabled: true, port: 0, keepWarmMinutes: 15 },
+    },
+    search: { mode: 'auto', timeoutMs: 15_000 },
     learn: defaultLearnConfig(),
   };
 }
@@ -213,7 +243,9 @@ export async function loadConfig(path: string): Promise<Config> {
       startOnInit: parsed.daemon?.startOnInit !== false,
       learnIntervalSeconds: parsed.daemon?.learnIntervalSeconds ?? 60,
       learnBatch: parsed.daemon?.learnBatch ?? 3,
+      search: normalizeDaemonSearch(parsed.daemon?.search),
     },
+    search: normalizeSearchClient(parsed.search),
     learn: normalizeLearn(parsed.learn),
   };
 }
@@ -262,6 +294,35 @@ export function normalizeLearn(learn: unknown): LearnConfig {
       minScore: Math.max(0, num(s.minScore, d.search.minScore)),
     },
   };
+}
+
+const SEARCH_MODES: readonly SearchMode[] = ['auto', 'daemon', 'local'];
+
+/** CLI/MCP 检索通道归一化:非法 mode 回退 auto,超时下限 100ms。 */
+export function normalizeSearchClient(v: unknown): SearchClientConfig {
+  const s = (v ?? {}) as Record<string, unknown>;
+  return {
+    mode: (SEARCH_MODES as readonly unknown[]).includes(s.mode) ? (s.mode as SearchMode) : 'auto',
+    timeoutMs: Math.max(100, num(s.timeoutMs, 15_000)),
+  };
+}
+
+/** daemon 检索服务归一化:端口钳到 [0,65535],保活分钟数非负。 */
+export function normalizeDaemonSearch(v: unknown): DaemonSearchConfig {
+  const s = (v ?? {}) as Record<string, unknown>;
+  return {
+    enabled: s.enabled !== false,
+    port: Math.min(65535, Math.max(0, Math.trunc(num(s.port, 0)))),
+    keepWarmMinutes: Math.max(0, num(s.keepWarmMinutes, 15)),
+  };
+}
+
+export function resolveSearchClient(config: Pick<Config, 'search'>): SearchClientConfig {
+  return normalizeSearchClient(config.search);
+}
+
+export function resolveDaemonSearch(config: Pick<Config, 'daemon'>): DaemonSearchConfig {
+  return normalizeDaemonSearch(config.daemon?.search);
 }
 
 function strNonEmpty(v: unknown, fallback: string): string {

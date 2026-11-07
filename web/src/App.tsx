@@ -4,7 +4,6 @@ import Overview from './pages/Overview.tsx';
 import Sessions from './pages/Sessions.tsx';
 import SessionDetail from './pages/SessionDetail.tsx';
 import Lessons from './pages/Lessons.tsx';
-import Inbox from './pages/Inbox.tsx';
 import Health from './pages/Health.tsx';
 import Skills from './pages/Skills.tsx';
 import Usage from './pages/Usage.tsx';
@@ -29,7 +28,6 @@ export default function App() {
         <Route path="/sessions" element={<Sessions />} />
         <Route path="/sessions/:key" element={<SessionDetail />} />
         <Route path="/lessons" element={<Lessons />} />
-        <Route path="/inbox" element={<Inbox />} />
         <Route path="/health" element={<Health />} />
         <Route path="/skills" element={<Skills />} />
         <Route path="/usage" element={<Usage />} />

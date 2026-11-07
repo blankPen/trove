@@ -81,8 +81,9 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     maxWaitMs: opts.maxWaitMs ?? 120_000,
   };
   const publicDir = opts.publicDir ?? fileURLToPath(new URL('../public/', import.meta.url));
+  let boundPort = opts.port ?? 8787;
   const server = createServer((req, res) => {
-    void handle(req, res, opts, state, now, publicDir);
+    void handle(req, res, opts, state, now, publicDir, boundPort);
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
@@ -92,6 +93,7 @@ export async function startServer(opts: ServerOptions): Promise<RunningServer> {
     });
   });
   const addr = server.address() as AddressInfo;
+  boundPort = addr.port;
   return {
     url: `http://127.0.0.1:${addr.port}`,
     port: addr.port,
@@ -110,6 +112,35 @@ interface ServerState {
   maxWaitMs: number;
 }
 
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1']);
+
+/** Host 必须是回环地址且端口匹配,挡住 DNS rebinding。 */
+function hostAllowed(hostHeader: string | undefined, port: number): boolean {
+  if (!hostHeader) return false;
+  let u: URL;
+  try {
+    u = new URL(`http://${hostHeader}`);
+  } catch {
+    return false;
+  }
+  if (!LOOPBACK_HOSTS.has(u.hostname)) return false;
+  return u.port === '' ? port === 80 : Number(u.port) === port;
+}
+
+/** Origin 缺失(非浏览器/本地 CLI)或与本机同源才放行,挡住跨站 POST。 */
+function originAllowed(origin: string | undefined, port: number): boolean {
+  if (origin === undefined) return true;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  if (!LOOPBACK_HOSTS.has(u.hostname)) return false;
+  return u.port !== '' && Number(u.port) === port;
+}
+
 async function handle(
   req: import('node:http').IncomingMessage,
   res: import('node:http').ServerResponse,
@@ -117,9 +148,14 @@ async function handle(
   state: ServerState,
   now: () => number,
   publicDir: string,
+  port: number,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1');
   try {
+    if (!hostAllowed(req.headers.host, port) || !originAllowed(req.headers.origin, port)) {
+      json(res, 403, { error: '只接受本机同源请求' });
+      return;
+    }
     if (url.pathname === '/api/overview') {
       json(res, 200, await buildOverview({ ...opts, now }));
       return;

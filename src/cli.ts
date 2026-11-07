@@ -1199,7 +1199,7 @@ async function cmdStatus(
     : Promise.resolve(null);
   const [index, libraryPending, daemon, remote, lessons, learnPending] = await Promise.all([
     loadLibraryIndex(paths.vault),
-    computeLibraryPending(paths.vault, state),
+    computeLibraryPending(paths.vault, state, config.device.id),
     daemonState(paths),
     probe,
     computeLessonsSummary(paths.vault),

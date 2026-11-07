@@ -3,6 +3,7 @@ import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import type { HarnessId } from '../../adapters/index.js';
 import { libraryDir, libraryIndexDir, libraryMergedRelPath, librarySkillsDir } from '../layout.js';
+import { validateRelPath } from '../remote-layout.js';
 import type { Event } from '../events/schema.js';
 import { pickLatestHash } from './schema.js';
 import type {
@@ -97,6 +98,7 @@ async function mergeDoubaoVariants(
   let header: Event | null = null;
 
   for (const item of items) {
+    if (!validateRelPath(item.variant.path)) continue;
     let text: string;
     try {
       text = await readFile(join(libraryDir(vaultRoot), ...item.variant.path.split('/')), 'utf8');

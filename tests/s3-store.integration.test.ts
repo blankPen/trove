@@ -15,6 +15,15 @@ interface Obj {
   body: Buffer;
 }
 
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 function parseXmlList(body: string): { keys: string[]; prefixes: string[]; sizes: Record<string, number> } {
   const keys: string[] = [];
   const prefixes: string[] = [];
@@ -72,9 +81,9 @@ class FakeS3 {
       }
       const parts: string[] = [];
       for (const k of keys) {
-        parts.push(`<Contents><Key>${k}</Key><Size>${this.objects.get(k)!.body.length}</Size></Contents>`);
+        parts.push(`<Contents><Key>${xmlEscape(k)}</Key><Size>${this.objects.get(k)!.body.length}</Size></Contents>`);
       }
-      for (const p of prefixes) parts.push(`<CommonPrefixes><Prefix>${p}</Prefix></CommonPrefixes>`);
+      for (const p of prefixes) parts.push(`<CommonPrefixes><Prefix>${xmlEscape(p)}</Prefix></CommonPrefixes>`);
       const xml = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>${parts.join('')}</ListBucketResult>`;
       res.writeHead(200, { 'content-type': 'application/xml' }).end(xml);
       return;
@@ -302,6 +311,21 @@ describe('S3Store(假 S3 服务端集成)', () => {
     await store.readFile(key, got);
 
     expect((await readFile(got)).toString()).toBe('special');
+  });
+
+  it('list 还原 XML 实体:路径含 & < > 引号时与写入 key 一致', async () => {
+    const local = join(dir, 'xml.bin');
+    await writeFile(local, 'xml');
+    const dirKey = 'raw/dev1/files/claude-code/xml';
+    const name = 'a&b<c>d"e\'f.md';
+
+    await store.writeFile(`${dirKey}/${name}`, local);
+
+    const entries = await store.list(dirKey);
+    expect(entries.map((e) => e.name)).toContain(name);
+    // 递归列同样还原,且能作为后续读取/删除的 key
+    const all = await store.listAll(dirKey);
+    expect(all.map((e) => e.name)).toContain(`${dirKey}/${name}`);
   });
 });
 

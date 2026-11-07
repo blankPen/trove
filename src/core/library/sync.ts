@@ -3,6 +3,7 @@ import { mkdir, readdir, rename, stat, unlink, writeFile } from 'node:fs/promise
 import { dirname, join } from 'node:path';
 import { hashFile } from '../chunker.js';
 import { throwIfAborted } from '../collect.js';
+import { validateRelPath } from '../remote-layout.js';
 import { libraryDir, safeSessionName } from '../layout.js';
 import { silentProgress, type Progress } from '../../progress.js';
 import type { RemoteStore } from '../../remote/store.js';
@@ -34,6 +35,11 @@ async function writeAtomic(path: string, data: string | Buffer): Promise<void> {
   await rename(tmp, path);
 }
 
+/** 远端分片里的路径是不可信输入:绝对路径/穿越/反斜杠/NUL 一律拒绝。 */
+function safeLibraryPath(root: string, rel: string): string | null {
+  return validateRelPath(rel) ? join(root, ...rel.split('/')) : null;
+}
+
 export interface PushLibraryOptions {
   remote: RemoteStore;
   vaultRoot: string;
@@ -62,15 +68,19 @@ export interface PushLibraryResult {
  * 每台设备只写自己的分片;会话文件按大小+mtime 判断是否变化。
  * lessons 是共享沉淀,没有设备分片,多设备会互相覆盖(最后写赢)。
  */
-/** library 里需要推送的文件(相对 library 根);status 的待同步计数复用同一口径。 */
-export async function listLibraryFiles(vaultRoot: string): Promise<string[]> {
+/** library 里需要推送的本设备文件(相对 library 根);status 的待同步计数复用同一口径。 */
+export async function listLibraryFiles(
+  vaultRoot: string,
+  deviceId: string,
+): Promise<string[]> {
   const root = libraryDir(vaultRoot);
   const rank = (rel: string) => (rel.startsWith('index/') ? 1 : 0);
+  const ownSession = (rel: string) => rel.split('/').pop() === `${deviceId}.jsonl`;
   return [
-    ...(await walk(root, 'sessions')),
+    ...(await walk(root, 'sessions')).filter(ownSession),
     ...(await walk(root, 'skills')),
     ...(await walk(root, 'lessons')),
-    ...(await walk(root, 'index')).filter((rel) => rel.endsWith('.json')),
+    ...(await walk(root, 'index')).filter((rel) => rel === `index/${deviceId}.json`),
     // index 分片是引用其他文件的提交点:必须最后传,否则中断会留下指向不存在文件的悬空引用
   ].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
 }
@@ -79,7 +89,7 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
   const { remote, vaultRoot, state } = opts;
   const progress = opts.progress ?? silentProgress;
   const root = libraryDir(vaultRoot);
-  const files = await listLibraryFiles(vaultRoot);
+  const files = await listLibraryFiles(vaultRoot, opts.deviceId);
 
   let uploaded = 0;
   let bytes = 0;
@@ -205,7 +215,11 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
       throwIfAborted(opts.signal);
       itemNo++;
       const remotePath = `library/${entry.path}`;
-      const abs = join(root, ...entry.path.split('/'));
+      const abs = safeLibraryPath(root, entry.path);
+      if (!abs) {
+        console.warn(`[trove] 分片里的路径非法,已跳过: ${entry.path}`);
+        continue;
+      }
       // 本机文件是权威:存在就不拿远端(可能是旧分片)覆盖,只在缺失时恢复
       if (isSelf && (await localHash(abs)) !== null) {
         skipped++;
@@ -256,7 +270,11 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
       );
       for (const metaEntry of metaFiles) {
         const remoteMeta = `library/skills/${safe}/meta/${metaEntry.name}`;
-        const localMeta = join(root, 'skills', safe, 'meta', metaEntry.name);
+        const localMeta = safeLibraryPath(root, `skills/${safe}/meta/${metaEntry.name}`);
+        if (!localMeta) {
+          console.warn(`[trove] 技能 meta 路径非法,已跳过: ${metaEntry.name}`);
+          continue;
+        }
         const metaRaw = await remote.readJson(remoteMeta);
         if (!metaRaw || typeof metaRaw !== 'object') continue;
         await writeAtomic(localMeta, JSON.stringify(metaRaw, null, 2) + '\n');
@@ -265,7 +283,11 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
         for (const v of versions) {
           for (const f of v.files ?? []) {
             const rel = `skills/${safe}/versions/${v.hash}/${f.rel}`;
-            const target = join(root, ...rel.split('/'));
+            const target = safeLibraryPath(root, rel);
+            if (!target) {
+              console.warn(`[trove] 技能版本路径非法,已跳过: ${rel}`);
+              continue;
+            }
             if (await localHash(target)) {
               skipped++;
               continue;
@@ -298,7 +320,11 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
   for (const remotePath of remoteLessons) {
     throwIfAborted(opts.signal);
     const rel = remotePath.slice('library/'.length);
-    const target = join(root, ...rel.split('/'));
+    const target = safeLibraryPath(root, rel);
+    if (!target) {
+      console.warn(`[trove] 远端 lesson 路径非法,已跳过: ${rel}`);
+      continue;
+    }
     if (await localHash(target)) {
       skipped++;
       continue;
@@ -320,7 +346,10 @@ export async function pullLibrary(opts: PullLibraryOptions): Promise<PullLibrary
   // 内容文件全部落地后再写分片;剔除本地仍缺失的条目,统一索引不会指向不存在的文件
   for (const { abs, shard } of pendingShards) {
     const sessions = Object.fromEntries(
-      Object.entries(shard.sessions).filter(([, e]) => existsSync(join(root, ...e.path.split('/')))),
+      Object.entries(shard.sessions).filter(([, e]) => {
+        const abs = safeLibraryPath(root, e.path);
+        return abs !== null && existsSync(abs);
+      }),
     );
     await writeAtomic(abs, JSON.stringify({ ...shard, sessions }, null, 2) + '\n');
   }

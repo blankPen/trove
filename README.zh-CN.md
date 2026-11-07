@@ -13,7 +13,7 @@
 再合并成跟着你所有设备走的个人资产库。
 
 [![Release](https://img.shields.io/npm/v/trove-cli?label=release&color=111111)](https://www.npmjs.com/package/trove-cli) [![Stars](https://img.shields.io/github/stars/blankPen/trove?style=flat&color=111111)](https://github.com/blankPen/trove/stargazers) [![License](https://img.shields.io/badge/license-MIT-111111)](LICENSE)<br>
-![Node.js](https://img.shields.io/badge/Node.js-22%2B-000000?logo=node.js&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black) ![Windows](https://img.shields.io/badge/Windows-0078D4?logo=windows&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-22.13%2B-000000?logo=node.js&logoColor=white) ![macOS](https://img.shields.io/badge/macOS-000000?logo=apple&logoColor=white) ![Linux](https://img.shields.io/badge/Linux-FCC624?logo=linux&logoColor=black) ![Windows](https://img.shields.io/badge/Windows-0078D4?logo=windows&logoColor=white)
 
 [English](README.md) · **简体中文**
 
@@ -47,7 +47,7 @@ npm i -g trove-cli      # 提供 `trove` 命令
 npx trove-cli --help    # 也可以免安装试用
 ```
 
-npm 上不带 scope 的 `trove` 是别人的包，所以本项目发布为 **`trove-cli`**，命令行还是 `trove`。需要 Node.js 22 或更高版本。
+npm 上不带 scope 的 `trove` 是别人的包，所以本项目发布为 **`trove-cli`**，命令行还是 `trove`。需要 Node.js 22.13 或更高版本（`node:sqlite` 从该版本起不再需要实验开关）。
 
 **2 · 指向远端。** 跑交互式配置，它会先问你远端是哪一类，再按类型问对应字段：
 

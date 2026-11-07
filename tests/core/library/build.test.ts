@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { buildLibrary } from '../../../src/core/library/build.js';
 import { rebuildUnifiedIndex, loadLibraryIndex } from '../../../src/core/library/index-file.js';
@@ -179,5 +179,45 @@ describe('library:按会话身份归组', () => {
       '设备一的问题',
       '设备二的问题',
     ]);
+  });
+
+  it('豆包变体路径穿越时只读库内文件', async () => {
+    const vault = await tmp('trove-lib-evil-');
+    const outsideName = `trove-evil-doubao-${Date.now()}.jsonl`;
+    const outside = join(tmpdir(), outsideName);
+    const header = (session: string) =>
+      JSON.stringify({ kind: 'session', harness: 'doubao', session });
+    const message = (text: string) => JSON.stringify({ kind: 'message', role: 'user', text });
+
+    const insideRel = 'sessions/doubao/x/dev1.jsonl';
+    const insideAbs = join(vault, 'library', ...insideRel.split('/'));
+    await mkdir(dirname(insideAbs), { recursive: true });
+    await writeFile(insideAbs, [header('x'), message('OK')].join('\n') + '\n');
+    await writeFile(outside, [header('x'), message('EVIL')].join('\n') + '\n');
+
+    const shard = (device: string, path: string, hash: string): string =>
+      JSON.stringify({
+        v: 1,
+        device,
+        mapper: 'doubao',
+        updatedAt: '2026-10-23T00:00:00.000Z',
+        sessions: { 'doubao:x': { device, path, hash, events: 2, rawSources: [] } },
+        skills: {},
+      });
+    await mkdir(join(vault, 'library', 'index'), { recursive: true });
+    await writeFile(join(vault, 'library', 'index', 'dev1.json'), shard('dev1', insideRel, 'a'.repeat(64)));
+    await writeFile(
+      join(vault, 'library', 'index', 'dev2.json'),
+      shard('dev2', `sessions/doubao/x/../../../../../${outsideName}`, 'b'.repeat(64)),
+    );
+
+    const index = await rebuildUnifiedIndex(vault);
+    const merged = index.sessions['doubao:x']!;
+    const events = (await readFile(join(vault, 'library', merged.canonical.path), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+
+    expect(events.map((e) => e.text).filter(Boolean)).toEqual(['OK']);
   });
 });

@@ -211,3 +211,40 @@ describe('pushLibrary 断点续传', () => {
     expect(r.skipped).toBe(1);
   });
 });
+
+describe('pushLibrary 设备归属', () => {
+  it('只推本设备的会话文件与分片,不回传他设备/merged 产物', async () => {
+    const vault = await mkdtemp(join(tmpdir(), 'trove-libpush-own-'));
+    const files = [
+      'sessions/claude-code/s1/dev1.jsonl',
+      'sessions/claude-code/s1/dev2.jsonl',
+      'sessions/claude-code/s1/merged.abcd1234.jsonl',
+      'index/dev1.json',
+      'index/dev2.json',
+      'skills/review/versions/h/SKILL.md',
+      'lessons/preferences/style.md',
+    ];
+    for (const rel of files) {
+      const abs = join(vault, 'library', ...rel.split('/'));
+      await mkdir(dirname(abs), { recursive: true });
+      await writeFile(abs, `x:${rel}`);
+    }
+    const remote = new MemoryRemote();
+
+    await pushLibrary({
+      remote,
+      vaultRoot: vault,
+      deviceId: 'dev1',
+      state: emptyState(),
+      statePath: join(vault, 'state.json'),
+    });
+
+    expect(remote.writes).toContain('library/sessions/claude-code/s1/dev1.jsonl');
+    expect(remote.writes).toContain('library/index/dev1.json');
+    expect(remote.writes).toContain('library/skills/review/versions/h/SKILL.md');
+    expect(remote.writes).toContain('library/lessons/preferences/style.md');
+    expect(remote.writes).not.toContain('library/sessions/claude-code/s1/dev2.jsonl');
+    expect(remote.writes).not.toContain('library/sessions/claude-code/s1/merged.abcd1234.jsonl');
+    expect(remote.writes).not.toContain('library/index/dev2.json');
+  });
+});

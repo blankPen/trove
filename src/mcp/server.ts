@@ -27,7 +27,7 @@ export interface McpOptions {
   cacheDir: string;
   version: string;
   now?: () => number;
-  /** 检索后端配置;缺省纯 FTS。 */
+  /** 检索后端配置;未配置时检索工具直接返回错误。 */
   backend?: SearchBackendConfig;
 }
 

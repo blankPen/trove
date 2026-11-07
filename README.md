@@ -189,7 +189,7 @@ trove skills show review        # every version and origin of one skill
 trove library reindex           # rebuild the unified index from device shards
 trove usage --since 7d --json
 trove whoami                    # profile, preferences, recent direction
-trove lessons search "edit button"   # FTS5 over lessons
+trove lessons search "edit button"   # vector search over lessons (qmd / Bailian)
 trove lessons show <path>       # read one lesson
 trove sessions search "COS signature" # FTS5 over sessions
 trove sessions search "SignatureDoesNotMatch" --exact  # linear grep
@@ -204,7 +204,7 @@ trove status --json             # machine-readable overview
 
 By default lessons search runs on [qmd](https://github.com/tobi/qmd): BM25 + query expansion + HyDE + local vectors + LLM reranking, all offline. The five lesson categories are registered as qmd collections under one index (`~/.trove/cache/qmd.sqlite`), rebuilt incrementally by `trove learn`. The embedding model is `Qwen3-Embedding-0.6B` (GGUF, q8), run locally through `node-llama-cpp`; qmd also needs its query-expansion (1.7B) and reranker (0.6B) models — about 2.3 GB, downloaded once into `~/.cache/qmd/models`.
 
-You can switch the vectors to Alibaba Cloud Bailian (DashScope) instead — no local model download or startup at all. Retrieval becomes FTS5 keyword + cloud vectors fused with RRF, and the vector cache lives in `~/.trove/cache/cloud-vectors.sqlite`:
+You can switch the vectors to Alibaba Cloud Bailian (DashScope) instead — no local model download or startup at all. Retrieval is cloud-vector-only, and the vector cache lives in `~/.trove/cache/cloud-vectors.sqlite`:
 
 ```sh
 trove config set learn.search.provider dashscope
@@ -214,7 +214,7 @@ trove config set learn.search.dashscope.apiKey sk-xxx   # Bailian API key
 trove daemon restart   # rebuilds the vector index for the new provider on startup
 ```
 
-Cloud embeddings are billed by token (text-embedding-v4 is about ¥0.5 per million tokens, with a 1M-token free quota for new users); only incremental index updates and each query spend tokens. With `provider=local` the local knobs still apply: `learn.search` — `enabled`, `model`, `host` (the Hugging Face mirror used as `HF_ENDPOINT`, default `https://hf-mirror.com`), `minScore`. It degrades gracefully: no network, missing model/key, or an empty/corrupt index all fall back to pure FTS5, so commands never error.
+Cloud embeddings are billed by token (text-embedding-v4 is about ¥0.5 per million tokens, with a 1M-token free quota for new users); only incremental index updates and each query spend tokens. With `provider=local` the local knobs still apply: `learn.search` — `enabled`, `model`, `host` (the Hugging Face mirror used as `HF_ENDPOINT`, default `https://hf-mirror.com`), `minScore`. Search does not degrade: a missing backend, a local model that fails to load, an unreachable cloud API or an index that has not been built all make the command fail with an explicit error.
 
 Note: local hybrid retrieval is a full model round-trip, so a cold query takes seconds, not milliseconds; qmd caches query expansions, so repeats of the same query are much faster. The cloud provider adds one network round-trip per query (typically tens to hundreds of milliseconds).
 
@@ -232,7 +232,7 @@ Note: local hybrid retrieval is a full model round-trip, so a cold query takes s
 | `trove_session_get` | `trove sessions show` | Events around a match |
 | `trove_status` | `trove status --json` | Index and data freshness |
 
-Search is **SQLite FTS5 + BM25** through Node's built-in `node:sqlite`, with CJK 2-gram preprocessing. Lessons use an in-process index (~280 ms cold); sessions use a persistent incremental index at `~/.trove/cache/search.sqlite` (local cache, rebuildable, never synced). Exact identifiers — error codes, function names, paths — fall back to `--exact` linear grep, which covers the tool output the index truncates to 1 KB.
+Lessons search runs on a vector backend (local qmd or Bailian cloud, see above); sessions search is **SQLite FTS5 + BM25** through Node's built-in `node:sqlite`, with CJK 2-gram preprocessing and a persistent incremental index at `~/.trove/cache/search.sqlite` (local cache, rebuildable, never synced). Exact identifiers — error codes, function names, paths — fall back to `--exact` linear grep, which covers the tool output the index truncates to 1 KB.
 
 ```sh
 claude mcp add trove -- trove mcp

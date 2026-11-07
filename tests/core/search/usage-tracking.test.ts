@@ -1,17 +1,33 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { getLesson, searchLessons } from '../../../src/core/search/service.js';
-import { readMemoryUsage, recordMemoryUsage } from '../../../src/core/lessons/memory-usage.js';
-import { LocalStorageAdapter } from '../../../src/core/lessons/storage.js';
+
+// 后端只验证 trove 侧的映射与埋点，qmd 用假 store 替换，避免加载本地模型。
+const { qmdSearch } = vi.hoisted(() => ({ qmdSearch: vi.fn() }));
+vi.mock('@tobilu/qmd', () => ({
+  createStore: async () => ({
+    search: qmdSearch,
+    getStatus: async () => ({ totalDocuments: 0, needsEmbedding: 0, hasVectorIndex: false }),
+    update: async () => ({}),
+    embed: async () => ({}),
+    close: async () => {},
+  }),
+}));
+
+const { getLesson, searchLessons, closeSearchCache } = await import('../../../src/core/search/service.js');
+const { readMemoryUsage, recordMemoryUsage } = await import('../../../src/core/lessons/memory-usage.js');
+const { LocalStorageAdapter } = await import('../../../src/core/lessons/storage.js');
+
+const backend = { provider: 'local' as const, dbPath: join(tmpdir(), 'usage-qmd.sqlite'), model: 'hf:test' };
 
 let vault: string;
-let storage: LocalStorageAdapter;
+let storage: InstanceType<typeof LocalStorageAdapter>;
 
 beforeEach(async () => {
   vault = await mkdtemp(join(tmpdir(), 'trove-usage-track-'));
   storage = new LocalStorageAdapter(join(vault, 'library/lessons'));
+  qmdSearch.mockReset();
   const abs = join(vault, 'library/lessons/experiences');
   await mkdir(abs, { recursive: true });
   await writeFile(
@@ -41,12 +57,14 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeSearchCache();
   await rm(vault, { recursive: true, force: true });
 });
 
 describe('检索埋点(使用事件)', () => {
   it('searchLessons 对命中记忆记 retrieved(含 query 与 rank)', async () => {
-    const hits = await searchLessons(vault, { query: 'COS 签名' });
+    qmdSearch.mockResolvedValue([{ file: 'qmd://experiences/a.md', score: 0.9 }]);
+    const hits = await searchLessons(vault, { query: 'COS 签名' }, backend);
     expect(hits.length).toBeGreaterThan(0);
 
     const events = await readMemoryUsage(storage);
@@ -74,14 +92,15 @@ describe('检索埋点(使用事件)', () => {
       '---\ntype: experiences/gotcha\ntitle: "旧记忆"\n---\n\n旧正文\n',
       'utf8',
     );
+    qmdSearch.mockResolvedValue([{ file: 'qmd://experiences/old.md', score: 0.8 }]);
 
-    await searchLessons(vault, { query: '旧记忆' });
+    await searchLessons(vault, { query: '旧记忆' }, backend);
 
     expect(await readMemoryUsage(storage)).toEqual([]);
   });
 
   it('searchLessons 读 usage 后按反馈重排(有帮助/检索的记忆排前)', async () => {
-    // 第二条与第一条 bm25 相同(同标题词、同正文),仅靠 usage 提升排到最前。
+    // 两条同分,仅靠 usage 提升排到最前。
     const abs = join(vault, 'library/lessons/experiences');
     await writeFile(
       join(abs, 'b.md'),
@@ -109,8 +128,12 @@ describe('检索埋点(使用事件)', () => {
     );
     await recordMemoryUsage(storage, { at: '2026-01-02T00:00:00.000Z', memory_id: 'exp_track_2', action: 'retrieved' });
     await recordMemoryUsage(storage, { at: '2026-01-02T00:00:00.000Z', memory_id: 'exp_track_2', action: 'helpful' });
+    qmdSearch.mockResolvedValue([
+      { file: 'qmd://experiences/a.md', score: 0.5 },
+      { file: 'qmd://experiences/b.md', score: 0.5 },
+    ]);
 
-    const hits = await searchLessons(vault, { query: 'COS 签名' });
+    const hits = await searchLessons(vault, { query: 'COS 签名' }, backend);
     expect(hits[0]?.path).toBe('experiences/b.md');
   });
 });

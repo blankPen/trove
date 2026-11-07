@@ -26,7 +26,7 @@ export interface LessonResult extends LessonDoc {
   truncated: boolean;
 }
 
-/** 检索后端配置：由 CLI/MCP 从 learn.search 解析；缺省走纯 FTS。 */
+/** 检索后端配置：由 CLI/MCP 从 learn.search 解析；未配置时检索直接报错。 */
 export type SearchBackendConfig = SearchBackend;
 
 export interface SessionSearchResult {
@@ -64,7 +64,6 @@ export async function getLessonsIndex(vaultRoot: string): Promise<LessonsIndex> 
   const fingerprint = await lessonsFingerprint(vaultRoot);
   const cached = lessonsCache.get(vaultRoot);
   if (cached && cached.fingerprint === fingerprint) return cached.index;
-  cached?.index.close();
   const index = await LessonsIndex.build(vaultRoot);
   lessonsCache.set(vaultRoot, { index, fingerprint });
   return index;
@@ -72,7 +71,6 @@ export async function getLessonsIndex(vaultRoot: string): Promise<LessonsIndex> 
 
 /** 测试/进程退出时释放内存索引与 qmd 句柄。 */
 export function closeSearchCache(): void {
-  for (const entry of lessonsCache.values()) entry.index.close();
   lessonsCache.clear();
   void closeQmdStore();
 }
@@ -83,21 +81,14 @@ export async function searchLessons(
   backend?: SearchBackendConfig,
 ): Promise<LessonHit[]> {
   const storage = new LocalStorageAdapter(libraryLessonsDir(vaultRoot));
-  let hits: LessonHit[] = [];
-  // 检索失败或无命中 → 落回纯 FTS；检索永远不报错。
-  if (backend && opts.query?.trim()) {
-    try {
-      hits =
-        backend.provider === 'dashscope'
-          ? await cloudSearch(vaultRoot, opts, backend)
-          : await qmdSearch(vaultRoot, opts, backend);
-    } catch {
-      hits = [];
-    }
-  }
-  if (hits.length === 0) {
-    const index = await getLessonsIndex(vaultRoot);
-    hits = index.search(opts);
+  const query = opts.query?.trim() ?? '';
+  // 无查询是浏览语义，不需要向量后端。
+  let hits: LessonHit[];
+  if (!query) {
+    hits = await listLessons(vaultRoot, opts);
+  } else {
+    if (!backend) throw new Error(SEARCH_NOT_CONFIGURED);
+    hits = await runBackend(vaultRoot, opts, backend);
   }
   try {
     // 使用反馈排序;usage 读取失败不阻断检索,保留原排序。
@@ -110,6 +101,21 @@ export async function searchLessons(
     .filter((e): e is { id: string; action: MemoryAction; rank: number } => !!e.id);
   await trackUsage(storage, events, opts.query);
   return hits;
+}
+
+const SEARCH_NOT_CONFIGURED =
+  '检索后端未配置：请设置 learn.search.provider=local（需本地 qmd 模型）,' +
+  '或 learn.search.provider=dashscope 并配置 learn.search.dashscope.apiKey。';
+
+/** 按 provider 分派；两种后端失败都直接抛错，不再降级。 */
+async function runBackend(
+  vaultRoot: string,
+  opts: LessonQuery,
+  backend: SearchBackendConfig,
+): Promise<LessonHit[]> {
+  return backend.provider === 'dashscope'
+    ? cloudSearch(vaultRoot, opts, backend)
+    : qmdSearch(vaultRoot, opts, backend);
 }
 
 /** qmd 命中 → LessonHit：frontmatter 语义（id/type/tags/scope）仍由 trove 自己解析。 */
@@ -125,14 +131,10 @@ async function qmdSearch(
   return toLessonHits(vaultRoot, qmdHits, opts);
 }
 
-const RRF_K = 60;
-/** 云端的词法候选下限：多取一些给 RRF 融合，最终仍按 limit 截断。 */
+/** 云端召回多取一些，给 category/type/since 过滤留余量。 */
 const CLOUD_CANDIDATES = 30;
 
-/**
- * 云端检索：FTS5 词法召回 + 百炼向量召回，RRF 融合。
- * 云端不可达时只用词法结果，不抛错。
- */
+/** 云端检索：只用百炼向量召回，命中后从本地文档补 frontmatter 与片段。 */
 async function cloudSearch(
   vaultRoot: string,
   opts: LessonQuery,
@@ -140,35 +142,15 @@ async function cloudSearch(
 ): Promise<LessonHit[]> {
   const index = await getLessonsIndex(vaultRoot);
   const limit = Math.max(1, Math.min(50, opts.limit ?? 10));
-  const candidates = Math.max(limit, CLOUD_CANDIDATES);
-  const lexical = index.search({ ...opts, limit: candidates });
-  let vector: string[] = [];
-  try {
-    const hits = await cloudVectorSearch(opts.query ?? '', cfg, candidates);
-    vector = hits.map((h) => h.path).filter((p) => matchesQuery(index.get(p), opts));
-  } catch {
-    // 云端不可达时保留词法结果
-  }
-  const fused = fuseRankings([lexical.map((h) => h.path), vector]);
-  // RRF 原始分很小（1/61 量级），归一到 0..1 后再交给使用反馈排序，避免 0.1 级加分盖过相关性。
-  const max = Math.max(0, ...fused.values());
+  const hits = await cloudVectorSearch(opts.query ?? '', cfg, Math.max(limit, CLOUD_CANDIDATES));
   const out: LessonHit[] = [];
-  for (const [path, raw] of [...fused].sort((a, b) => b[1] - a[1])) {
+  for (const hit of hits) {
     if (out.length >= limit) break;
-    const doc = index.get(path);
+    const doc = index.get(hit.path);
     if (!matchesQuery(doc, opts)) continue;
-    out.push(docHit(doc, max > 0 ? raw / max : raw, opts.query ?? ''));
+    out.push(docHit(doc, hit.score, opts.query ?? ''));
   }
   return out;
-}
-
-/** 词法/向量两个有序列表做倒数排序融合。 */
-function fuseRankings(lists: string[][]): Map<string, number> {
-  const scores = new Map<string, number>();
-  for (const list of lists) {
-    list.forEach((path, i) => scores.set(path, (scores.get(path) ?? 0) + 1 / (RRF_K + i + 1)));
-  }
-  return scores;
 }
 
 function matchesQuery(doc: LessonDoc | null | undefined, opts: LessonQuery): doc is LessonDoc {

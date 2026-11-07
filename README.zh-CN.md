@@ -189,7 +189,7 @@ trove skills show review        # 某技能的全部版本与来源
 trove library reindex           # 从设备分片重建统一索引
 trove usage --since 7d --json
 trove whoami                    # 用户画像、偏好、近期方向
-trove lessons search "飞书 编辑" # FTS5 检索经验
+trove lessons search "飞书 编辑" # 向量检索经验（本地 qmd / 百炼）
 trove lessons show <path>       # 读单条 lesson
 trove sessions search "COS 签名" # FTS5 会话检索
 trove sessions search "SignatureDoesNotMatch" --exact  # 线性精确检索
@@ -204,7 +204,7 @@ trove status --json             # 机器可读概览
 
 默认走 [qmd](https://github.com/tobi/qmd)：BM25 + 查询扩展 + HyDE + 本地向量 + LLM 重排，全程离线。5 个记忆类目注册成 qmd collection，共用一份索引（`~/.trove/cache/qmd.sqlite`），由 `trove learn` 增量重建。嵌入模型是 `Qwen3-Embedding-0.6B`（GGUF、q8），经 `node-llama-cpp` 本地运行；qmd 还需要它的查询扩展（1.7B）与重排（0.6B）模型，合计约 2.3 GB，首次下载到 `~/.cache/qmd/models`，仅该次下载需要联网。
 
-也可以把向量换成阿里百炼云端：不下载、不启动任何本地模型，检索改为 FTS5 词法 + 云端向量 RRF 融合，索引缓存到 `~/.trove/cache/cloud-vectors.sqlite`：
+也可以把向量换成阿里百炼云端：不下载、不启动任何本地模型，检索只走云端向量召回，索引缓存到 `~/.trove/cache/cloud-vectors.sqlite`：
 
 ```sh
 trove config set learn.search.provider dashscope
@@ -214,7 +214,7 @@ trove config set learn.search.dashscope.apiKey sk-xxx   # 百炼 API Key
 trove daemon restart   # 启动时按新配置重建向量索引
 ```
 
-云端按 token 计费（text-embedding-v4 约 0.5 元/百万 token，含 100 万 token 新用户免费额度），只有索引增量更新和每次查询会消耗。`provider=local` 时本地配置仍生效：`learn.search` 的 `enabled`、`model`、`host`（作为 `HF_ENDPOINT` 的 Hugging Face 镜像，默认 `https://hf-mirror.com`）、`minScore`。降级可靠：无网络、缺模型/key、索引为空或损坏都回退纯 FTS5，命令不会报错。
+云端按 token 计费（text-embedding-v4 约 0.5 元/百万 token，含 100 万 token 新用户免费额度），只有索引增量更新和每次查询会消耗。`provider=local` 时本地配置仍生效：`learn.search` 的 `enabled`、`model`、`host`（作为 `HF_ENDPOINT` 的 Hugging Face 镜像，默认 `https://hf-mirror.com`）、`minScore`。检索不再降级：没有配置后端、本地模型加载失败、云端接口不可用或索引尚未构建，命令都会直接报错并说明原因。
 
 注意：本地混合检索要走一遍本地模型，冷查询是秒级而不是毫秒级；qmd 会缓存查询扩展，同一查询重复问会快很多。云端模式每次查询多一次网络往返（通常几十到几百毫秒）。
 
@@ -232,7 +232,7 @@ trove daemon restart   # 启动时按新配置重建向量索引
 | `trove_session_get` | `trove sessions show` | 命中位置附近的事件 |
 | `trove_status` | `trove status --json` | 索引与数据新鲜度 |
 
-检索底层是 Node 22 内置 `node:sqlite` 的 **SQLite FTS5 + BM25**，中文按 2-gram 预处理。lessons 用进程内索引（约 280ms 冷构建）；sessions 用持久化增量索引 `~/.trove/cache/search.sqlite`（本机缓存，可删除重建，不参与同步）。报错码、函数名、路径等精确标识符用 `--exact` 线性 grep 兜底——它会覆盖索引只保留前 1KB 的工具输出。
+lessons 检索走向量后端（本地 qmd 或百炼云端，见上节）；sessions 检索底层是 Node 22 内置 `node:sqlite` 的 **SQLite FTS5 + BM25**，中文按 2-gram 预处理，用持久化增量索引 `~/.trove/cache/search.sqlite`（本机缓存，可删除重建，不参与同步）。报错码、函数名、路径等精确标识符用 `--exact` 线性 grep 兜底——它会覆盖索引只保留前 1KB 的工具输出。
 
 ```bash
 claude mcp add trove -- trove mcp

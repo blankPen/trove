@@ -261,13 +261,15 @@ export async function syncCloudIndex(vaultRoot: string, cfg: CloudSearchConfig):
   }
 }
 
-/** 向量召回：索引不存在或为空时返回空（检索降级纯 FTS）；云端不可达时由调用方兜底。 */
+/** 向量召回：索引尚未构建时直接报错（不再降级词法检索）。 */
 export async function cloudVectorSearch(
   query: string,
   cfg: CloudSearchConfig,
   limit = 50,
 ): Promise<CloudHit[]> {
-  if (!existsSync(cfg.dbPath)) return [];
+  if (!existsSync(cfg.dbPath)) {
+    throw new Error(`云端向量索引尚未构建(${cfg.dbPath})，请先运行 trove daemon restart 或完成一次 trove learn`);
+  }
   const [vector] = await embedTexts(cfg, [query]);
   if (!vector) return [];
   const index = CloudVectorIndex.open(cfg.dbPath);

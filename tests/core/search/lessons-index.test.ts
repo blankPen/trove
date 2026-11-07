@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { LessonsIndex } from '../../../src/core/search/lessons-index.js';
 
 async function seed(vault: string, rel: string, front: Record<string, unknown>, body: string): Promise<void> {
@@ -51,30 +51,23 @@ async function fixture(): Promise<string> {
   return vault;
 }
 
-let index: LessonsIndex | undefined;
-afterEach(() => {
-  index?.close();
-  index = undefined;
-});
-
-describe('LessonsIndex', () => {
-  it('中文 FTS5 检索 + 类目过滤', async () => {
-    index = await LessonsIndex.build(await fixture());
-    const hits = index.search({ query: 'COS 签名' });
+describe('LessonsIndex（文档索引，不含词法检索）', () => {
+  it('list 按类目过滤、按更新时间倒序', async () => {
+    const index = await LessonsIndex.build(await fixture());
+    const hits = index.list({ category: 'experiences' });
+    expect(hits).toHaveLength(2);
     expect(hits[0]?.path).toBe('experiences/gotcha-cos-signature.md');
-    expect(index.search({ query: '飞书 编辑' })[0]?.path).toBe('experiences/gotcha-feishu-edit.md');
-    expect(index.search({ query: 'COS 签名', category: 'entities' })).toHaveLength(0);
   });
 
-  it('list / get / 单字降级 / 路径穿越', async () => {
-    index = await LessonsIndex.build(await fixture());
-    expect(index.list({ category: 'experiences' })).toHaveLength(2);
-    expect(index.get('experiences/gotcha-cos-signature.md')?.body).toContain('SignatureDoesNotMatch');
-    expect(index.search({ query: '书' }).some((h) => h.path.includes('feishu'))).toBe(true);
+  it('get 返回正文与 frontmatter；不存在的路径返回 null', async () => {
+    const index = await LessonsIndex.build(await fixture());
+    const doc = index.get('experiences/gotcha-cos-signature.md');
+    expect(doc?.body).toContain('SignatureDoesNotMatch');
+    expect(doc?.title).toBe('COS 签名 403');
     expect(index.get('../../etc/passwd')).toBeNull();
   });
 
-  it('解析 frontmatter scope 到 doc 与 hit', async () => {
+  it('解析 frontmatter scope 到 doc', async () => {
     const vault = await fixture();
     await seed(
       vault,
@@ -82,9 +75,7 @@ describe('LessonsIndex', () => {
       { type: 'experiences/gotcha', title: '项目内经验', tags: ['experiences'], scope: 'project:trove' },
       '这是项目内经验正文。',
     );
-    index = await LessonsIndex.build(vault);
+    const index = await LessonsIndex.build(vault);
     expect(index.get('experiences/proj-note.md')?.scope).toBe('project:trove');
-    const hit = index.search({ query: '项目内' }).find((h) => h.path === 'experiences/proj-note.md');
-    expect(hit?.scope).toBe('project:trove');
   });
 });

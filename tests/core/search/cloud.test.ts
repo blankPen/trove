@@ -121,9 +121,11 @@ describe('syncCloudIndex · 百炼云端向量', () => {
 });
 
 describe('cloudVectorSearch', () => {
-  it('按余弦相似度召回，索引不存在时返回空', async () => {
-    expect(await cloudVectorSearch('飞书', cfg)).toEqual([]);
+  it('索引缺失时直接报错，不返回空结果', async () => {
+    await expect(cloudVectorSearch('飞书', cfg)).rejects.toThrow(/云端向量索引尚未构建/);
+  });
 
+  it('按余弦相似度召回', async () => {
     await seed('experiences/cos.md', 'S3 上传报 403。');
     await seed('entities/lark.md', '飞书文档评论。');
     await syncCloudIndex(vault, cfg);
@@ -135,7 +137,7 @@ describe('cloudVectorSearch', () => {
 });
 
 describe('searchLessons · 云端后端', () => {
-  it('词法无命中时向量召回仍能返回结果', async () => {
+  it('只走向量召回，命中后补 frontmatter 与正文片段', async () => {
     await seed('experiences/cos.md', 'S3 上传报 SignatureDoesNotMatch，签名要按原始路径重算。');
     await syncCloudIndex(vault, cfg);
 
@@ -145,13 +147,14 @@ describe('searchLessons · 云端后端', () => {
     expect(hits[0]!.snippet).toContain('SignatureDoesNotMatch');
   });
 
-  it('云端不可达时落回纯 FTS，不抛错', async () => {
+  it('云端不可达时直接抛错', async () => {
     await seed('entities/lark.md', '飞书文档评论用 lark-cli 读取。');
     await syncCloudIndex(vault, cfg);
     fetchMock.mockRejectedValue(new Error('network down'));
 
-    const hits = await searchLessons(vault, { query: 'lark-cli' }, { provider: 'dashscope', ...cfg });
-    expect(hits.map((h) => h.path)).toEqual(['entities/lark.md']);
+    await expect(
+      searchLessons(vault, { query: 'lark-cli' }, { provider: 'dashscope', ...cfg }),
+    ).rejects.toThrow('network down');
   });
 
   it('category/type 过滤对向量命中同样生效', async () => {
@@ -161,5 +164,12 @@ describe('searchLessons · 云端后端', () => {
 
     const hits = await searchLessons(vault, { query: '飞书', category: 'experiences' }, { provider: 'dashscope', ...cfg });
     expect(hits).toEqual([]);
+  });
+
+  it('向量索引缺失时直接报错', async () => {
+    await seed('entities/lark.md', '飞书文档评论。');
+    await expect(
+      searchLessons(vault, { query: '飞书' }, { provider: 'dashscope', ...cfg }),
+    ).rejects.toThrow(/云端向量索引尚未构建/);
   });
 });

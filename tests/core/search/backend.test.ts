@@ -89,21 +89,27 @@ describe('searchLessons · qmd 后端', () => {
     expect(search.mock.calls[1]![0]).toMatchObject({ collections: ['experiences'] });
   });
 
-  it('qmd 报错时回落纯 FTS，不抛错', async () => {
+  it('qmd 报错时直接抛错，不再降级词法检索', async () => {
     search.mockRejectedValue(new Error('database disk image is malformed'));
-    const hits = await searchLessons(vault, { query: 'SignatureDoesNotMatch' }, backend);
-    expect(hits.map((h) => h.path)).toEqual(['experiences/cos.md']);
+    await expect(searchLessons(vault, { query: 'SignatureDoesNotMatch' }, backend)).rejects.toThrow(
+      'database disk image is malformed',
+    );
   });
 
-  it('qmd 无命中时回落纯 FTS', async () => {
+  it('qmd 无命中时返回空列表', async () => {
     search.mockResolvedValue([]);
     const hits = await searchLessons(vault, { query: 'lark-cli' }, backend);
-    expect(hits.map((h) => h.path)).toEqual(['entities/lark.md']);
+    expect(hits).toEqual([]);
   });
 
-  it('不传后端时不碰 qmd', async () => {
-    const hits = await searchLessons(vault, { query: 'lark-cli' });
+  it('不传后端时直接报错，不碰 qmd', async () => {
+    await expect(searchLessons(vault, { query: 'lark-cli' })).rejects.toThrow(/检索后端未配置/);
     expect(search).not.toHaveBeenCalled();
+  });
+
+  it('无查询时是浏览语义，不要求后端也不碰 qmd', async () => {
+    const hits = await searchLessons(vault, { category: 'entities' });
     expect(hits.map((h) => h.path)).toEqual(['entities/lark.md']);
+    expect(search).not.toHaveBeenCalled();
   });
 });

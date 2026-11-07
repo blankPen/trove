@@ -513,7 +513,7 @@ async function cmdWhoami(
   out(opts.json ? JSON.stringify(result, null, 2) : formatWhoami(result));
 }
 
-/** 从 learn.search 解析检索后端;配置不可读/关闭时返回 undefined(纯 FTS)。 */
+/** 从 learn.search 解析检索后端;配置不可读/关闭时返回 undefined(检索时报错)。 */
 async function searchBackendConfig(paths: ReturnType<typeof trovePaths>): Promise<SearchBackend | undefined> {
   try {
     const learn = readLearnConfig(await loadConfig(paths.config));
@@ -1247,14 +1247,14 @@ async function cmdDoctor(paths: ReturnType<typeof trovePaths>, out: (l: string) 
   const label = learnSearch.provider === 'dashscope' ? '云端' : '本地';
   if (!backend) {
     if (learnSearch.enabled && learnSearch.provider === 'dashscope' && !learnSearch.dashscope.apiKey) {
-      push('云端向量缺少 learn.search.dashscope.apiKey,纯 FTS 降级可用', false);
+      push('云端向量缺少 learn.search.dashscope.apiKey,检索会直接报错', false);
     } else {
-      push('检索后端已关闭(learn.search.enabled=false),纯 FTS 可用', true);
+      push('检索后端已关闭(learn.search.enabled=false),检索会直接报错', false);
     }
   } else {
     const status = await searchIndexStatus(paths.vault, backend);
     if (!status || status.documents === 0) {
-      push(`${label}检索索引尚未构建(纯 FTS 降级可用)`, true);
+      push(`${label}检索索引尚未构建,检索会直接报错(先跑一次 daemon/learn)`, false);
     } else {
       push(`${label}检索索引可打开(${status.documents} 篇 · 待嵌入 ${status.needsEmbedding})`, true);
     }
@@ -1590,14 +1590,14 @@ function daemonRuntime(
       const learn = readLearnConfig(config);
       if (!learn.search.enabled) return '检索后端已禁用(learn.search.enabled=false),跳过索引构建';
       const backend = searchBackendFromConfig(learn.search, paths);
-      if (!backend) return '检索后端未配置(云端缺 apiKey),检索降级纯 FTS5';
+      if (!backend) return '检索后端未配置(云端缺 apiKey),检索会直接报错';
       const label = learn.search.provider === 'dashscope' ? '云端' : '本地';
       progress.phase('索引', `检查 ${searchModelLabel(learn.search)}`);
       try {
         const r = await syncSearchBackendIndex(paths.vault, backend);
         return `${label}检索索引就绪: ${r.documents} 篇`;
       } catch (e) {
-        return `${label}检索索引构建失败(${(e as Error).message}),检索降级纯 FTS5`;
+        return `${label}检索索引构建失败(${(e as Error).message}),检索会直接报错`;
       }
     },
     runOnce: async (progress, signal) => {

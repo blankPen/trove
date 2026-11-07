@@ -8,6 +8,20 @@ import { trovePaths } from '../../src/paths.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+const DEFAULT_SEARCH = {
+  enabled: true,
+  provider: 'local',
+  model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf',
+  host: 'https://hf-mirror.com',
+  minScore: 0,
+  dashscope: {
+    apiKey: '',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'text-embedding-v4',
+    dimension: 1024,
+  },
+};
+
 describe('config(设计 §10.2)', () => {
   let dir: string;
   let cfg: string;
@@ -99,7 +113,7 @@ describe('config(设计 §10.2)', () => {
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
       lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
       capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
-      search: { enabled: true, model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf', host: 'https://hf-mirror.com', minScore: 0 },
+      search: DEFAULT_SEARCH,
     });
 
     // 老配置没有 learn 字段 → 补默认
@@ -123,7 +137,7 @@ describe('config(设计 §10.2)', () => {
       jev: { maxCallsPerSession: 8, timeoutMs: 2000 },
       lifecycle: { staleDays: 14, archiveDays: 30, trajectoryDays: 90, trajectoryMax: 500 },
       capacity: { experiencesPerProject: 120, experiencesGlobal: 600, profileBytes: 8192, entitiesPerType: 200 },
-      search: { enabled: true, model: 'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf', host: 'https://hf-mirror.com', minScore: 0 },
+      search: DEFAULT_SEARCH,
     });
   });
 

@@ -1,5 +1,5 @@
 /** 模型端点配置读取:从 ~/.trove/config.json 的 llm/jev 段读取,缺配置时明确报错而非静默失败。 */
-import { defaultLearnConfig, normalizeLearnMode, type Config, type LearnConfig } from '../../config.js';
+import { defaultLearnConfig, normalizeEmbeddingProvider, normalizeLearnMode, type Config, type LearnConfig } from '../../config.js';
 
 export interface LlmConfig {
   baseUrl: string;
@@ -86,9 +86,16 @@ export function readLearnConfig(config?: Pick<Config, 'learn'>): LearnConfig {
     },
     search: {
       enabled: l.search?.enabled !== false,
+      provider: normalizeEmbeddingProvider(l.search?.provider),
       model: strNonEmpty(l.search?.model, d.search.model),
       host: strNonEmpty(l.search?.host, d.search.host),
       minScore: nonNeg(l.search?.minScore, d.search.minScore),
+      dashscope: {
+        apiKey: strNonEmpty(l.search?.dashscope?.apiKey, d.search.dashscope.apiKey),
+        baseUrl: strNonEmpty(l.search?.dashscope?.baseUrl, d.search.dashscope.baseUrl),
+        model: strNonEmpty(l.search?.dashscope?.model, d.search.dashscope.model),
+        dimension: clampInt(l.search?.dashscope?.dimension, d.search.dashscope.dimension, 1, 4096),
+      },
     },
   };
 }

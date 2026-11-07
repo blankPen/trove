@@ -17,6 +17,7 @@ describe('trovePaths 目录推导(设计 §6.1)', () => {
     expect(p.config).toBe(`${p.base}/config.json`);
     expect(p.state).toBe(`${p.base}/state.json`);
     expect(p.qmdDb).toBe(`${p.base}/cache/qmd.sqlite`);
+    expect(p.cloudVectorsDb).toBe(`${p.base}/cache/cloud-vectors.sqlite`);
   });
 
   it('TROVE_HOME 覆盖整个 base,所有子路径随之迁移', () => {

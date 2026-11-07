@@ -23,6 +23,8 @@ export interface TrovePaths {
   learnDb: string;
   /** qmd 检索索引 SQLite(本地可重建,不参与同步) */
   qmdDb: string;
+  /** 云端向量缓存 SQLite(本地可重建,不参与同步) */
+  cloudVectorsDb: string;
 }
 
 /** 从 base 目录推导全部路径。默认 ~/.trove,可用 TROVE_HOME 覆盖;测试可注入临时 base。 */
@@ -44,5 +46,6 @@ export function trovePaths(
     learnQueue: join(base, 'learn-queue.json'),
     learnDb: join(base, 'cache', 'learn.db'),
     qmdDb: join(base, 'cache', 'qmd.sqlite'),
+    cloudVectorsDb: join(base, 'cache', 'cloud-vectors.sqlite'),
   };
 }

@@ -10,6 +10,7 @@ import { readTrust } from './trust.js';
 import { listInbox } from './inbox.js';
 import { JobQueue } from './jobs.js';
 import { qmdIndexStatus } from '../search/qmd.js';
+import { searchIndexStatus, type SearchBackend } from '../search/backend.js';
 
 export interface MemoryHealthUsage {
   retrieved: number;
@@ -148,6 +149,7 @@ export function summarizeUsageEvents(events: MemoryUsageEvent[], now: number): M
 export async function buildMemoryHealth(
   paths: TrovePaths,
   now: () => number = Date.now,
+  searchBackend?: SearchBackend,
 ): Promise<MemoryHealth> {
   const storage = new LocalStorageAdapter(libraryLessonsDir(paths.vault));
   const [files, trajectories, usageEvents, trust, inbox] = await Promise.all([
@@ -165,7 +167,7 @@ export async function buildMemoryHealth(
     trustLevel: trust.level,
     usage: summarizeUsageEvents(usageEvents, now()),
     jobs: await readJobStats(paths),
-    searchIndex: await readSearchIndexStats(paths),
+    searchIndex: await readSearchIndexStats(paths, searchBackend),
   };
 }
 
@@ -195,7 +197,11 @@ async function readJobStats(paths: TrovePaths): Promise<MemoryHealth['jobs']> {
   }
 }
 
-async function readSearchIndexStats(paths: TrovePaths): Promise<MemoryHealth['searchIndex']> {
+async function readSearchIndexStats(
+  paths: TrovePaths,
+  backend?: SearchBackend,
+): Promise<MemoryHealth['searchIndex']> {
+  if (backend) return searchIndexStatus(paths.vault, backend);
   if (!(await exists(paths.qmdDb))) return null;
   const status = await qmdIndexStatus(paths.vault, { dbPath: paths.qmdDb });
   if (!status) return null;

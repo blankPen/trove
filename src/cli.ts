@@ -63,8 +63,13 @@ import { refreshSidecars } from './core/lessons/sidecar.js';
 import { runLessonExtraction, learnPendingBatch, learnRecentBatch, resolveProviders, migrateJsonQueue, enqueueLearnSessions } from './core/lessons/learn.js';
 import type { LessonProviderDeps } from './core/lessons/learn.js';
 import { JobQueue } from './core/lessons/jobs.js';
-import { qmdIndexStatus, syncQmdIndex } from './core/search/qmd.js';
-import type { QmdSearchConfig } from './core/search/qmd.js';
+import {
+  searchBackendFromConfig,
+  searchIndexStatus,
+  searchModelLabel,
+  syncSearchBackendIndex,
+  type SearchBackend,
+} from './core/search/backend.js';
 import { formatUsageSummary, readUsageRecords, summarizeUsage } from './core/lessons/usage.js';
 import { learnClaudeMemo } from './core/lessons/memo.js';
 import { learnRecentMatters } from './core/lessons/recent.js';
@@ -508,17 +513,11 @@ async function cmdWhoami(
   out(opts.json ? JSON.stringify(result, null, 2) : formatWhoami(result));
 }
 
-/** 从 learn.search 映射检索后端配置;配置不可读/关闭时返回 undefined(纯 FTS)。 */
-async function searchBackendConfig(paths: ReturnType<typeof trovePaths>): Promise<QmdSearchConfig | undefined> {
+/** 从 learn.search 解析检索后端;配置不可读/关闭时返回 undefined(纯 FTS)。 */
+async function searchBackendConfig(paths: ReturnType<typeof trovePaths>): Promise<SearchBackend | undefined> {
   try {
     const learn = readLearnConfig(await loadConfig(paths.config));
-    if (!learn.search.enabled) return undefined;
-    return {
-      dbPath: paths.qmdDb,
-      model: learn.search.model,
-      host: learn.search.host,
-      minScore: learn.search.minScore,
-    };
+    return searchBackendFromConfig(learn.search, paths);
   } catch {
     return undefined;
   }
@@ -529,7 +528,7 @@ async function syncSearchIndex(paths: ReturnType<typeof trovePaths>): Promise<vo
   try {
     const backend = await searchBackendConfig(paths);
     if (!backend) return;
-    await syncQmdIndex(paths.vault, backend);
+    await syncSearchBackendIndex(paths.vault, backend);
   } catch {
     // 索引同步失败不阻断学习
   }
@@ -1117,7 +1116,7 @@ async function cmdLearnStatus(
   const config = await loadConfig(paths.config);
   const learn = readLearnConfig(config);
   const backend = await searchBackendConfig(paths);
-  const indexStatus = backend ? await qmdIndexStatus(paths.vault, backend) : null;
+  const indexStatus = backend ? await searchIndexStatus(paths.vault, backend) : null;
   try {
     const s = queue.stats();
     const dead = queue.listDead(5);
@@ -1135,7 +1134,7 @@ async function cmdLearnStatus(
             staleMemories,
             searchIndex: indexStatus?.documents ?? 0,
             searchIndexPendingEmbed: indexStatus?.needsEmbedding ?? 0,
-            searchModel: learn.search.enabled ? learn.search.model : null,
+            searchModel: learn.search.enabled ? searchModelLabel(learn.search) : null,
           },
           null,
           2,
@@ -1148,7 +1147,7 @@ async function cmdLearnStatus(
         `队列: 待处理 ${s.queued} · 重试等待 ${s.retryWait} · 运行中 ${s.running} · 完成 ${s.done} · 跳过 ${s.skipped} · 死信 ${s.dead}`,
         `最老排队: ${s.oldestQueuedAt ? `${humanSpan(Date.now() - s.oldestQueuedAt)}前` : '-'} · p50 ${s.p50Ms ?? '-'}ms · p95 ${s.p95Ms ?? '-'}ms`,
         `inbox 待审 ${inbox.length} · 信任等级 L${trust.level} · stale 记忆 ${staleMemories}`,
-        `检索索引 ${indexStatus?.documents ?? 0} 篇（待嵌入 ${indexStatus?.needsEmbedding ?? 0}）· 模型 ${learn.search.enabled ? learn.search.model : '-'}`,
+        `检索索引 ${indexStatus?.documents ?? 0} 篇（待嵌入 ${indexStatus?.needsEmbedding ?? 0}）· ${learn.search.provider === 'dashscope' ? '云端' : '本地'}模型 ${learn.search.enabled ? searchModelLabel(learn.search) : '-'}`,
       ].join('\n'),
     );
     for (const j of dead) out(`  失败: ${j.sessionKey} · ${j.errorClass ?? '-'} · ${j.lastError}`);
@@ -1243,15 +1242,21 @@ async function cmdDoctor(paths: ReturnType<typeof trovePaths>, out: (l: string) 
     push(`learn.db 可打开 —— ${(e as Error).message}`, false);
   }
 
-  const backend = await searchBackendConfig(paths);
+  const learnSearch = readLearnConfig(config ?? undefined).search;
+  const backend = searchBackendFromConfig(learnSearch, paths);
+  const label = learnSearch.provider === 'dashscope' ? '云端' : '本地';
   if (!backend) {
-    push('检索后端已关闭(learn.search.enabled=false),纯 FTS 可用', true);
-  } else {
-    const status = await qmdIndexStatus(paths.vault, backend);
-    if (!status || status.documents === 0) {
-      push('qmd 检索索引尚未构建(纯 FTS 降级可用)', true);
+    if (learnSearch.enabled && learnSearch.provider === 'dashscope' && !learnSearch.dashscope.apiKey) {
+      push('云端向量缺少 learn.search.dashscope.apiKey,纯 FTS 降级可用', false);
     } else {
-      push(`qmd 检索索引可打开(${status.documents} 篇 · 待嵌入 ${status.needsEmbedding})`, true);
+      push('检索后端已关闭(learn.search.enabled=false),纯 FTS 可用', true);
+    }
+  } else {
+    const status = await searchIndexStatus(paths.vault, backend);
+    if (!status || status.documents === 0) {
+      push(`${label}检索索引尚未构建(纯 FTS 降级可用)`, true);
+    } else {
+      push(`${label}检索索引可打开(${status.documents} 篇 · 待嵌入 ${status.needsEmbedding})`, true);
     }
   }
 
@@ -1584,14 +1589,15 @@ function daemonRuntime(
     ensureDeps: async (progress) => {
       const learn = readLearnConfig(config);
       if (!learn.search.enabled) return '检索后端已禁用(learn.search.enabled=false),跳过索引构建';
-      const backend = await searchBackendConfig(paths);
-      if (!backend) return '检索后端配置不可读,检索降级纯 FTS5';
-      progress.phase('索引', `检查 ${learn.search.model}`);
+      const backend = searchBackendFromConfig(learn.search, paths);
+      if (!backend) return '检索后端未配置(云端缺 apiKey),检索降级纯 FTS5';
+      const label = learn.search.provider === 'dashscope' ? '云端' : '本地';
+      progress.phase('索引', `检查 ${searchModelLabel(learn.search)}`);
       try {
-        const r = await syncQmdIndex(paths.vault, backend);
-        return `qmd 检索索引就绪: ${r.documents} 篇`;
+        const r = await syncSearchBackendIndex(paths.vault, backend);
+        return `${label}检索索引就绪: ${r.documents} 篇`;
       } catch (e) {
-        return `qmd 检索索引构建失败(${(e as Error).message}),检索降级纯 FTS5`;
+        return `${label}检索索引构建失败(${(e as Error).message}),检索降级纯 FTS5`;
       }
     },
     runOnce: async (progress, signal) => {

@@ -26,6 +26,7 @@ import { TypeSafeJevScorer } from '../core/lessons/jev.js';
 import type { JevProvider } from '../core/lessons/jev.js';
 import { JevDecisionGateway } from '../core/lessons/gateway.js';
 import { buildMemoryHealth } from '../core/lessons/health.js';
+import { searchBackendFromConfig } from '../core/search/backend.js';
 import { runCurator } from '../core/lessons/curator.js';
 
 export interface DaemonControl {
@@ -273,7 +274,7 @@ async function handle(
       }
     }
     if (url.pathname === '/api/health') {
-      json(res, 200, await buildMemoryHealth(opts.paths, now));
+      json(res, 200, await buildMemoryHealth(opts.paths, now, searchBackendFromConfig(readLearnConfig(opts.config).search, opts.paths)));
       return;
     }
     if (url.pathname === '/api/curator' && req.method === 'POST') {

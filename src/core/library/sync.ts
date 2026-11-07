@@ -207,7 +207,11 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
       state.library.pushed[rel] = { size: st.size, mtimeMs: Math.round(st.mtimeMs) };
       uploaded++;
       bytes += st.size;
-      if (rel.startsWith('lessons/')) pushedLessons = true;
+      if (rel.startsWith('lessons/')) {
+        pushedLessons = true;
+        // 先落盘「待补戳」,避免上传成功但戳没写成时对端永久漏拉
+        state.library.lessonsDirty = true;
+      }
       progress.item(rel, n, files.length, st.size);
       if (Date.now() - lastCheckpoint >= CHECKPOINT_MS) await checkpoint();
     }
@@ -233,9 +237,10 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
 
-  // lessons 变了才换 token;远端还没有戳时补一个,让后续同步不必每轮递归列举
+  // lessons 变了才换 token;远端还没有戳或上次没写成功时补一个,
+  // 让后续同步不必每轮递归列举
   const lessonsStamp = (await remote.readJson(LESSONS_STAMP_PATH)) as TokenStamp | null;
-  if (pushedLessons || !lessonsStamp) {
+  if (pushedLessons || !lessonsStamp || state.library.lessonsDirty) {
     const token = randomUUID();
     await remote.writeJson(LESSONS_STAMP_PATH, {
       v: 1,
@@ -243,6 +248,7 @@ export async function pushLibrary(opts: PushLibraryOptions): Promise<PushLibrary
       updatedAt: Date.now(),
     } satisfies TokenStamp);
     state.library.lessonsToken = token;
+    state.library.lessonsDirty = false;
   }
 
   return { uploaded, bytes, skipped };

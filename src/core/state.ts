@@ -72,6 +72,8 @@ export interface LibraryState {
   shardStamps?: Record<string, string>;
   /** 已应用的 lessons 目录戳;一致时跳过整轮目录列举。 */
   lessonsToken?: string;
+  /** lessons 已上传但戳还没写成功;下次 push 必须补写,否则对端会漏拉。 */
+  lessonsDirty?: boolean;
   /**
    * library.pushed 记录所属的远端身份。
    * 换后端后旧记录对新远端无效,否则会整体跳过上传,只剩索引分片指向不存在的文件。

@@ -245,6 +245,15 @@ describe('pullLibrary lessons 恢复', () => {
 
     expect(spy).not.toHaveBeenCalled();
   });
+
+  it('listAll 不可用 → 回退逐层列举', async () => {
+    const { vault, abs, remote } = await lessonsSetup(null);
+    vi.spyOn(remote, 'listAll').mockRejectedValue(new Error('501'));
+
+    await pullLibrary({ remote, vaultRoot: vault, deviceId: 'dev1', state: emptyState() });
+
+    expect(await readFile(abs, 'utf8')).toBe('remote-lesson');
+  });
 });
 
 describe('pullLibrary 分片悬空容错', () => {

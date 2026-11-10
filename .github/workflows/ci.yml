@@ -40,11 +40,13 @@ jobs:
       - name: web typecheck
         run: pnpm --dir web typecheck
 
-      - name: test
-        run: pnpm test
-
+      # build 必须在 test 之前:tests/build-esm.test.ts 冒烟真实构建产物,
+      # 没有 dist/ 会 ERR_MODULE_NOT_FOUND。
       - name: build
         run: pnpm build
+
+      - name: test
+        run: pnpm test
 
   e2e:
     # 浏览器 e2e:每天一次 + 手动触发,不上 PR 门禁(要装浏览器,太慢)。

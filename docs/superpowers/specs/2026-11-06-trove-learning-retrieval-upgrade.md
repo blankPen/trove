@@ -1,11 +1,22 @@
 # trove 经验学习沉淀与检索：现状诊断与改造方案
 
 - 日期：2026-11-06
-- 状态：方案已定，待实现
+- 状态：**部分已实现**（2026-11-11 核对）
 - 范围：`src/core/lessons/**`（学习沉淀）、`src/core/search/**`（检索召回）
 - 依据：本机真实 vault（2535 个会话 / 1004 条记忆 / 391 条经验）。本文所有数字均在
   `~/.trove` 上实测得出，可复现；外部结论标注了出处。
 - 本文档只承载**方案与评审**。检索换 qmd 的**实现**由编排者另开 ticket 承接（§7.1 是交接规格）。
+
+> **实现状态（2026-11-11 核对，与本文正文有出入时以此处为准）**
+>
+> | 本文结论 | 实际状态 |
+> | --- | --- |
+> | §7.1 检索换 qmd + Qwen3-Embedding-0.6B | ✅ 已完成（PR #23）。bge 与 `@huggingface/transformers` 依赖已删 |
+> | §2.2 的 v2 十阶段判定链（`lessons/v2.ts`、Gate A/B/C、摘要、分类、轨迹、质量打分） | ⚠️ **已作废**。`939294e` 用单次结构化分析取代（`lessons/pipeline.ts` + `ops.ts`），本文引用的 `lessons/v2.ts`、`lessons/gateway.ts`、`lessons/extract.ts`、`lessons/graph.ts`、`lessons/embedding.ts`、`lessons/vector-index.ts`、`lessons/vector-sync.ts`、`search/hybrid.ts` **均已删除**，正文涉及的这些文件路径不再存在 |
+> | §6 学习沉淀三层改造（L0/L1/L2） | ⏸️ 暂缓，路线作废（见 `TODO.md`） |
+> | §3.3 D3「检索对中文自然语言基本失效」 | ⚠️ **仅 lessons 侧已修**（走 qmd）。sessions 检索仍在用旧 FTS5 + bigram phrase+AND（`search/tokenize.ts`、`search/sessions-index.ts`），多字中文自然语言查询仍会落空 —— 见 `TODO.md` |
+> | §5.4 A/B 实测结论 | ✅ 仍然成立且仍重要：sessions 侧改 FTS 的 OR 放宽比接 qmd 更划算 |
+> | P2「让 `scope` 真正生效」 | ❌ 未完成。`scope` 只在写侧计数生效，检索侧不过滤 |
 
 ---
 

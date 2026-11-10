@@ -106,7 +106,11 @@ export async function collect(opts: CollectOptions): Promise<CollectResult> {
         const list = sessionFiles.get(f.sessionKey) ?? [];
         list.push(f.relPath);
         sessionFiles.set(f.sessionKey, list);
-        if (r.action !== 'skip') changedSessions.add(`${adapter.id}:${f.sessionKey}`);
+        // 只有会话才进 learn 队列:非会话资产(history.jsonl / skills / plans 等)不是可学习的会话,
+        // 入队后 learn 只会拿到 session_not_found,徒增队列垃圾与死任务。
+        if (r.action !== 'skip' && isSessionPath(adapter, f.relPath)) {
+          changedSessions.add(`${adapter.id}:${f.sessionKey}`);
+        }
         progress.item(f.relPath, n, files.length, r.bytesCopied);
       }
       continue;

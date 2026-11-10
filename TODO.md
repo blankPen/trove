@@ -2,9 +2,16 @@
 
 ## 待办
 
-- [ ] **检索层换 qmd + Qwen3-Embedding-0.6B**（已定案，见 [诊断与改造方案](docs/superpowers/specs/2026-11-06-trove-learning-retrieval-upgrade.md) §7.1）：删除现有 bge（`Xenova/bge-small-zh-v1.5`）与 `@huggingface/transformers` 依赖，`searchLessons()` 内部换成 qmd 的完整管线（BM25 + 向量 + 查询扩展 + HyDE + 重排）。注意模型下载须带 `HF_ENDPOINT=https://hf-mirror.com`。
-- [ ] **学习沉淀三层改造**（见 [诊断与改造方案](docs/superpowers/specs/2026-11-06-trove-learning-retrieval-upgrade.md) §6）：L0 在场信号抽取 → L1 主题级沉淀与增量更新 → L2 关联图谱；目标是单会话 token 从 9.6 万降到 1~2 万，并消灭「同一主题被重复沉淀最多 50 次」的问题（根因：`src/core/lessons/gateway.ts:195` 无 Jev 时 Gate C 恒返回 `add`）。
-- [ ] **web 界面**（设计已定，见 [规格](docs/superpowers/specs/2026-11-04-trove-web-ui.md)）：`trove web` 起本地服务 + `web/` 独立 React 前端，五个页签（总览 / 会话 / 沉淀 / 技能 / 用量），v1 内容只读，只提供同步与 daemon 运维操作
+- [ ] **sessions 检索的中文召回**：`src/core/search/tokenize.ts` 的 CJK bigram 拼成 phrase、term 间 AND，导致多字中文自然语言查询落空。方案 §5.4 实测 qmd 混合管线 hit@3 与「只把 bigram 改成 OR」的打平（8/8），但单条代价 15~37s vs <0.5s —— **sessions 侧改 FTS 的 OR 放宽更划算，不要接 qmd**。lessons 侧已在 #23 换 qmd。
+- [ ] **检索侧按 `scope` 过滤**：`scope`（项目隔离）目前只在写侧计数生效（`capacity.ts` / `curator.ts`），检索侧（`qmd.ts` 的 5 个 collection、`search/service.ts`）完全不过滤 —— 写侧隔离、读侧失效。对应方案 P2。
+- [ ] **学习队列积压与停滞告警**：本机实测 `learn.db` 有 150 条 queued 且最早一条停在 2026-11-05。需要 (a) `learn` 循环在「队列非空但连续 N 轮无进展」时告警并写进 `trove learn status`；(b) `trove learn --drain` 批量排空入口。
+- [ ] **codex 会话接入 learn 队列**：`src/adapters/index.ts` 的 codex adapter 缺 `sessionKeyOf`（会话 id 内容派生，文件名推不出），`changedSessions` 会落 relPath 形 key 并在 learn 里 fail。待有 codex 数据时按 `group.codexSessionOf` 读内容对齐。
+- [ ] **拆分 `src/cli.ts`（2192 行 / 34 个命令）**：先把 `learn` 相关的 11 个子命令（`cmdLearnList/Migrate/Extract/Memo/Recent/Why/Status/Curator/Pause/Retry`）拆到 `src/cli/learn.ts`。
+- [ ] **合并 PR #25 前补检索回归对比**：云端（阿里百炼）召回纯靠向量，不含 qmd 的查询扩展 / HyDE / 重排，精确标识符（报错码、参数、ID）命中率低于原 FTS 兜底；且该 PR 删了 lessons 的 FTS5 却保留 sessions 的 FTS5，形成双轨不一致。用现成的 `scripts/retrieval-regression.mjs` 跑云端 vs 本地对比。
+- [ ] **lint / format**：项目没有任何 eslint / prettier / biome 配置，风格靠人守。至少给 `pnpm typecheck` 之外补一个最小 lint。
+- [x] **检索层换 qmd + Qwen3-Embedding-0.6B**（见 [诊断与改造方案](docs/superpowers/specs/2026-11-06-trove-learning-retrieval-upgrade.md) §7.1）：已由 #23 完成 —— 删除 bge（`Xenova/bge-small-zh-v1.5`）与 `@huggingface/transformers` 依赖，`searchLessons()` 换成 qmd 完整管线（BM25 + 向量 + 查询扩展 + HyDE + 重排）。注意模型下载须带 `HF_ENDPOINT=https://hf-mirror.com`。
+- [x] **web 界面**（见 [规格](docs/superpowers/specs/2026-11-04-trove-web-ui.md)）：已由 #19 完成 —— `trove web` 起本地服务 + `web/` 独立 React 前端，五个页签（总览 / 会话 / 沉淀 / 技能 / 用量），v1 内容只读，只提供同步与 daemon 运维操作。
+- [x] ~~**学习沉淀三层改造**~~（见 [诊断与改造方案](docs/superpowers/specs/2026-11-06-trove-learning-retrieval-upgrade.md) §6）：**路线已作废** —— #21 的「记忆沉淀 v2」与 `939294e` 的「单次结构化分析取代 v2 判定链」已用另一条路线解决「同一主题重复沉淀 50 次」（原三层改造的根因 `lessons/gateway.ts` 无 Jev 时 Gate C 恒返回 `add`，该文件已随判定链删除）。L0/L1/L2 分层若要继续，按当前 `pipeline.ts` 的单次分析结构重新设计。
 - [x] 参考 [分层架构方案](https://feishu.doubao.com/docx/WoxKd0aeroqotexUoLgctahHnxI) 完成分层架构改造与验证
 - [x] 优化 sync 策略：远端模式改为可配置（可选），不配置时仅做本地 `.trove` 目录同步（需相应改动 `init` / `sync` 等逻辑流程）
 - [x] `config` 配置改为与 `init` 一致的交互式（现有 `config set` 可保留）

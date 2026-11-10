@@ -1,5 +1,10 @@
 # trove Lessons 层 · 任务计划拆分
 
+> 🗄️ **归档（2026-11-11）**：本文档描述的 v2 十阶段判定链**已被实现取代**，保留作历史设计与验收口径参考。
+> 涉及 Gate A/B/C、摘要、分类、轨迹、质量打分、inbox 人工审核的章节**请以代码为准**（`src/core/lessons/pipeline.ts` + `ops.ts`）。
+> 本文档引用的多个源文件已随重构删除（`lessons/v2.ts`、`lessons/gateway.ts`、`lessons/extract.ts`、`lessons/graph.ts`、`lessons/embedding.ts`、`lessons/vector-index.ts`、`lessons/vector-sync.ts`），正文中对这些路径的描述已失效。
+> 当前待办见仓库根目录 [`TODO.md`](../../TODO.md)。
+
 > 对应方案文档：飞书《trove Lessons 层设计方案》（`feishu.doubao.com/docx/UOvrdUkTjoqjgFx0bSMcL2npnRe`，revision 24）
 > 本文件用途：把「从 AI 会话自动沉淀可复用经验」这个大需求拆成**可核对目标、可验证达标**的阶段任务，供后续持续开发时逐阶段核对与验收。
 > 阅读方式：先看「阶段总览」了解全貌 → 按顺序做，每个阶段做完先过它自己的「验收标准」→ 全部做完过「全局端到端验收」。

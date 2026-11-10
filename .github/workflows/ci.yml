@@ -1,0 +1,71 @@
+name: CI
+
+# PR 门禁:之前只有 release.yml(on: push main),PR 上没有任何 CI ——
+# typecheck / vitest / web build 都没跑过,e2e 也从未在 CI 执行。
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    # 每天一次跑浏览器 e2e
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: typecheck
+        run: pnpm typecheck
+
+      - name: web typecheck
+        run: pnpm --dir web typecheck
+
+      # build 必须在 test 之前:tests/build-esm.test.ts 冒烟真实构建产物,
+      # 没有 dist/ 会 ERR_MODULE_NOT_FOUND。
+      - name: build
+        run: pnpm build
+
+      - name: test
+        run: pnpm test
+
+  e2e:
+    # 浏览器 e2e:每天一次 + 手动触发,不上 PR 门禁(要装浏览器,太慢)。
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm exec playwright install --with-deps chromium
+
+      - name: e2e
+        run: pnpm test:e2e

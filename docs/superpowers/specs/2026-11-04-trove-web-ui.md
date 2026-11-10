@@ -1,8 +1,12 @@
 # Trove Web 界面
 
 - 日期：2026-11-04
-- 状态：设计已定，待实现
+- 状态：**已实现**（PR #19，2026-11-04）
 - 关联 ADR：[0001](../../adr/0001-web-frontend-independent-project.md) · [0002](../../adr/0002-web-sync-reuses-vault-lock.md) · [0003](../../adr/0003-web-reads-local-vault-only.md)
+
+> 实现位置：`src/server/**`（本地只读 HTTP 服务）+ `web/**`（React 前端）。
+> 2026-11-11 核对：五个页签（总览 / 会话 / 沉淀 / 技能 / 用量）与「v1 只读 + 同步与 daemon 运维操作」均已落地；
+> 页面实际为 7 个（另加 健康 / 会话详情 两页，见 `web/src/pages/`）。
 
 ## 1. 目标与边界
 

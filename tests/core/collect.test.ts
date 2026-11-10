@@ -92,6 +92,41 @@ describe('collect(文件源)', () => {
     expect(await readFile(join(vault, 'raw/dev1/claude-code/old.jsonl'), 'utf8')).toBe('old');
   });
 
+  it('非会话资产不进 learn 队列:只有 sessionPatterns 命中的文件算会话', async () => {
+    const src = await tmp('trove-c-src-');
+    const vault = await tmp('trove-c-vault-');
+    await mkdir(join(src, 'projects'), { recursive: true });
+    await writeFile(join(src, 'projects/sess.jsonl'), 'session');
+    await writeFile(join(src, 'history.jsonl'), 'not-a-session');
+
+    const adapter: Adapter = {
+      kind: 'files',
+      id: 'claude-code',
+      displayName: 'Claude Code',
+      source: {
+        id: 'claude-code',
+        displayName: 'Claude Code',
+        root: src,
+        patterns: ['projects/**/*.jsonl', 'history.jsonl'],
+        exclusions: [],
+        sessionPatterns: ['projects/**/*.jsonl'],
+        sessionKeyOf: (rel) => rel.replace(/\.jsonl$/, ''),
+      },
+    };
+    const r = await collect({
+      adapters: [adapter],
+      deviceId: 'dev1',
+      vaultRoot: vault,
+      state: emptyState(),
+      cutoff: 0,
+    });
+
+    // 两个文件都归档了(资产层仍要收 history.jsonl)
+    expect(r.archived).toBe(2);
+    // 但只有会话进 learn 队列
+    expect(r.changedSessions).toEqual(['claude-code:projects/sess']);
+  });
+
   it('会话时间取同目录最大 mtime:窗口内的会话会带上同目录旧附件', async () => {
     const src = await tmp('trove-c-src-');
     const vault = await tmp('trove-c-vault-');
